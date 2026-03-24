@@ -1,0 +1,1834 @@
+<?php
+// ============================================================
+//  LGU ENRILE HRMS — HR Documents Management
+//  File: Admin/documents.php
+// ============================================================
+session_start();
+
+if (empty($_SESSION['user_id'])) {
+    header('Location: ../Login/login.php'); exit();
+}
+$allowedRoles = ['admin', 'hr_staff'];
+if (!in_array($_SESSION['user_role'] ?? '', $allowedRoles)) {
+    header('Location: ../Employee/Employee_portal.php'); exit();
+}
+
+require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../config/csrf.php';
+
+// Upload directory — create if not exists
+define('UPLOAD_DIR', __DIR__ . '/../uploads/documents/');
+define('UPLOAD_URL', '../uploads/documents/');
+if (!is_dir(UPLOAD_DIR)) {
+    mkdir(UPLOAD_DIR, 0755, true);
+}
+
+// Allowed file types
+$allowedMimes = [
+    'application/pdf'                                                => 'pdf',
+    'application/msword'                                             => 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
+    'application/vnd.ms-excel'                                       => 'xls',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx',
+    'image/jpeg'                                                     => 'jpg',
+    'image/png'                                                      => 'png',
+    'image/gif'                                                      => 'gif',
+];
+$maxFileSize = 10 * 1024 * 1024; // 10 MB
+
+// ════════════════════════════════════════════════════════════
+//  AJAX HANDLER
+// ════════════════════════════════════════════════════════════
+$action = $_GET['action'] ?? $_POST['action'] ?? '';
+
+if ($action) {
+    header('Content-Type: application/json');
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') { csrf_verify(true); }
+    try {
+        switch ($action) {
+
+            // ── STATS ─────────────────────────────────────────
+            case 'stats':
+                $s = $pdo->query("
+                    SELECT
+                        COUNT(*)                              AS total_docs,
+                        COUNT(DISTINCT employee_id)          AS total_employees,
+                        SUM(file_size)                        AS total_size,
+                        COUNT(DISTINCT document_type)        AS total_types
+                    FROM documents
+                ")->fetch();
+                echo json_encode(['success' => true, 'data' => $s]);
+                break;
+
+            // ── LIST ──────────────────────────────────────────
+            case 'list':
+                $search  = trim($_GET['search']  ?? '');
+                $type    = trim($_GET['type']    ?? '');
+                $empId   = (int)($_GET['emp']    ?? 0);
+                $page    = max(1, (int)($_GET['page'] ?? 1));
+                $perPage = 15;
+                $offset  = ($page - 1) * $perPage;
+
+                $where  = [];
+                $params = [];
+
+                if ($search) {
+                    $where[]  = "(d.file_name LIKE ? OR d.document_type LIKE ? OR CONCAT(e.first_name,' ',e.last_name) LIKE ?)";
+                    $s = "%$search%";
+                    $params = array_merge($params, [$s, $s, $s]);
+                }
+                if ($type)  { $where[] = 'd.document_type = ?'; $params[] = $type; }
+                if ($empId) { $where[] = 'd.employee_id = ?';   $params[] = $empId; }
+
+                $wSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
+
+                $cnt = $pdo->prepare("
+                    SELECT COUNT(*) FROM documents d
+                    LEFT JOIN employees e ON e.employee_id = d.employee_id
+                    $wSql
+                ");
+                $cnt->execute($params);
+                $total = (int)$cnt->fetchColumn();
+
+                $stmt = $pdo->prepare("
+                    SELECT d.*,
+                        CONCAT(e.first_name,' ',e.last_name) AS employee_name,
+                        e.employee_code,
+                        dep.name AS department_name,
+                        u.email  AS uploader_email
+                    FROM documents d
+                    LEFT JOIN employees  e   ON e.employee_id   = d.employee_id
+                    LEFT JOIN departments dep ON dep.department_id = e.department_id
+                    LEFT JOIN user_accounts u ON u.user_id      = d.uploaded_by
+                    $wSql
+                    ORDER BY d.uploaded_at DESC
+                    LIMIT $perPage OFFSET $offset
+                ");
+                $stmt->execute($params);
+
+                echo json_encode([
+                    'success' => true,
+                    'data'    => $stmt->fetchAll(),
+                    'total'   => $total,
+                    'pages'   => ceil($total / $perPage),
+                    'page'    => $page,
+                ]);
+                break;
+
+            // ── UPLOAD ────────────────────────────────────────
+            case 'upload':
+                if (empty($_FILES['file'])) {
+                    echo json_encode(['success' => false, 'message' => 'No file uploaded.']); break;
+                }
+
+                $file       = $_FILES['file'];
+                $empId      = (int)($_POST['employee_id']   ?? 0);
+                $docType    = trim($_POST['document_type']  ?? '');
+
+                if (!$empId || !$docType) {
+                    echo json_encode(['success' => false, 'message' => 'Employee and document type are required.']); break;
+                }
+
+                // Validate employee exists
+                $empCheck = $pdo->prepare("SELECT employee_id FROM employees WHERE employee_id = ?");
+                $empCheck->execute([$empId]);
+                if (!$empCheck->fetch()) {
+                    echo json_encode(['success' => false, 'message' => 'Employee not found.']); break;
+                }
+
+                if ($file['error'] !== UPLOAD_ERR_OK) {
+                    echo json_encode(['success' => false, 'message' => 'Upload error code: ' . $file['error']]); break;
+                }
+                if ($file['size'] > $maxFileSize) {
+                    echo json_encode(['success' => false, 'message' => 'File too large. Maximum size is 10MB.']); break;
+                }
+
+                $finfo    = finfo_open(FILEINFO_MIME_TYPE);
+                $mimeType = finfo_file($finfo, $file['tmp_name']);
+                finfo_close($finfo);
+
+                if (!array_key_exists($mimeType, $allowedMimes)) {
+                    echo json_encode(['success' => false, 'message' => 'File type not allowed. Accepted: PDF, DOC, DOCX, XLS, XLSX, JPG, PNG.']); break;
+                }
+
+                // Sanitize original name
+                $origName  = preg_replace('/[^a-zA-Z0-9._-]/', '_', basename($file['name']));
+                $ext       = $allowedMimes[$mimeType];
+                $unique    = time() . '_' . bin2hex(random_bytes(6)) . '.' . $ext;
+                $destPath  = UPLOAD_DIR . $unique;
+
+                if (!move_uploaded_file($file['tmp_name'], $destPath)) {
+                    echo json_encode(['success' => false, 'message' => 'Failed to save file. Check folder permissions.']); break;
+                }
+
+                $pdo->prepare("
+                    INSERT INTO documents (employee_id, document_type, file_name, file_path, file_size, uploaded_by, uploaded_at)
+                    VALUES (?, ?, ?, ?, ?, ?, NOW())
+                ")->execute([$empId, $docType, $origName, UPLOAD_URL . $unique, $file['size'], $_SESSION['user_id']]);
+
+                echo json_encode(['success' => true, 'message' => 'Document uploaded successfully.']);
+                break;
+
+            // ── DELETE ────────────────────────────────────────
+            case 'delete':
+                $id   = (int)($_POST['id'] ?? 0);
+                $stmt = $pdo->prepare("SELECT file_path FROM documents WHERE document_id = ?");
+                $stmt->execute([$id]);
+                $row  = $stmt->fetch();
+
+                if (!$row) { echo json_encode(['success' => false, 'message' => 'Document not found.']); break; }
+
+                // Delete physical file
+                $absPath = __DIR__ . '/' . ltrim(str_replace('../', '', $row['file_path']), '/');
+                if (file_exists($absPath)) @unlink($absPath);
+
+                $pdo->prepare("DELETE FROM documents WHERE document_id = ?")->execute([$id]);
+                echo json_encode(['success' => true, 'message' => 'Document deleted.']);
+                break;
+
+            // ── EMPLOYEES LIST (for dropdown) ──────────────────
+            case 'employees':
+                $search = trim($_GET['q'] ?? '');
+                $stmt   = $pdo->prepare("
+                    SELECT employee_id,
+                           CONCAT(first_name,' ',last_name) AS name,
+                           employee_code, position_title
+                    FROM employees
+                    WHERE employment_status = 'Active'
+                      AND (first_name LIKE ? OR last_name LIKE ? OR employee_code LIKE ?)
+                    ORDER BY last_name ASC
+                    LIMIT 30
+                ");
+                $s = "%$search%";
+                $stmt->execute([$s, $s, $s]);
+                echo json_encode(['success' => true, 'data' => $stmt->fetchAll()]);
+                break;
+
+            // ── DOCUMENT TYPES LIST ────────────────────────────
+            case 'doc_types':
+                $types = $pdo->query("SELECT DISTINCT document_type FROM documents ORDER BY document_type")->fetchAll(PDO::FETCH_COLUMN);
+                echo json_encode(['success' => true, 'data' => $types]);
+                break;
+
+            // ── PENDING COUNT ─────────────────────────────────
+            case 'pending_count':
+                $c = $pdo->query("SELECT COUNT(*) FROM leave_requests WHERE status='Pending'")->fetchColumn();
+                echo json_encode(['count' => (int)$c]);
+                break;
+
+            default:
+                echo json_encode(['success' => false, 'message' => 'Unknown action.']);
+        }
+    } catch (PDOException $e) {
+        error_log('[HRMS] documents.php: ' . $e->getMessage());
+        echo json_encode(['success' => false, 'message' => 'A database error occurred.']);
+    }
+    exit();
+}
+
+$adminName = ucwords($_SESSION['user_name'] ?? 'Administrator');
+$roleLabels = ['admin' => 'Super Admin', 'hr_staff' => 'HR Staff'];
+$roleLabel  = $roleLabels[$_SESSION['user_role']] ?? 'Admin';
+?>
+
+<?php
+// ── Notifications (topbar bell) ──────────────────────────────────────────
+$notifCount = 0; $notifications = [];
+if (isset($pdo)) { try {
+    $pendingReqs = $pdo->query("SELECT lr.request_id, CONCAT(e.first_name,' ',e.last_name) AS emp_name,
+        lt.name AS leave_type, lr.days_requested, lr.filed_at
+        FROM leave_requests lr JOIN employees e ON e.employee_id=lr.employee_id
+        JOIN leave_types lt ON lt.leave_type_id=lr.leave_type_id
+        WHERE lr.status='Pending' ORDER BY lr.filed_at DESC LIMIT 10")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($pendingReqs as $r) { $notifications[]=['icon'=>'📋','color'=>'#f59e0b','title'=>'Leave Request',
+        'body'=>htmlspecialchars($r['emp_name']).' filed '.(int)$r['days_requested'].' day(s) of '.htmlspecialchars($r['leave_type']),
+        'time'=>$r['filed_at'],'link'=>'leave_requests.php']; }
+    try { $expC=$pdo->query("SELECT CONCAT(e.first_name,' ',e.last_name) AS emp_name,
+        DATEDIFF(c.end_date,CURDATE()) AS dl FROM contracts c JOIN employees e ON e.employee_id=c.employee_id
+        WHERE c.status='Active' AND c.end_date IS NOT NULL AND DATEDIFF(c.end_date,CURDATE()) BETWEEN 0 AND 30
+        ORDER BY c.end_date ASC LIMIT 5")->fetchAll(PDO::FETCH_ASSOC);
+        foreach($expC as $c){$dl=(int)$c['dl'];$notifications[]=['icon'=>'📝','color'=>'#ef4444','title'=>'Contract Expiring',
+        'body'=>htmlspecialchars($c['emp_name'])."'s contract expires in $dl day".($dl===1?'':'s'),'time'=>null,'link'=>'contracts.php'];}
+    } catch(Exception $ex){}
+    $notifCount=count($notifications);
+} catch(Exception $ex){ $notifCount=0; } }
+if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time()-strtotime($dt);if($d<60)return 'Just now';if($d<3600)return (int)($d/60).'m ago';if($d<86400)return (int)($d/3600).'h ago';if($d<172800)return 'Yesterday';return date('M j',strtotime($dt));}}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <?= csrf_meta() ?>
+  <title>HR Documents | LGU Enrile HRMS</title>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root{--primary:#2563eb;--primary-dark:#1e40af;--accent:#22c55e;--accent-dark:#15803d;--secondary:#0f172a;--sidebar-w:265px;--topbar-h:68px;--gray-50:#f8fafc;--gray-100:#f1f5f9;--gray-200:#e2e8f0;--gray-400:#94a3b8;--gray-600:#475569;--gray-800:#1e293b;--white:#ffffff;--shadow-sm:0 1px 4px rgba(0,0,0,0.07);--shadow-md:0 4px 18px rgba(0,0,0,0.11);--shadow-lg:0 8px 32px rgba(0,0,0,0.16);--radius:14px;--radius-sm:9px;}
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:'Nunito',sans-serif;background:var(--gray-100);color:var(--secondary);display:flex;min-height:100vh;}
+
+    /* SIDEBAR */
+    .sidebar{width:var(--sidebar-w);background:linear-gradient(180deg,#2563eb 0%,#1e40af 55%,#22c55e 100%);display:flex;flex-direction:column;position:fixed;top:0;left:0;height:100vh;z-index:200;transition:transform 0.3s;box-shadow:4px 0 28px rgba(0,0,0,0.20);}
+    .sidebar-brand{padding:22px 20px 18px;display:flex;align-items:center;gap:12px;border-bottom:1px solid rgba(255,255,255,0.15);}
+    .brand-logo{width:44px;height:44px;border-radius:50%;object-fit:cover;border:2.5px solid rgba(255,255,255,0.70);}
+    .brand-text h2{font-family:'Playfair Display',serif;font-size:1rem;color:#fff;line-height:1.2;}
+    .brand-text span{font-size:0.68rem;color:rgba(255,255,255,0.60);font-weight:700;text-transform:uppercase;letter-spacing:0.10em;}
+    .sidebar-nav{flex:1;padding:14px 12px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,0.20) transparent;}
+    .nav-label{font-size:0.63rem;font-weight:800;color:rgba(255,255,255,0.38);text-transform:uppercase;letter-spacing:0.16em;padding:10px 10px 5px;margin-top:6px;}
+    .nav-item{display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:var(--radius-sm);color:rgba(255,255,255,0.75);text-decoration:none;font-size:0.875rem;font-weight:600;transition:all 0.2s;margin-bottom:2px;position:relative;}
+    .nav-item:hover{background:rgba(255,255,255,0.13);color:#fff;}
+    .nav-item.active{background:rgba(255,255,255,0.22);color:#fff;}
+    .nav-item.active::before{content:'';position:absolute;left:0;top:20%;bottom:20%;width:3px;border-radius:2px;background:#fff;}
+    .nav-icon{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:0.95rem;background:rgba(255,255,255,0.10);flex-shrink:0;}
+    .nav-item.active .nav-icon{background:rgba(255,255,255,0.25);}
+    .nav-badge{margin-left:auto;background:#ef4444;color:white;font-size:0.60rem;font-weight:800;padding:2px 6px;border-radius:20px;}
+    .sidebar-footer{padding:14px 12px;border-top:1px solid rgba(255,255,255,0.13);}
+    .sidebar-user{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--radius-sm);background:rgba(255,255,255,0.10);}
+    .user-avatar{width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,0.25);border:2px solid rgba(255,255,255,0.50);display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;font-size:0.80rem;flex-shrink:0;}
+    .user-info{flex:1;min-width:0;}
+    .user-info strong{display:block;font-size:0.82rem;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .user-info span{font-size:0.68rem;color:rgba(255,255,255,0.52);}
+
+    /* MAIN */
+    .main{margin-left:var(--sidebar-w);flex:1;display:flex;flex-direction:column;}
+    .topbar{height:var(--topbar-h);background:linear-gradient(135deg,#2563eb 0%,#1e40af 50%,#22c55e 100%);display:flex;align-items:center;padding:0 28px;gap:16px;position:sticky;top:0;z-index:100;box-shadow:0 2px 16px rgba(37,99,235,0.30);}
+    .menu-toggle{display:none;background:none;border:none;font-size:1.4rem;cursor:pointer;color:rgba(255,255,255,0.85);padding:4px;}
+    .topbar-title{flex:1;}
+    .topbar-title h1{font-size:1.20rem;font-weight:800;color:#fff;font-family:'Playfair Display',serif;}
+    .topbar-title p{font-size:0.76rem;color:rgba(255,255,255,0.70);margin-top:1px;}
+    .topbar-actions{display:flex;align-items:center;gap:8px;}
+    .topbar-btn{position:relative;width:38px;height:38px;border-radius:50%;border:1px solid rgba(255,255,255,0.25);background:rgba(255,255,255,0.15);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:1rem;color:#fff;transition:all 0.2s;}
+    .topbar-btn:hover{background:rgba(255,255,255,0.28);}
+    .notif-badge{position:absolute;top:-2px;right:-2px;width:16px;height:16px;background:#ef4444;border-radius:50%;font-size:0.58rem;color:white;font-weight:800;display:flex;align-items:center;justify-content:center;border:2px solid rgba(255,255,255,0.3);}
+    .content{padding:24px 28px;flex:1;}
+
+    /* STAT CARDS */
+    .stat-row{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:22px;}
+    .stat-card{background:var(--white);border-radius:var(--radius);padding:18px 20px;border:1.5px solid var(--gray-200);box-shadow:var(--shadow-sm);position:relative;overflow:hidden;animation:fadeIn 0.4s ease both;transition:transform 0.2s,box-shadow 0.2s;}
+    .stat-card:hover{transform:translateY(-3px);box-shadow:var(--shadow-md);}
+    .stat-card::before{content:'';position:absolute;top:0;left:0;right:0;height:4px;border-radius:var(--radius) var(--radius) 0 0;}
+    .stat-card.blue::before  {background:linear-gradient(90deg,#2563eb,#60a5fa);}
+    .stat-card.green::before {background:linear-gradient(90deg,#22c55e,#86efac);}
+    .stat-card.purple::before{background:linear-gradient(90deg,#a855f7,#d8b4fe);}
+    .stat-card.orange::before{background:linear-gradient(90deg,#f59e0b,#fcd34d);}
+    .stat-icon{width:44px;height:44px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:1.2rem;margin-bottom:12px;}
+    .stat-card.blue   .stat-icon{background:#dbeafe;}
+    .stat-card.green  .stat-icon{background:#dcfce7;}
+    .stat-card.purple .stat-icon{background:#f3e8ff;}
+    .stat-card.orange .stat-icon{background:#fef3c7;}
+    .stat-value{font-size:2rem;font-weight:800;color:var(--gray-800);line-height:1;margin-bottom:3px;}
+    .stat-label{font-size:0.78rem;color:var(--gray-400);font-weight:600;}
+
+    /* PANEL */
+    .panel{background:var(--white);border-radius:var(--radius);border:1.5px solid var(--gray-200);box-shadow:var(--shadow-sm);overflow:hidden;animation:fadeIn 0.4s 0.1s ease both;}
+    .panel-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 13px;border-bottom:1px solid var(--gray-100);flex-wrap:wrap;gap:10px;}
+    .panel-title{font-size:0.92rem;font-weight:800;color:var(--gray-800);}
+    .panel-sub{font-size:0.72rem;color:var(--gray-400);margin-top:1px;}
+
+    /* TOOLBAR */
+    .toolbar{display:flex;align-items:center;gap:10px;padding:12px 18px;background:var(--gray-50);border-bottom:1px solid var(--gray-100);flex-wrap:wrap;}
+    .search-box{display:flex;align-items:center;gap:8px;background:var(--white);border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);padding:8px 13px;flex:1;min-width:180px;max-width:280px;}
+    .search-box:focus-within{border-color:var(--primary);}
+    .search-box input{border:none;outline:none;font-family:'Nunito',sans-serif;font-size:0.84rem;width:100%;background:transparent;color:var(--gray-800);}
+    .search-box input::placeholder{color:var(--gray-400);}
+    .filter-sel{padding:8px 12px;border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);font-family:'Nunito',sans-serif;font-size:0.84rem;color:var(--gray-600);background:var(--white);cursor:pointer;outline:none;min-width:160px;}
+    .filter-sel:focus{border-color:var(--primary);}
+    .toolbar-right{margin-left:auto;display:flex;gap:8px;}
+    .action-btn{display:flex;align-items:center;gap:6px;padding:8px 16px;border-radius:var(--radius-sm);font-family:'Nunito',sans-serif;font-size:0.82rem;font-weight:700;cursor:pointer;transition:all 0.2s;border:none;white-space:nowrap;}
+    .action-btn.primary{background:linear-gradient(135deg,var(--primary),var(--primary-dark));color:white;box-shadow:0 2px 8px rgba(37,99,235,0.28);}
+    .action-btn.primary:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(37,99,235,0.36);}
+    .action-btn.outline{background:var(--white);border:1.5px solid var(--gray-200);color:var(--gray-600);}
+    .action-btn.outline:hover{border-color:var(--primary);color:var(--primary);background:#eff6ff;}
+
+    /* TABLE */
+    .table-wrap{overflow-x:auto;}
+    table{width:100%;border-collapse:collapse;font-size:0.82rem;}
+    thead tr{background:var(--gray-50);}
+    th{padding:10px 14px;text-align:left;font-size:0.68rem;font-weight:800;color:var(--gray-400);text-transform:uppercase;letter-spacing:0.07em;border-bottom:1px solid var(--gray-200);white-space:nowrap;}
+    td{padding:12px 14px;border-bottom:1px solid var(--gray-100);color:var(--gray-800);vertical-align:middle;}
+    tr:last-child td{border-bottom:none;}
+    tbody tr:hover{background:var(--gray-50);}
+
+    .emp-cell{display:flex;align-items:center;gap:10px;}
+    .emp-av{width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,var(--primary),#60a5fa);display:flex;align-items:center;justify-content:center;font-size:0.68rem;font-weight:800;color:white;flex-shrink:0;}
+    .emp-name{font-weight:700;font-size:0.82rem;}
+    .emp-meta{font-size:0.68rem;color:var(--gray-400);}
+
+    /* FILE ICON */
+    .file-icon{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:1.1rem;flex-shrink:0;}
+    .file-cell{display:flex;align-items:center;gap:10px;}
+    .file-name{font-weight:700;font-size:0.82rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .file-size{font-size:0.68rem;color:var(--gray-400);}
+
+    .doc-badge{display:inline-block;padding:3px 10px;border-radius:6px;font-size:0.68rem;font-weight:800;}
+
+    .tbl-action{display:flex;gap:4px;}
+    .ta-btn{width:28px;height:28px;border-radius:7px;border:1.5px solid var(--gray-200);background:var(--white);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0.78rem;transition:all 0.2s;text-decoration:none;color:inherit;}
+    .ta-btn.view:hover{border-color:var(--primary);background:#eff6ff;}
+    .ta-btn.dl:hover  {border-color:#22c55e;background:#dcfce7;}
+    .ta-btn.del:hover {border-color:#ef4444;background:#fee2e2;}
+
+    /* PAGINATION */
+    .pagination{display:flex;align-items:center;justify-content:space-between;padding:12px 18px;border-top:1px solid var(--gray-100);flex-wrap:wrap;gap:8px;}
+    .page-info{font-size:0.78rem;color:var(--gray-400);font-weight:600;}
+    .page-btns{display:flex;gap:4px;}
+    .pg-btn{width:30px;height:30px;border-radius:7px;border:1.5px solid var(--gray-200);background:var(--white);cursor:pointer;font-size:0.78rem;font-weight:700;color:var(--gray-600);display:flex;align-items:center;justify-content:center;transition:all 0.2s;}
+    .pg-btn:hover{border-color:var(--primary);color:var(--primary);}
+    .pg-btn.active{background:var(--primary);border-color:var(--primary);color:white;}
+    .pg-btn:disabled{opacity:0.35;cursor:not-allowed;}
+
+    /* UPLOAD MODAL */
+    .modal-overlay{display:none;position:fixed;inset:0;background:rgba(15,23,42,0.55);z-index:500;align-items:center;justify-content:center;backdrop-filter:blur(4px);}
+    .modal-overlay.open{display:flex;}
+    .modal{background:var(--white);border-radius:var(--radius);box-shadow:var(--shadow-lg);width:92%;max-width:520px;max-height:92vh;overflow-y:auto;animation:modalIn 0.3s cubic-bezier(0.34,1.4,0.64,1) both;}
+    .modal.sm{max-width:420px;}
+    @keyframes modalIn{from{opacity:0;transform:scale(0.88) translateY(20px);}to{opacity:1;transform:scale(1) translateY(0);}}
+    .modal-header{display:flex;align-items:center;justify-content:space-between;padding:20px 24px 16px;background:linear-gradient(135deg,#2563eb,#1e40af);border-radius:var(--radius) var(--radius) 0 0;}
+    .modal-header.danger{background:linear-gradient(135deg,#ef4444,#dc2626);}
+    .modal-header h3{font-size:1.05rem;font-weight:800;color:#fff;font-family:'Playfair Display',serif;}
+    .modal-header p{font-size:0.74rem;color:rgba(255,255,255,0.65);margin-top:2px;}
+    .modal-close{width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,0.18);border:none;color:#fff;font-size:1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+    .modal-close:hover{background:rgba(255,255,255,0.32);}
+    .modal-body{padding:22px 24px;}
+    .modal-footer{display:flex;justify-content:flex-end;gap:10px;padding:14px 24px 18px;border-top:1px solid var(--gray-100);}
+
+    /* FORM */
+    .fg{display:flex;flex-direction:column;gap:5px;margin-bottom:14px;}
+    .fg label{font-size:0.76rem;font-weight:700;color:var(--gray-600);}
+    .fg label .req{color:#ef4444;margin-left:2px;}
+    .fg input,.fg select{padding:9px 12px;border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);font-size:0.875rem;font-family:'Nunito',sans-serif;color:var(--gray-800);background:var(--white);outline:none;transition:border-color 0.2s;}
+    .fg input:focus,.fg select:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,0.10);}
+    .fg input.err,.fg select.err{border-color:#ef4444;}
+
+    /* DROP ZONE */
+    .drop-zone{border:2.5px dashed var(--gray-200);border-radius:var(--radius-sm);padding:28px;text-align:center;cursor:pointer;transition:all 0.2s;background:var(--gray-50);margin-bottom:14px;}
+    .drop-zone:hover,.drop-zone.dragover{border-color:var(--primary);background:#eff6ff;}
+    .drop-zone .dz-icon{font-size:2.4rem;margin-bottom:10px;display:block;}
+    .drop-zone p{font-size:0.84rem;color:var(--gray-600);font-weight:600;}
+    .drop-zone span{font-size:0.72rem;color:var(--gray-400);}
+    .drop-zone input[type=file]{display:none;}
+    .file-preview{display:none;align-items:center;gap:12px;padding:12px 14px;background:var(--gray-50);border-radius:var(--radius-sm);border:1.5px solid var(--gray-200);margin-bottom:14px;}
+    .file-preview.show{display:flex;}
+    .fp-icon{font-size:1.6rem;}
+    .fp-info{flex:1;min-width:0;}
+    .fp-name{font-weight:700;font-size:0.84rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .fp-size{font-size:0.72rem;color:var(--gray-400);}
+    .fp-clear{background:none;border:none;cursor:pointer;color:var(--gray-400);font-size:1rem;padding:4px;}
+    .fp-clear:hover{color:#ef4444;}
+
+    /* CONFIRM */
+    .confirm-body{padding:28px 24px;text-align:center;}
+    .confirm-icon{font-size:2.6rem;margin-bottom:12px;}
+    .confirm-body h4{font-size:1rem;font-weight:800;color:var(--gray-800);margin-bottom:6px;}
+    .confirm-body p{font-size:0.84rem;color:var(--gray-600);line-height:1.6;}
+
+    .btn{padding:9px 22px;border-radius:var(--radius-sm);font-family:'Nunito',sans-serif;font-size:0.875rem;font-weight:700;cursor:pointer;transition:all 0.2s;border:none;}
+    .btn-cancel{background:var(--white);border:1.5px solid var(--gray-200);color:var(--gray-600);}
+    .btn-cancel:hover{border-color:var(--gray-400);}
+    .btn-primary{background:linear-gradient(135deg,var(--primary),var(--primary-dark));color:white;}
+    .btn-primary:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(37,99,235,0.35);}
+    .btn-danger{background:linear-gradient(135deg,#ef4444,#dc2626);color:white;}
+    .btn-danger:hover{transform:translateY(-1px);}
+
+    /* TOAST */
+    .toast{position:fixed;bottom:28px;right:28px;padding:12px 20px;border-radius:var(--radius-sm);font-size:0.84rem;font-weight:700;box-shadow:var(--shadow-lg);z-index:900;color:white;animation:fadeIn 0.3s ease both;max-width:340px;}
+    .toast.success{background:linear-gradient(135deg,#22c55e,#16a34a);}
+    .toast.error  {background:linear-gradient(135deg,#ef4444,#dc2626);}
+    .toast.info   {background:linear-gradient(135deg,#2563eb,#1e40af);}
+
+    /* PROGRESS */
+    .upload-progress{display:none;margin-bottom:14px;}
+    .upload-progress.show{display:block;}
+    .progress-bar{height:8px;background:var(--gray-100);border-radius:20px;overflow:hidden;}
+    .progress-fill{height:100%;background:linear-gradient(90deg,var(--primary),#60a5fa);border-radius:20px;width:0%;transition:width 0.3s;}
+    .progress-label{font-size:0.72rem;color:var(--gray-400);margin-top:4px;text-align:center;}
+
+    .overlay-mob{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:150;}
+    .overlay-mob.show{display:block;}
+    .empty-row td{text-align:center;padding:40px;color:var(--gray-400);font-size:0.875rem;}
+
+    @keyframes fadeIn{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:translateY(0);}}
+    @media(max-width:1100px){.stat-row{grid-template-columns:repeat(2,1fr);}}
+    @media(max-width:768px){.sidebar{transform:translateX(-100%)}.sidebar.open{transform:translateX(0)}.main{margin-left:0}.menu-toggle{display:block}.content{padding:14px 12px}.topbar{padding:0 14px}.toolbar{gap:6px}.search-box{max-width:100%;flex:1 1 100%}.toolbar-right{margin-left:0;width:100%}.action-btn{flex:1;justify-content:center}}
+    @media(max-width:480px){.stat-row{grid-template-columns:1fr 1fr}}
+  
+    /* ── Logout Button ── */
+    .logout-btn {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin: 8px 10px 2px;
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: rgba(239,68,68,0.12);
+      border: 1.5px solid rgba(239,68,68,0.28);
+      color: #fca5a5;
+      font-size: .845rem;
+      font-weight: 700;
+      text-decoration: none;
+      transition: all .2s;
+      cursor: pointer;
+    }
+    .logout-btn:hover {
+      background: rgba(239,68,68,0.26);
+      border-color: rgba(239,68,68,0.55);
+      color: #fff;
+      transform: translateY(-1px);
+    }
+    .logout-icon { font-size: 1rem; }
+
+    /* ── Document Preview Modal ── */
+    .modal.preview { max-width: 860px; width: 96%; max-height: 96vh; display: flex; flex-direction: column; overflow: hidden; }
+    .preview-body  { flex: 1; padding: 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+    .preview-frame { flex: 1; width: 100%; border: none; min-height: 70vh; background: #1e293b; display: block; }
+    .preview-img   { max-width: 100%; max-height: 78vh; object-fit: contain; display: block; margin: 0 auto; padding: 16px; }
+    .preview-unsupported { display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 60px 30px; color: var(--gray-400); text-align: center; min-height: 260px; }
+    .preview-unsupported .pu-icon { font-size: 3rem; margin-bottom: 14px; opacity: .5; }
+    .preview-unsupported p { font-size: .875rem; font-weight: 600; line-height: 1.6; }
+    .preview-footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 22px;
+      border-top: 1px solid var(--gray-100); gap: 10px; flex-wrap: wrap; flex-shrink: 0; }
+
+  </style>
+</head>
+<body>
+
+<!-- SIDEBAR -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-brand">
+    <img src="../images/Enrile.png" alt="LGU Logo" class="brand-logo" onerror="this.style.display='none'"/>
+    <div class="brand-text"><h2>LGU Enrile</h2><span>HR Management System</span></div>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-label">Main</div>
+    <a class="nav-item" href="dashboard.php"><div class="nav-icon">🏠</div>Dashboard</a>
+    <div class="nav-label">Employee</div>
+    <a class="nav-item" href="employees.php"><div class="nav-icon">👥</div>Employees</a>
+    <a class="nav-item" href="departments.php"><div class="nav-icon">🏢</div>Departments</a>
+    <div class="nav-label">Leave</div>
+    <a class="nav-item" href="leave_requests.php"><div class="nav-icon">📋</div>Leave Requests<span class="nav-badge" id="sidebarBadge"></span></a>
+    <a class="nav-item" href="leave_types.php"><div class="nav-icon">📁</div>Leave Types</a>
+    <a class="nav-item" href="leave_balances.php"><div class="nav-icon">⚖️</div>Leave Balances</a>
+    <div class="nav-label">Documents</div>
+    <a class="nav-item active" href="documents.php"><div class="nav-icon">📄</div>HR Documents</a>
+    <a class="nav-item" href="pds_saln.php"><div class="nav-icon">🪪</div>PDS & SALN</a>
+    <a class="nav-item" href="service_records.php"><div class="nav-icon">📜</div>Service Records</a>
+    <a class="nav-item" href="contracts.php"><div class="nav-icon">📝</div>Contracts</a>
+    <div class="nav-label">System</div>
+    <a class="nav-item" href="reports.php"><div class="nav-icon">📊</div>Reports</a>
+    <a class="nav-item" href="announcements.php"><div class="nav-icon">📢</div>Announcements</a>
+    <a class="nav-item" href="archives.php"><div class="nav-icon">🗄️</div>Archives</a>
+    <a class="nav-item" href="user_accounts.php"><div class="nav-icon">🔐</div>User Accounts</a>
+    <a class="nav-item" href="settings.php"><div class="nav-icon">⚙️</div>Settings</a>
+  </nav>
+  <div class="sidebar-footer">
+    <div class="sidebar-user">
+      <div class="user-avatar"><?= strtoupper(substr($adminName,0,2)) ?></div>
+      <div class="user-info">
+        <strong><?= htmlspecialchars($adminName) ?></strong>
+        <span><?= htmlspecialchars($roleLabel) ?></span>
+      </div>
+    </div>
+  </div>
+</aside>
+<div class="overlay-mob" id="overlayMob" onclick="toggleSidebar()"></div>
+
+<!-- MAIN -->
+<div class="main">
+  <div class="topbar">
+    <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+    <div class="topbar-title">
+      <h1>HR Documents</h1>
+      <p>Upload and manage employee documents</p>
+    </div>
+    <div class="topbar-actions">
+        <div class="notif-wrap" id="adminNotifWrap">
+          <button class="notif-btn" onclick="toggleNotifPanel()" title="Notifications">
+            🔔<span class="notif-count <?= $notifCount > 0 ? 'show' : '' ?>" id="adminNotifCount"><?= $notifCount ?: '' ?></span>
+          </button>
+          <div class="notif-panel" id="adminNotifPanel">
+            <div class="notif-hd">
+              <div><div class="notif-hd-title">🔔 Notifications</div>
+              <div class="notif-hd-count"><?= $notifCount ?> item<?= $notifCount!==1?'s':'' ?></div></div>
+              <button class="notif-mark-all" onclick="clearNotifications()">Mark all read</button>
+            </div>
+            <div class="notif-list" id="adminNotifList">
+              <?php if(empty($notifications)):?>
+              <div class="notif-empty"><div class="ne-icon">🔔</div><p>All caught up!</p></div>
+              <?php else: foreach($notifications as $n):?>
+              <a class="notif-item unread" href="<?=htmlspecialchars($n['link'])?>" data-nid="<?=md5(($n['title']??'').($n['body']??'').($n['time']??''))?>" onclick="markNotifRead(this.getAttribute('data-nid'));applyReadState();">
+                <div class="notif-ico" style="background:<?=htmlspecialchars($n['color'])?>22;"><?=$n['icon']?></div>
+                <div class="notif-body">
+                  <div class="notif-title"><?=htmlspecialchars($n['title'])?></div>
+                  <div class="notif-text"><?=htmlspecialchars($n['body'])?></div>
+                  <?php if($n['time']):?><div class="notif-time"><?=timeAgo($n['time'])?></div><?php endif;?>
+                </div>
+              </a>
+              <?php endforeach; endif;?>
+            </div>
+            <div class="notif-footer"><a href="leave_requests.php">View all leave requests →</a></div>
+          </div>
+        </div>
+        <button class="topbar-btn" onclick="cwToggle()" style="position:relative;">💬<span id="cwBadge" style="position:absolute;top:-2px;right:-2px;width:16px;height:16px;background:#ef4444;border-radius:50%;font-size:.55rem;color:#fff;font-weight:800;display:none;align-items:center;justify-content:center;border:2px solid rgba(255,255,255,.3);"></span></button>
+        <div class="tb-profile-wrap" id="tbProfileWrap">
+          <div class="tb-profile-btn" onclick="toggleProfileDropdown()" title="Account"><?= strtoupper(substr($adminName,0,2)) ?></div>
+          <div class="tb-dropdown" id="tbDropdown">
+            <div class="tb-dd-header">
+              <div class="tb-dd-name"><?= htmlspecialchars($adminName) ?></div>
+              <div class="tb-dd-role"><?= htmlspecialchars($roleLabel) ?></div>
+            </div>
+            <a href="switch_to_employee.php" class="tb-dd-item" style="color:#d97706;">🔄 Switch to Employee Account</a>
+            <div class="tb-dd-divider"></div>
+            <a href="../Landingpage/logout.php" class="tb-dd-item danger" onclick="return confirm('Log out?')">🚪 Logout</a>
+          </div>
+        </div>
+      </div>
+  </div>
+
+  <div class="content">
+
+    <!-- STAT CARDS -->
+    <div class="stat-row">
+      <div class="stat-card blue"   style="animation-delay:.05s"><div class="stat-icon">📄</div><div class="stat-value" id="sc-total">—</div><div class="stat-label">Total Documents</div></div>
+      <div class="stat-card green"  style="animation-delay:.10s"><div class="stat-icon">👥</div><div class="stat-value" id="sc-emps">—</div><div class="stat-label">Employees with Docs</div></div>
+      <div class="stat-card purple" style="animation-delay:.15s"><div class="stat-icon">🗂️</div><div class="stat-value" id="sc-types">—</div><div class="stat-label">Document Types</div></div>
+      <div class="stat-card orange" style="animation-delay:.20s"><div class="stat-icon">💾</div><div class="stat-value" id="sc-size">—</div><div class="stat-label">Total Storage Used</div></div>
+    </div>
+
+    <!-- PANEL -->
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">📄 Document Records</div>
+          <div class="panel-sub" id="panelSub">Loading…</div>
+        </div>
+        <!-- <button class="action-btn primary" onclick="openUpload()">📤 Upload Document</button> -->
+      </div>
+
+      <!-- TOOLBAR -->
+      <div class="toolbar">
+        <div class="search-box">
+          <span style="color:var(--gray-400);">🔍</span>
+          <input type="text" id="searchInput" placeholder="Search documents…" oninput="debounceLoad()"/>
+        </div>
+        <select class="filter-sel" id="filterType" onchange="loadData()">
+          <option value="">All Types</option>
+        </select>
+        <div class="toolbar-right">
+          <button class="action-btn outline" onclick="clearFilters()">🔁 Reset</button>
+        </div>
+      </div>
+
+      <!-- TABLE -->
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Employee</th>
+              <th>Type</th>
+              <th>Size</th>
+              <th>Uploaded By</th>
+              <th>Date</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="tableBody">
+            <tr class="empty-row"><td colspan="7">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- PAGINATION -->
+      <div class="pagination">
+        <div class="page-info" id="pageInfo"></div>
+        <div class="page-btns" id="pageBtns"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- UPLOAD MODAL -->
+<div class="modal-overlay" id="modalUpload">
+  <div class="modal">
+    <div class="modal-header">
+      <div><h3>📤 Upload Document</h3><p>Attach a file to an employee record</p></div>
+      <button class="modal-close" onclick="closeModal('modalUpload')">✕</button>
+    </div>
+    <div class="modal-body">
+
+      <!-- Employee search -->
+      <div class="fg">
+        <label>Employee <span class="req">*</span></label>
+        <input type="text" id="empSearch" placeholder="Type name or code to search…" oninput="searchEmployees()" autocomplete="off"/>
+        <input type="hidden" id="empId"/>
+        <div id="empDropdown" style="position:relative;"></div>
+      </div>
+      <div id="empSelected" style="display:none;background:var(--gray-50);border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);padding:10px 12px;margin-top:-8px;margin-bottom:14px;font-size:0.82rem;font-weight:700;color:var(--gray-800);"></div>
+
+      <!-- Document type -->
+      <div class="fg">
+        <label>Document Type <span class="req">*</span></label>
+        <select id="uploadDocType">
+          <option value="">Select type…</option>
+          <option value="Appointment">Appointment</option>
+          <option value="Contract">Contract</option>
+          <option value="PDS">PDS (Personal Data Sheet)</option>
+          <option value="SALN">SALN</option>
+          <option value="Certificate">Certificate</option>
+          <option value="Medical Certificate">Medical Certificate</option>
+          <option value="Leave Form">Leave Form</option>
+          <option value="Payslip">Payslip</option>
+          <option value="ID">Government ID</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
+
+      <!-- Drop zone -->
+      <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()"
+           ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event)">
+        <span class="dz-icon">📂</span>
+        <p>Click to browse or drag & drop file here</p>
+        <span>PDF, DOC, DOCX, XLS, XLSX, JPG, PNG — Max 10MB</span>
+        <input type="file" id="fileInput" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.gif" onchange="handleFileSelect(event)"/>
+      </div>
+
+      <!-- File preview -->
+      <div class="file-preview" id="filePreview">
+        <span class="fp-icon" id="fpIcon"></span>
+        <div class="fp-info">
+          <div class="fp-name" id="fpName"></div>
+          <div class="fp-size" id="fpSize"></div>
+        </div>
+        <button class="fp-clear" onclick="clearFile()">✕</button>
+      </div>
+
+      <!-- Progress bar -->
+      <div class="upload-progress" id="uploadProgress">
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <div class="progress-label" id="progressLabel">Uploading…</div>
+      </div>
+
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-cancel" onclick="closeModal('modalUpload')">Cancel</button>
+      <button class="btn btn-primary" id="uploadBtn" onclick="submitUpload()">📤 Upload Document</button>
+    </div>
+  </div>
+</div>
+
+<!-- DELETE CONFIRM -->
+<div class="modal-overlay" id="modalDelete">
+  <div class="modal sm">
+    <div class="modal-header danger">
+      <div><h3>🗑️ Delete Document</h3><p>This cannot be undone</p></div>
+      <button class="modal-close" onclick="closeModal('modalDelete')">✕</button>
+    </div>
+    <div class="confirm-body">
+      <div class="confirm-icon">⚠️</div>
+      <h4>Delete this document?</h4>
+      <p id="deleteText"></p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-cancel" onclick="closeModal('modalDelete')">Cancel</button>
+      <button class="btn btn-danger" id="deleteBtn" onclick="confirmDelete()">🗑️ Yes, Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- PREVIEW MODAL -->
+<div class="modal-overlay" id="modalPreview">
+  <div class="modal preview">
+    <div class="modal-header">
+      <div>
+        <h3 id="previewTitle">Document Preview</h3>
+        <p id="previewSub">Viewing file</p>
+      </div>
+      <button class="modal-close" onclick="closePreview()">✕</button>
+    </div>
+    <div class="preview-body" id="previewBody">
+      <!-- content injected by JS -->
+    </div>
+    <div class="preview-footer">
+      <span class="preview-fname" id="previewFname"></span>
+      <a id="previewDownload" href="#" download class="btn btn-primary" style="font-size:.82rem;padding:7px 18px;">⬇️ Download</a>
+    </div>
+  </div>
+</div>
+
+<script>
+const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
+// ════════════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════════════
+let currentPage   = 1;
+let debounceTimer = null;
+let deleteTarget  = null;
+let selectedFile  = null;
+let selectedEmpId = null;
+let empSearchTimer = null;
+
+const FILE_ICONS = { pdf:'📄', doc:'📝', docx:'📝', xls:'📊', xlsx:'📊', jpg:'🖼️', jpeg:'🖼️', png:'🖼️', gif:'🖼️' };
+const DOC_COLORS = {
+  'Appointment': {bg:'#dbeafe',color:'#1e40af'},
+  'Contract'   : {bg:'#dcfce7',color:'#166534'},
+  'PDS'        : {bg:'#f3e8ff',color:'#6b21a8'},
+  'SALN'       : {bg:'#fef3c7',color:'#92400e'},
+  'Certificate': {bg:'#e0f2fe',color:'#0369a1'},
+  'Medical Certificate': {bg:'#fce7f3',color:'#9d174d'},
+  'Leave Form' : {bg:'#fef3c7',color:'#92400e'},
+  'Payslip'    : {bg:'#dcfce7',color:'#166534'},
+  'ID'         : {bg:'#f1f5f9',color:'#475569'},
+  'Other'      : {bg:'#f1f5f9',color:'#475569'},
+};
+
+// ════════════════════════════════════════════════════
+//  INIT
+// ════════════════════════════════════════════════════
+async function init() {
+  loadStats();
+  loadDocTypes();
+  loadData();
+}
+
+async function loadStats() {
+  const res  = await fetch('documents.php?action=stats');
+  const json = await res.json();
+  if (!json.success) return;
+  const d = json.data;
+  document.getElementById('sc-total').textContent = d.total_docs   || 0;
+  document.getElementById('sc-emps').textContent  = d.total_employees || 0;
+  document.getElementById('sc-types').textContent = d.total_types  || 0;
+  document.getElementById('sc-size').textContent  = formatSize(d.total_size || 0);
+}
+
+async function loadDocTypes() {
+  const res  = await fetch('documents.php?action=doc_types');
+  const json = await res.json();
+  if (!json.success) return;
+  const sel = document.getElementById('filterType');
+  sel.innerHTML = '<option value="">All Types</option>';
+  json.data.forEach(t => sel.appendChild(new Option(t, t)));
+}
+
+async function loadData() {
+  const search = document.getElementById('searchInput').value.trim();
+  const type   = document.getElementById('filterType').value;
+  const params = new URLSearchParams({ action:'list', page:currentPage, search, type });
+
+  const tbody = document.getElementById('tableBody');
+  tbody.innerHTML = '<tr class="empty-row"><td colspan="7">Loading…</td></tr>';
+
+  try {
+    const res  = await fetch(`documents.php?${params}`);
+    const json = await res.json();
+    if (!json.success) { showToast('⚠️ ' + json.message, 'error'); return; }
+
+    document.getElementById('panelSub').textContent = `${json.total} document(s) found`;
+    renderTable(json.data);
+    renderPagination(json.total, json.pages, json.page);
+  } catch(e) { showToast('❌ Failed to load.', 'error'); }
+}
+
+function debounceLoad() {
+  currentPage = 1;
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(loadData, 300);
+}
+
+function clearFilters() {
+  document.getElementById('searchInput').value = '';
+  document.getElementById('filterType').value  = '';
+  currentPage = 1; loadData();
+}
+
+// ════════════════════════════════════════════════════
+//  RENDER
+// ════════════════════════════════════════════════════
+function renderTable(data) {
+  const tbody = document.getElementById('tableBody');
+  if (!data.length) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No documents found.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = data.map(d => {
+    const ext      = d.file_name.split('.').pop().toLowerCase();
+    const icon     = FILE_ICONS[ext] || '📎';
+    const docColor = DOC_COLORS[d.document_type] || DOC_COLORS['Other'];
+    const initials = (d.employee_name || '??').split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase();
+    const date     = d.uploaded_at ? new Date(d.uploaded_at).toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'numeric'}) : '—';
+    const uploader = d.uploader_email ? d.uploader_email.split('@')[0] : 'System';
+
+    return `<tr>
+      <td>
+        <div class="file-cell">
+          <div class="file-icon" style="background:${docColor.bg};">${icon}</div>
+          <div>
+            <div class="file-name" title="${d.file_name}">${d.file_name}</div>
+            <div class="file-size">${formatSize(d.file_size)}</div>
+          </div>
+        </div>
+      </td>
+      <td>
+        <div class="emp-cell">
+          <div class="emp-av">${initials}</div>
+          <div>
+            <div class="emp-name">${d.employee_name || '—'}</div>
+            <div class="emp-meta">${d.employee_code || ''} · ${d.department_name || 'No Dept'}</div>
+          </div>
+        </div>
+      </td>
+      <td><span class="doc-badge" style="background:${docColor.bg};color:${docColor.color};">${d.document_type}</span></td>
+      <td style="font-size:0.78rem;color:var(--gray-600);">${formatSize(d.file_size)}</td>
+      <td style="font-size:0.78rem;color:var(--gray-600);">${uploader}</td>
+      <td style="font-size:0.78rem;color:var(--gray-600);">${date}</td>
+      <td>
+        <div class="tbl-action">
+          <a class="ta-btn view" href="#" onclick="openPreview(${d.document_id},'${d.file_name.replace(/'/g,"\\'").replace(/\\/g,"\\\\")}');return false;" title="View">👁️</a>
+          <a class="ta-btn dl"   href="serve_document.php?id=${d.document_id}" download="${d.file_name}" title="Download">⬇️</a>
+          <button class="ta-btn del" onclick="openDelete(${d.document_id},'${d.file_name.replace(/'/g,"\\'")}','${d.employee_name||'Unknown'}')" title="Delete">🗑️</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// ════════════════════════════════════════════════════
+//  PAGINATION
+// ════════════════════════════════════════════════════
+function renderPagination(total, pages, page) {
+  const info = document.getElementById('pageInfo');
+  const btns = document.getElementById('pageBtns');
+  const per  = 15;
+  const from = Math.min((page-1)*per+1, total);
+  const to   = Math.min(page*per, total);
+  info.textContent = total ? `Showing ${from}–${to} of ${total}` : 'No documents';
+
+  let html = `<button class="pg-btn" onclick="goPage(${page-1})" ${page<=1?'disabled':''}>‹</button>`;
+  for (let i = 1; i <= pages; i++) {
+    if (pages > 7 && i > 2 && i < pages-1 && Math.abs(i-page) > 1) {
+      if (i===3||i===pages-2) html += `<span style="padding:0 4px;color:var(--gray-400);">…</span>`;
+      continue;
+    }
+    html += `<button class="pg-btn${i===page?' active':''}" onclick="goPage(${i})">${i}</button>`;
+  }
+  html += `<button class="pg-btn" onclick="goPage(${page+1})" ${page>=pages?'disabled':''}>›</button>`;
+  btns.innerHTML = html;
+}
+
+function goPage(p) { currentPage = p; loadData(); }
+
+// ════════════════════════════════════════════════════
+//  UPLOAD MODAL
+// ════════════════════════════════════════════════════
+function openUpload() {
+  selectedFile  = null; selectedEmpId = null;
+  document.getElementById('empSearch').value   = '';
+  document.getElementById('empId').value       = '';
+  document.getElementById('empSelected').style.display = 'none';
+  document.getElementById('uploadDocType').value = '';
+  document.getElementById('filePreview').classList.remove('show');
+  document.getElementById('uploadProgress').classList.remove('show');
+  document.getElementById('empDropdown').innerHTML = '';
+  openModal('modalUpload');
+}
+
+// Employee search dropdown
+async function searchEmployees() {
+  clearTimeout(empSearchTimer);
+  const q = document.getElementById('empSearch').value.trim();
+  if (q.length < 1) { document.getElementById('empDropdown').innerHTML = ''; return; }
+  empSearchTimer = setTimeout(async () => {
+    const res  = await fetch(`documents.php?action=employees&q=${encodeURIComponent(q)}`);
+    const json = await res.json();
+    const dd   = document.getElementById('empDropdown');
+    if (!json.data.length) { dd.innerHTML = '<div style="padding:8px 12px;font-size:0.80rem;color:var(--gray-400);">No employees found.</div>'; return; }
+    dd.innerHTML = `<div style="position:absolute;width:100%;background:white;border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);box-shadow:var(--shadow-md);z-index:20;max-height:200px;overflow-y:auto;">
+      ${json.data.map(e => `
+        <div onclick="selectEmployee(${e.employee_id},'${e.name.replace(/'/g,"\\'")}','${e.employee_code}')"
+             style="padding:9px 14px;cursor:pointer;font-size:0.82rem;border-bottom:1px solid var(--gray-100);"
+             onmouseover="this.style.background='var(--gray-50)'" onmouseout="this.style.background=''">
+          <strong>${e.name}</strong> <span style="color:var(--gray-400);font-size:0.72rem;">${e.employee_code} · ${e.position_title||''}</span>
+        </div>`).join('')}
+    </div>`;
+  }, 250);
+}
+
+function selectEmployee(id, name, code) {
+  selectedEmpId = id;
+  document.getElementById('empId').value = id;
+  document.getElementById('empSearch').value = '';
+  document.getElementById('empDropdown').innerHTML = '';
+  const sel = document.getElementById('empSelected');
+  sel.textContent = `✅ ${name} (${code})`;
+  sel.style.display = 'block';
+}
+
+// File drag & drop
+function handleDragOver(e) { e.preventDefault(); document.getElementById('dropZone').classList.add('dragover'); }
+function handleDragLeave()  { document.getElementById('dropZone').classList.remove('dragover'); }
+function handleDrop(e) {
+  e.preventDefault(); document.getElementById('dropZone').classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) setFile(file);
+}
+function handleFileSelect(e) { const file = e.target.files[0]; if (file) setFile(file); }
+
+function setFile(file) {
+  selectedFile = file;
+  const ext    = file.name.split('.').pop().toLowerCase();
+  document.getElementById('fpIcon').textContent = FILE_ICONS[ext] || '📎';
+  document.getElementById('fpName').textContent = file.name;
+  document.getElementById('fpSize').textContent = formatSize(file.size);
+  document.getElementById('filePreview').classList.add('show');
+}
+
+function clearFile() {
+  selectedFile = null;
+  document.getElementById('filePreview').classList.remove('show');
+  document.getElementById('fileInput').value = '';
+}
+
+async function submitUpload() {
+  const empId   = document.getElementById('empId').value;
+  const docType = document.getElementById('uploadDocType').value;
+
+  if (!empId)    { showToast('⚠️ Please select an employee.', 'info'); return; }
+  if (!docType)  { showToast('⚠️ Please select a document type.', 'info'); return; }
+  if (!selectedFile) { showToast('⚠️ Please select a file to upload.', 'info'); return; }
+
+  const btn = document.getElementById('uploadBtn');
+  btn.disabled = true; btn.textContent = '⏳ Uploading…';
+
+  // Show progress
+  const progress = document.getElementById('uploadProgress');
+  const fill     = document.getElementById('progressFill');
+  const label    = document.getElementById('progressLabel');
+  progress.classList.add('show');
+
+  // Animate progress (simulated since fetch doesn't give XHR progress easily)
+  let pct = 0;
+  const interval = setInterval(() => {
+    pct = Math.min(pct + 10, 85);
+    fill.style.width = pct + '%';
+    label.textContent = `Uploading… ${pct}%`;
+  }, 150);
+
+  const body = new FormData();
+  body.append('action',        'upload');
+  body.append('employee_id',   empId);
+  body.append('document_type', docType);
+  body.append('file',          selectedFile);
+
+  try {
+    const res  = await fetch('documents.php', { method:'POST', body });
+    clearInterval(interval);
+    fill.style.width = '100%'; label.textContent = 'Done!';
+    const json = await res.json();
+    setTimeout(() => {
+      progress.classList.remove('show');
+      if (json.success) {
+        showToast('✅ ' + json.message, 'success');
+        closeModal('modalUpload');
+        loadData(); loadStats(); loadDocTypes();
+      } else { showToast('❌ ' + json.message, 'error'); }
+    }, 400);
+  } catch(e) {
+    clearInterval(interval);
+    progress.classList.remove('show');
+    showToast('❌ Upload failed.', 'error');
+  } finally { btn.disabled = false; btn.textContent = '📤 Upload Document'; }
+}
+
+// ════════════════════════════════════════════════════
+//  DELETE
+// ════════════════════════════════════════════════════
+function openDelete(id, fname, empName) {
+  deleteTarget = id;
+  document.getElementById('deleteText').innerHTML =
+    `You are about to delete <strong>${fname}</strong> belonging to <strong>${empName}</strong>.<br/><br/>The physical file will also be permanently removed from the server.`;
+  openModal('modalDelete');
+}
+
+async function confirmDelete() {
+  const btn = document.getElementById('deleteBtn');
+  btn.disabled = true; btn.textContent = '⏳ Deleting…';
+  const body = new FormData();
+  body.append('action', 'delete');
+  body.append('id',     deleteTarget);
+  try {
+    const res  = await fetch('documents.php', { method:'POST', body });
+    const json = await res.json();
+    if (json.success) {
+      showToast('🗑️ ' + json.message, 'success');
+      closeModal('modalDelete');
+      loadData(); loadStats();
+    } else { showToast('❌ ' + json.message, 'error'); }
+  } catch(e) { showToast('❌ Failed.', 'error'); }
+  finally { btn.disabled = false; btn.textContent = '🗑️ Yes, Delete'; }
+}
+
+// ════════════════════════════════════════════════════
+//  HELPERS
+// ════════════════════════════════════════════════════
+function formatSize(bytes) {
+  if (!bytes) return '0 B';
+  bytes = parseInt(bytes);
+  if (bytes < 1024)       return bytes + ' B';
+  if (bytes < 1048576)    return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/1048576).toFixed(2) + ' MB';
+}
+
+
+function openModal(id)  { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+document.querySelectorAll('.modal-overlay').forEach(m => {
+  m.addEventListener('click', e => { if (e.target === m) m.classList.remove('open'); });
+});
+
+// ── Document Preview ──────────────────────────────────────────
+const IMG_EXTS = ['jpg','jpeg','png','gif','webp','bmp','svg'];
+const PDF_EXTS = ['pdf'];
+const DOC_EXTS = ['doc','docx','xls','xlsx','ppt','pptx'];
+
+function openPreview(docId, fileName) {
+  const ext     = fileName.split('.').pop().toLowerCase();
+  const body    = document.getElementById('previewBody');
+  const viewUrl = `serve_document.php?id=${docId}&inline=1`;
+  const dlUrl   = `serve_document.php?id=${docId}`;
+
+  document.getElementById('previewTitle').textContent = 'Document Preview';
+  document.getElementById('previewSub').textContent   = fileName;
+  document.getElementById('previewFname').textContent = fileName;
+  document.getElementById('previewDownload').href     = dlUrl;
+  document.getElementById('previewDownload').setAttribute('download', fileName);
+
+  const EXT_ICONS  = {pdf:'📄',doc:'📝',docx:'📝',xls:'📊',xlsx:'📊',ppt:'📋',pptx:'📋'};
+  const EXT_LABELS = {pdf:'PDF Document',doc:'Word Document',docx:'Word Document',xls:'Excel Spreadsheet',xlsx:'Excel Spreadsheet',ppt:'PowerPoint',pptx:'PowerPoint'};
+
+  if (PDF_EXTS.includes(ext)) {
+    body.innerHTML = `<iframe class="preview-frame" src="${viewUrl}"></iframe>`;
+  } else if (IMG_EXTS.includes(ext)) {
+    body.innerHTML = `<img class="preview-img" src="${viewUrl}" alt="${fileName}" />`;
+  } else {
+    // Office files and anything else — clean download prompt (no broken Google Docs)
+    const icon  = EXT_ICONS[ext]  || '📎';
+    const label = EXT_LABELS[ext] || ext.toUpperCase() + ' File';
+    body.innerHTML = `
+      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:52px 30px;text-align:center;min-height:320px;background:#f8fafc;">
+        <div style="font-size:4rem;margin-bottom:16px;">${icon}</div>
+        <div style="font-size:1rem;font-weight:800;color:#1e293b;margin-bottom:6px;">${label}</div>
+        <div style="font-size:.83rem;color:#64748b;max-width:340px;line-height:1.6;margin-bottom:28px;">
+          <strong>${fileName}</strong><br/>
+          This file type cannot be previewed in the browser.<br/>Click <strong>Download</strong> below to open it.
+        </div>
+        <a href="${dlUrl}" download="${fileName}"
+           style="display:inline-flex;align-items:center;gap:8px;padding:11px 28px;background:linear-gradient(135deg,#2563eb,#1e40af);color:#fff;border-radius:9px;font-family:'Nunito',sans-serif;font-size:.88rem;font-weight:800;text-decoration:none;box-shadow:0 3px 12px rgba(37,99,235,.30);">
+          ⬇️ Download File
+        </a>
+      </div>`;
+  }
+
+  openModal('modalPreview');
+}
+
+function closePreview() {
+  document.getElementById('previewBody').innerHTML = '';
+  closeModal('modalPreview');
+}
+
+function showToast(msg, type='success') {
+  document.querySelectorAll('.toast').forEach(t => t.remove());
+  const t = document.createElement('div');
+  t.className = `toast ${type}`; t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => { t.style.opacity='0'; t.style.transition='opacity 0.3s'; setTimeout(()=>t.remove(),300); }, 3500);
+}
+
+
+
+// ── Notification system (localStorage-persisted read state) ────────────────
+const NOTIF_STORAGE_KEY = 'hrms_admin_read_notifs';
+
+function getReadNotifs() {
+  try { return JSON.parse(localStorage.getItem(NOTIF_STORAGE_KEY) || '[]'); }
+  catch(e) { return []; }
+}
+function saveReadNotifs(ids) {
+  try {
+    // Keep only last 200 to avoid bloat
+    localStorage.setItem(NOTIF_STORAGE_KEY, JSON.stringify(ids.slice(-200)));
+  } catch(e) {}
+}
+function markNotifRead(id) {
+  const read = getReadNotifs();
+  if (!read.includes(id)) { read.push(id); saveReadNotifs(read); }
+}
+function markAllNotifsRead() {
+  const ids = Array.from(document.querySelectorAll('.notif-item[data-nid]'))
+                   .map(el => el.getAttribute('data-nid'));
+  const read = getReadNotifs();
+  ids.forEach(id => { if (!read.includes(id)) read.push(id); });
+  saveReadNotifs(read);
+}
+
+function applyReadState() {
+  const read = getReadNotifs();
+  let unread = 0;
+  document.querySelectorAll('.notif-item[data-nid]').forEach(el => {
+    const id = el.getAttribute('data-nid');
+    if (read.includes(id)) {
+      el.classList.remove('unread');
+    } else {
+      unread++;
+    }
+  });
+  const cnt = document.getElementById('adminNotifCount');
+  if (cnt) {
+    if (unread > 0) { cnt.textContent = unread; cnt.classList.add('show'); }
+    else            { cnt.textContent = '';      cnt.classList.remove('show'); }
+  }
+}
+
+function toggleNotifPanel() {
+  const p  = document.getElementById('adminNotifPanel');
+  const dd = document.getElementById('tbDropdown');
+  if (dd) dd.classList.remove('open');
+  if (p) {
+    p.classList.toggle('open');
+    // Re-apply read state every time panel opens (syncs across tabs)
+    if (p.classList.contains('open')) applyReadState();
+  }
+}
+
+function clearNotifications() {
+  // Save all notification IDs as read in localStorage
+  const ids = Array.from(document.querySelectorAll('.notif-item[data-nid]'))
+                   .map(el => el.getAttribute('data-nid'));
+  const read = getReadNotifs();
+  ids.forEach(id => { if (id && !read.includes(id)) read.push(id); });
+  saveReadNotifs(read);
+  // Update DOM
+  document.querySelectorAll('.notif-item.unread').forEach(el => el.classList.remove('unread'));
+  const cnt = document.getElementById('adminNotifCount');
+  if (cnt) { cnt.classList.remove('show'); cnt.textContent = ''; }
+  const p = document.getElementById('adminNotifPanel');
+  if (p) p.classList.remove('open');
+}
+
+document.addEventListener('click', function(e) {
+  const w = document.getElementById('adminNotifWrap');
+  if (w && !w.contains(e.target)) {
+    const p = document.getElementById('adminNotifPanel');
+    if (p) p.classList.remove('open');
+  }
+});
+
+// Apply read state on page load
+document.addEventListener('DOMContentLoaded', applyReadState);
+function toggleProfileDropdown(){
+  const dd=document.getElementById('tbDropdown');if(dd)dd.classList.toggle('open');
+}
+document.addEventListener('click',function(e){
+  const w=document.getElementById('tbProfileWrap');
+  if(w&&!w.contains(e.target)){const dd=document.getElementById('tbDropdown');if(dd)dd.classList.remove('open');}
+});
+
+// ── Poll admin notifications every 60 seconds ──────────────────────────────
+async function pollAdminNotifications() {
+  try {
+    const r = await fetch('leave_requests.php?action=pending_count').then(r=>r.json());
+    if (typeof r.count === 'undefined') return;
+    // Re-fetch full notifications and update panel
+    const r2 = await fetch('notif_poll.php').then(r=>r.json()).catch(()=>null);
+    if (!r2 || !r2.success) {
+      // Fallback: just update the count badge
+      const unread = getUnreadCount();
+      const cnt = document.getElementById('adminNotifCount');
+      if (cnt) {
+        if (unread > 0) { cnt.textContent = unread; cnt.classList.add('show'); }
+        else            { cnt.textContent = '';     cnt.classList.remove('show'); }
+      }
+      return;
+    }
+    const read   = getReadNotifs();
+    const notifs = r2.notifications || [];
+    // Update the panel list
+    const list = document.getElementById('adminNotifList');
+    if (list) {
+      if (!notifs.length) {
+        list.innerHTML = '<div class="notif-empty"><div class="ne-icon">🔔</div><p>All caught up!</p></div>';
+      } else {
+        list.innerHTML = notifs.map(n => {
+          const isRead = read.includes(n.nid);
+          return `<a class="notif-item ${isRead?'':'unread'}" href="${n.link}" data-nid="${n.nid}" onclick="markNotifRead(this.getAttribute('data-nid'));applyReadState();">
+            <div class="notif-ico" style="background:${n.color}22;">${n.icon}</div>
+            <div class="notif-body">
+              <div class="notif-title">${n.title}</div>
+              <div class="notif-text">${n.body}</div>
+              ${n.time ? '<div class="notif-time">'+adminFmtTime(n.time)+'</div>' : ''}
+            </div>
+          </a>`;
+        }).join('');
+      }
+    }
+    // Update count
+    const unread = notifs.filter(n => !read.includes(n.nid)).length;
+    const cnt = document.getElementById('adminNotifCount');
+    const hd  = document.getElementById('adminNotifHdCount');
+    if (cnt) { cnt.textContent = unread||''; unread ? cnt.classList.add('show') : cnt.classList.remove('show'); }
+    if (hd)  { hd.textContent = notifs.length + ' item' + (notifs.length!==1?'s':''); }
+  } catch(e) {}
+}
+
+function getUnreadCount() {
+  const read = getReadNotifs();
+  return document.querySelectorAll('.notif-item[data-nid]')
+    .length - Array.from(document.querySelectorAll('.notif-item[data-nid]'))
+    .filter(el => read.includes(el.getAttribute('data-nid'))).length;
+}
+
+function adminFmtTime(dt) {
+  if (!dt) return '';
+  const d = Math.floor((Date.now() - new Date(dt+'Z').getTime()) / 1000);
+  if (isNaN(d)) return '';
+  if (d < 60)    return 'Just now';
+  if (d < 3600)  return Math.floor(d/60) + 'm ago';
+  if (d < 86400) return Math.floor(d/3600) + 'h ago';
+  return new Date(dt).toLocaleDateString('en-PH',{month:'short',day:'numeric'});
+}
+
+// Start polling
+document.addEventListener('DOMContentLoaded', function() {
+  setTimeout(pollAdminNotifications, 5000); // first poll after 5s
+  setInterval(pollAdminNotifications, 60000); // then every 60s
+});
+
+function toggleSidebar() {
+  document.getElementById('sidebar').classList.toggle('open');
+  document.getElementById('overlayMob').classList.toggle('show');
+}
+
+// Close employee dropdown on outside click
+document.addEventListener('click', e => {
+  if (!e.target.closest('#empSearch') && !e.target.closest('#empDropdown')) {
+    document.getElementById('empDropdown').innerHTML = '';
+  }
+});
+
+init();
+</script>
+  <!-- ══ CHAT WIDGET ══ -->
+  <style>
+    /* ── Wrap & animation ── */
+    .cw-wrap{position:fixed;bottom:24px;right:24px;width:420px;height:600px;background:#fff;border-radius:18px;box-shadow:0 12px 48px rgba(0,0,0,.22);display:none;flex-direction:column;z-index:9999;overflow:hidden;font-family:'Nunito',sans-serif;}
+    .cw-wrap.open{display:flex;animation:cwIn .28s cubic-bezier(.34,1.4,.64,1) both;}
+    @keyframes cwIn{from{opacity:0;transform:scale(.90) translateY(20px);}to{opacity:1;transform:scale(1) translateY(0);}}
+    /* ── Header ── */
+    .cw-hd{background:linear-gradient(135deg,#1e40af,#2563eb,#0ea5e9);padding:14px 16px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}
+    .cw-hd-left{display:flex;align-items:center;gap:10px;}
+    .cw-hd-icon{width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center;font-size:1rem;}
+    .cw-hd-title{font-size:.95rem;font-weight:800;color:#fff;}
+    .cw-hd-sub{font-size:.63rem;color:rgba(255,255,255,.65);margin-top:1px;}
+    .cw-hd-close{width:28px;height:28px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:.85rem;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .2s;}
+    .cw-hd-close:hover{background:rgba(255,255,255,.30);}
+    /* ── Body ── */
+    .cw-body{display:flex;flex:1;overflow:hidden;}
+    /* ── Contact sidebar ── */
+    .cw-contacts{width:130px;flex-shrink:0;border-right:1.5px solid #e2e8f0;display:flex;flex-direction:column;background:#f8fafc;}
+    .cw-contacts-hd{padding:9px 10px 6px;font-size:.58rem;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:.10em;border-bottom:1px solid #e2e8f0;}
+    .cw-srch{padding:7px 8px;border-bottom:1px solid #e2e8f0;}
+    .cw-srch input{width:100%;padding:5px 9px;border:1.5px solid #e2e8f0;border-radius:8px;font-family:'Nunito',sans-serif;font-size:.68rem;outline:none;color:#1e293b;background:#fff;}
+    .cw-srch input:focus{border-color:#2563eb;}
+    .cw-clist{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#e2e8f0 transparent;}
+    .cw-ci{display:flex;flex-direction:column;align-items:center;padding:10px 6px;cursor:pointer;border-bottom:1px solid #f1f5f9;transition:background .15s;position:relative;text-align:center;}
+    .cw-ci:hover{background:#eff6ff;}
+    .cw-ci.active{background:linear-gradient(135deg,#eff6ff,#dbeafe);border-left:3px solid #2563eb;}
+    .cw-av{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.70rem;font-weight:800;color:#fff;margin-bottom:3px;flex-shrink:0;box-shadow:0 2px 6px rgba(0,0,0,.15);}
+    .cw-cn{font-size:.63rem;font-weight:700;color:#334155;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:112px;}
+    .cw-cs{font-size:.56rem;color:#94a3b8;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:112px;}
+    .cw-cu{position:absolute;top:5px;right:4px;background:#ef4444;color:#fff;font-size:.50rem;font-weight:800;padding:1px 5px;border-radius:20px;min-width:14px;text-align:center;}
+    .cw-cempty{padding:16px 8px;text-align:center;color:#94a3b8;font-size:.70rem;line-height:1.5;}
+    /* ── Chat area ── */
+    .cw-chat{flex:1;display:flex;flex-direction:column;overflow:hidden;}
+    .cw-chat-hd{padding:11px 14px;border-bottom:1.5px solid #e2e8f0;display:flex;align-items:center;gap:9px;flex-shrink:0;background:#fff;}
+    .cw-chat-av{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.62rem;font-weight:800;color:#fff;flex-shrink:0;box-shadow:0 2px 6px rgba(0,0,0,.15);}
+    .cw-chat-name{font-size:.82rem;font-weight:800;color:#1e293b;}
+    .cw-chat-sub{font-size:.60rem;color:#94a3b8;margin-top:1px;}
+    /* ── Online dot ── */
+    .cw-online{width:8px;height:8px;border-radius:50%;background:#22c55e;margin-left:auto;flex-shrink:0;box-shadow:0 0 0 2px #fff;}
+    /* ── Messages ── */
+    .cw-msgs{flex:1;overflow-y:auto;padding:14px 12px;display:flex;flex-direction:column;gap:8px;background:#f8fafc;scrollbar-width:thin;scrollbar-color:#e2e8f0 transparent;}
+    .cw-nosel{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#94a3b8;text-align:center;padding:20px;background:#f8fafc;}
+    .cw-nosel-ic{font-size:2.8rem;opacity:.25;margin-bottom:10px;}
+    .cw-nosel h4{font-size:.85rem;font-weight:800;color:#64748b;margin-bottom:4px;}
+    .cw-nosel p{font-size:.72rem;line-height:1.5;}
+    /* ── Message rows ── */
+    .cw-mrow{display:flex;align-items:flex-end;gap:6px;position:relative;}
+    .cw-mrow.mine{flex-direction:row-reverse;}
+    .cw-mrow:hover .cw-msg-actions{opacity:1;}
+    .cw-mav{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.52rem;font-weight:800;color:#fff;flex-shrink:0;}
+    .cw-msg-wrap{display:flex;flex-direction:column;max-width:80%;}
+    .cw-mrow.mine .cw-msg-wrap{align-items:flex-end;}
+    .cw-bubble{padding:9px 13px;border-radius:16px;font-size:.80rem;line-height:1.55;word-break:break-word;position:relative;}
+    .cw-mrow.mine .cw-bubble{background:linear-gradient(135deg,#2563eb,#1e40af);color:#fff;border-bottom-right-radius:4px;}
+    .cw-mrow.them .cw-bubble{background:#fff;color:#1e293b;border:1.5px solid #e2e8f0;border-bottom-left-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.06);}
+    .cw-bubble.edited::after{content:'edited';font-size:.55rem;opacity:.6;margin-left:6px;font-style:italic;}
+    .cw-bubble.unsent{background:#f1f5f9 !important;color:#94a3b8 !important;border:1.5px dashed #cbd5e1 !important;font-style:italic;box-shadow:none !important;}
+    .cw-mt{font-size:.56rem;color:#94a3b8;margin-top:3px;display:flex;align-items:center;gap:4px;}
+    .cw-mrow.mine .cw-mt{justify-content:flex-end;}
+    .cw-seen{color:#60a5fa;font-size:.58rem;}
+    /* ── Message action buttons (hover) ── */
+    .cw-msg-actions{position:absolute;top:-28px;display:flex;gap:3px;opacity:0;transition:opacity .15s;z-index:10;}
+    .cw-mrow.mine .cw-msg-actions{right:0;}
+    .cw-mrow.them .cw-msg-actions{left:0;}
+    .cw-act-btn{width:26px;height:26px;border-radius:8px;background:#fff;border:1.5px solid #e2e8f0;display:flex;align-items:center;justify-content:center;font-size:.72rem;cursor:pointer;transition:all .15s;box-shadow:0 2px 6px rgba(0,0,0,.10);}
+    .cw-act-btn:hover{background:#eff6ff;border-color:#2563eb;}
+    .cw-act-btn.del:hover{background:#fee2e2;border-color:#ef4444;}
+    /* ── Edit mode ── */
+    .cw-edit-bar{display:none;padding:6px 12px;background:#eff6ff;border-top:1.5px solid #bfdbfe;font-size:.72rem;color:#1e40af;font-weight:700;align-items:center;gap:8px;flex-shrink:0;}
+    .cw-edit-bar.show{display:flex;}
+    .cw-edit-cancel{margin-left:auto;background:none;border:none;color:#64748b;cursor:pointer;font-size:.80rem;}
+    /* ── Date divider ── */
+    .cw-ddiv{text-align:center;font-size:.58rem;color:#94a3b8;font-weight:700;padding:4px 0;position:relative;margin:2px 0;}
+    .cw-ddiv::before{content:'';position:absolute;top:50%;left:0;right:0;height:1px;background:#e2e8f0;}
+    .cw-ddiv span{background:#f8fafc;padding:0 10px;position:relative;}
+    /* ── Input area ── */
+    .cw-inp-row{display:flex;gap:8px;padding:10px 12px;background:#fff;border-top:1.5px solid #e2e8f0;align-items:flex-end;flex-shrink:0;}
+    .cw-inp{flex:1;padding:9px 13px;border:1.5px solid #e2e8f0;border-radius:20px;font-family:'Nunito',sans-serif;font-size:.82rem;color:#1e293b;resize:none;outline:none;max-height:90px;line-height:1.5;transition:border-color .2s;background:#f8fafc;}
+    .cw-inp:focus{border-color:#2563eb;background:#fff;}
+    .cw-sendbtn{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#2563eb,#1e40af);color:#fff;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:.90rem;flex-shrink:0;transition:transform .15s,box-shadow .15s;box-shadow:0 2px 10px rgba(37,99,235,.35);}
+    .cw-sendbtn:hover{transform:scale(1.10);box-shadow:0 4px 14px rgba(37,99,235,.45);}
+    .cw-sendbtn:disabled{opacity:.5;cursor:default;transform:none;}
+  
+    .tb-profile-wrap{position:relative;display:inline-block;}
+    .tb-profile-btn{width:38px;height:38px;border-radius:50%;background:rgba(255,255,255,.20);border:2px solid rgba(255,255,255,.55);display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;flex-shrink:0;transition:all .2s;font-size:.80rem;font-weight:800;color:#fff;}
+    .tb-profile-btn:hover{background:rgba(255,255,255,.35);border-color:#fff;}
+    .tb-dropdown{display:none;position:absolute;top:calc(100% + 10px);right:0;background:#fff;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.18);min-width:200px;z-index:9999;overflow:hidden;}
+    .tb-dropdown.open{display:block;}
+    .tb-dd-header{padding:12px 16px 8px;border-bottom:1px solid #f1f5f9;background:#f8fafc;}
+    .tb-dd-name{font-size:.86rem;font-weight:800;color:#1e293b;}
+    .tb-dd-role{font-size:.70rem;color:#94a3b8;margin-top:1px;}
+    .tb-dd-item{display:flex;align-items:center;gap:10px;padding:10px 16px;font-size:.83rem;font-weight:600;color:#475569;cursor:pointer;transition:background .15s;text-decoration:none;border:none;background:none;width:100%;font-family:'Nunito',sans-serif;}
+    .tb-dd-item:hover{background:#f1f5f9;color:#1e293b;}
+    .tb-dd-item.danger{color:#dc2626;}
+    .tb-dd-item.danger:hover{background:#fef2f2;}
+    .tb-dd-divider{height:1px;background:#f1f5f9;margin:3px 0;}
+    .notif-wrap{position:relative;display:inline-block;}
+    .notif-btn{position:relative;width:38px;height:38px;border-radius:50%;border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:1rem;color:#fff;transition:all .2s;}
+    .notif-btn:hover{background:rgba(255,255,255,.28);}
+    .notif-count{position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;background:#ef4444;border-radius:20px;font-size:.58rem;color:#fff;font-weight:800;display:none;align-items:center;justify-content:center;border:2px solid transparent;padding:0 4px;}
+    .notif-count.show{display:flex;}
+    .notif-panel{display:none;position:absolute;top:calc(100% + 10px);right:0;background:#fff;border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.18);width:340px;max-height:480px;z-index:9999;overflow:hidden;flex-direction:column;}
+    .notif-panel.open{display:flex;}
+    .notif-hd{padding:14px 16px 10px;border-bottom:1px solid #f1f5f9;display:flex;align-items:center;justify-content:space-between;background:#f8fafc;flex-shrink:0;}
+    .notif-hd-title{font-size:.88rem;font-weight:800;color:#1e293b;}
+    .notif-hd-count{font-size:.72rem;font-weight:700;color:#64748b;}
+    .notif-mark-all{font-size:.72rem;font-weight:700;color:#2563eb;cursor:pointer;border:none;background:none;font-family:inherit;}
+    .notif-mark-all:hover{text-decoration:underline;}
+    .notif-list{overflow-y:auto;flex:1;}
+    .notif-item{display:flex;align-items:flex-start;gap:11px;padding:12px 16px;border-bottom:1px solid #f8fafc;cursor:pointer;transition:background .15s;text-decoration:none;}
+    .notif-item:hover{background:#f8fafc;}
+    .notif-item.unread{background:#eff6ff;}
+    .notif-item.unread:hover{background:#dbeafe;}
+    .notif-ico{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0;}
+    .notif-body{flex:1;min-width:0;}
+    .notif-title{font-size:.80rem;font-weight:800;color:#1e293b;margin-bottom:2px;}
+    .notif-text{font-size:.74rem;color:#475569;line-height:1.4;}
+    .notif-time{font-size:.66rem;color:#94a3b8;margin-top:3px;}
+    .notif-empty{text-align:center;padding:40px 20px;color:#94a3b8;}
+    .notif-empty .ne-icon{font-size:2.2rem;margin-bottom:8px;}
+    .notif-empty p{font-size:.82rem;font-weight:600;}
+    .notif-footer{padding:10px 16px;border-top:1px solid #f1f5f9;text-align:center;flex-shrink:0;}
+    .notif-footer a{font-size:.78rem;font-weight:700;color:#2563eb;text-decoration:none;}
+  </style>
+
+  <div class="cw-wrap" id="cwWrap">
+    <!-- Header -->
+    <div class="cw-hd">
+      <div class="cw-hd-left">
+        <div class="cw-hd-icon">&#x1F4AC;</div>
+        <div>
+          <div class="cw-hd-title">Messages</div>
+          <div class="cw-hd-sub" id="cwHdSub">Select someone to chat</div>
+        </div>
+      </div>
+      <button class="cw-hd-close" onclick="cwToggle()" title="Close">&#x2715;</button>
+    </div>
+    <div class="cw-body">
+      <!-- Contacts -->
+      <div class="cw-contacts">
+        <div class="cw-contacts-hd">Employees</div>
+        <div class="cw-srch"><input type="text" id="cwSrch" placeholder="&#x1F50D; Search..." oninput="cwFilter()"/></div>
+        <div class="cw-clist" id="cwClist"><div class="cw-cempty">Loading...</div></div>
+      </div>
+      <!-- Chat -->
+      <div class="cw-chat">
+        <div class="cw-nosel" id="cwNoSel">
+          <div class="cw-nosel-ic">&#x1F4AC;</div>
+          <h4>No conversation selected</h4>
+          <p>Pick an employee from<br>the list to start chatting</p>
+        </div>
+        <div id="cwChatArea" style="display:none;flex:1;flex-direction:column;overflow:hidden;">
+          <!-- Chat header -->
+          <div class="cw-chat-hd">
+            <div class="cw-chat-av" id="cwChatAv"></div>
+            <div style="flex:1;min-width:0;">
+              <div class="cw-chat-name" id="cwChatName"></div>
+              <div class="cw-chat-sub" id="cwChatSub"></div>
+            </div>
+            <div class="cw-online" title="Active"></div>
+          </div>
+          <!-- Messages -->
+          <div class="cw-msgs" id="cwMsgs"></div>
+          <!-- Edit bar -->
+          <div class="cw-edit-bar" id="cwEditBar">
+            <span>&#x270F;&#xFE0F; Editing message</span>
+            <button class="cw-edit-cancel" onclick="cwCancelEdit()">&#x2715; Cancel</button>
+          </div>
+          <!-- Input -->
+          <div class="cw-inp-row">
+            <textarea class="cw-inp" id="cwInp" rows="1" placeholder="Type a message..." onkeydown="cwKey(event)" oninput="cwResize(this)"></textarea>
+            <button class="cw-sendbtn" id="cwSendBtn" onclick="cwSend()" title="Send">&#x27A4;</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  var CW_ME   = <?php echo (int)($_SESSION['user_id'] ?? 0); ?>;
+  var CW_INIT = <?php echo json_encode(strtoupper(substr($adminName ?? 'AD', 0, 2))); ?>;
+  var CW_API  = 'chat_api.php';
+  var CW_COLS = ['#2563eb','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4','#ec4899','#f97316'];
+
+  var cwCons=[], cwAct=null, cwLastT=null, cwPoll=null, cwConT=null, cwOpen=false;
+  var cwSending=false, cwEditId=null;
+
+  function cwCol(n){return CW_COLS[Math.abs([...(n||'?')].reduce(function(a,c){return a+c.charCodeAt(0);},0))%CW_COLS.length];}
+  function cwIni(n){return (n||'?').split(' ').map(function(w){return w[0]||'';}).join('').slice(0,2).toUpperCase();}
+  function cwFmtS(dt){if(!dt)return '';var d=new Date(dt),now=new Date();return d.toDateString()===now.toDateString()?d.toLocaleTimeString('en-PH',{hour:'numeric',minute:'2-digit'}):d.toLocaleDateString('en-PH',{month:'short',day:'numeric'});}
+  function cwFmtL(dt){return dt?new Date(dt).toLocaleTimeString('en-PH',{hour:'numeric',minute:'2-digit'}):'';}
+  function cwEsc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');}
+
+  function cwToggle(){
+    cwOpen=!cwOpen;
+    document.getElementById('cwWrap').classList.toggle('open',cwOpen);
+    if(cwOpen){cwLoadCons();clearInterval(cwConT);cwConT=setInterval(cwLoadCons,10000);}
+    else{clearInterval(cwPoll);clearInterval(cwConT);}
+  }
+
+  function cwLoadCons(){
+    fetch(CW_API+'?action=contacts')
+      .then(function(r){return r.json();})
+      .then(function(j){if(!j.success)return;cwCons=j.data;cwRenderCons(cwCons);cwUpdBadge();})
+      .catch(function(){});
+  }
+
+  function cwRenderCons(list){
+    var el=document.getElementById('cwClist');
+    if(!list.length){el.innerHTML='<div class="cw-cempty">No employees found.</div>';return;}
+    el.innerHTML=list.map(function(c){
+      var isAct=cwAct&&cwAct.user_id==c.user_id;
+      var name=c.full_name||c.email||'Employee';
+      var lastPrev=c.last_message?'<div class="cw-cs" style="font-style:italic;">'+(c.last_mine?'You: ':'')+c.last_message+'</div>':'';
+      return '<div class="cw-ci'+(isAct?' active':'')+'" onclick="cwOpenChat('+c.user_id+')">'+
+        '<div class="cw-av" style="background:'+cwCol(name)+'">'+cwIni(name)+'</div>'+
+        '<div class="cw-cn" title="'+name+'">'+name+'</div>'+
+        '<div class="cw-cs">'+cwFmtS(c.last_at)+'</div>'+
+        lastPrev+
+        (c.unread>0?'<div class="cw-cu">'+c.unread+'</div>':'')+
+      '</div>';
+    }).join('');
+  }
+
+  function cwFilter(){
+    var q=document.getElementById('cwSrch').value.toLowerCase();
+    cwRenderCons(q?cwCons.filter(function(c){return (c.full_name||c.email||'').toLowerCase().indexOf(q)>=0;}):cwCons);
+  }
+
+  function cwUpdBadge(){
+    var total=cwCons.reduce(function(s,c){return s+(c.unread||0);},0);
+    var b=document.getElementById('cwBadge');
+    b.textContent=total||'';b.style.display=total?'flex':'none';
+  }
+
+  function cwOpenChat(userId){
+    cwAct=cwCons.find(function(c){return c.user_id==userId;})||{user_id:userId};
+    cwLastT=null;cwRenderCons(cwCons);cwCancelEdit();
+    document.getElementById('cwNoSel').style.display='none';
+    var area=document.getElementById('cwChatArea');
+    area.style.display='flex';area.style.flex='1';area.style.flexDirection='column';area.style.overflow='hidden';
+    var av=document.getElementById('cwChatAv');
+    var name=cwAct.full_name||cwAct.email||'Employee';
+    av.textContent=cwIni(name);av.style.background=cwCol(name);
+    document.getElementById('cwChatName').textContent=name;
+    document.getElementById('cwChatSub').textContent=cwAct.position_title||cwAct.department||'Employee';
+    document.getElementById('cwHdSub').textContent=name;
+    document.getElementById('cwMsgs').innerHTML='<div style="text-align:center;padding:24px;font-size:.73rem;color:#94a3b8;">Loading...</div>';
+    cwLoadMsgs(true);
+    document.getElementById('cwInp').focus();
+    clearInterval(cwPoll);cwPoll=setInterval(function(){cwLoadMsgs(false);},3000);
+  }
+
+  function cwLoadMsgs(initial){
+    if(!cwAct)return;
+    var url=CW_API+'?action=messages&with='+cwAct.user_id;
+    if(!initial&&cwLastT)url+='&since_id='+cwLastT;
+    fetch(url)
+      .then(function(r){return r.json();})
+      .then(function(j){
+        if(!j.success)return;
+        if(initial){
+          cwRenderMsgs(j.data);
+          cwLastT=j.data&&j.data.length?j.data[j.data.length-1].message_id:0;
+        } else if(j.data&&j.data.length){
+          cwAppendMsgs(j.data);
+          cwLastT=j.data[j.data.length-1].message_id;
+          cwLoadCons();
+        }
+        // Update seen indicators on existing bubbles
+        if(initial&&j.data){
+          j.data.forEach(function(m){
+            if(parseInt(m.sender_id)===CW_ME&&(m.is_read==1||m.is_read==='1')){
+              cwMarkSeen(m.message_id);
+            }
+          });
+        }
+      }).catch(function(){});
+  }
+
+  function cwMarkSeen(msgId){
+    var row=document.querySelector('.cw-mrow[data-msgid="'+msgId+'"]');
+    if(!row)return;
+    var mt=row.querySelector('.cw-mt');
+    if(mt&&!mt.querySelector('.cw-seen')){
+      var s=document.createElement('span');
+      s.className='cw-seen';s.innerHTML='&#x2713;&#x2713; Seen';
+      mt.appendChild(s);
+    }
+  }
+
+  function cwRenderMsgs(msgs){
+    var el=document.getElementById('cwMsgs');
+    if(!msgs||!msgs.length){el.innerHTML='<div style="text-align:center;padding:28px 16px;font-size:.75rem;color:#94a3b8;line-height:1.7;">No messages yet.<br>Say hello! &#x1F44B;</div>';return;}
+    var html='',ld='';
+    msgs.forEach(function(m){
+      var ds=new Date(m.sent_at).toLocaleDateString('en-PH',{weekday:'short',month:'short',day:'numeric'});
+      if(ds!==ld){html+='<div class="cw-ddiv"><span>'+ds+'</span></div>';ld=ds;}
+      html+=cwBuildMsg(m);
+    });
+    el.innerHTML=html;el.scrollTop=el.scrollHeight;
+  }
+
+  function cwAppendMsgs(msgs){
+    var el=document.getElementById('cwMsgs');
+    var html='';msgs.forEach(function(m){html+=cwBuildMsg(m);});
+    el.insertAdjacentHTML('beforeend',html);el.scrollTop=el.scrollHeight;
+  }
+
+  function cwBuildMsg(m){
+    var mine=parseInt(m.sender_id)===CW_ME;
+    var name=cwAct?cwAct.full_name||cwAct.email||'':'?';
+    var unsent=(m.is_unsent==1||m.is_unsent==='1');
+    var edited =(m.is_edited==1||m.is_edited==='1')&&!unsent;
+    var seen   =(mine&&!unsent&&(m.is_read==1||m.is_read==='1'));
+    var bubbleCls='cw-bubble'+(unsent?' unsent':'')+(edited?' edited':'');
+    var msgText=unsent?'You unsent a message':cwEsc(m.message);
+
+    var actions='';
+    if(mine&&!unsent){
+      actions='<div class="cw-msg-actions">'+
+        '<button class="cw-act-btn" onclick="cwStartEdit('+m.message_id+',this)" title="Edit">&#x270F;&#xFE0F;</button>'+
+        '<button class="cw-act-btn del" onclick="cwUnsend('+m.message_id+')" title="Unsend">&#x1F5D1;&#xFE0F;</button>'+
+      '</div>';
+    }
+
+    return '<div class="cw-mrow '+(mine?'mine':'them')+'" data-msgid="'+m.message_id+'">'+
+      actions+
+      '<div class="cw-mav" style="background:'+(mine?'#2563eb':cwCol(name))+'">'+( mine?CW_INIT:cwIni(name))+'</div>'+
+      '<div class="cw-msg-wrap">'+
+        '<div class="'+bubbleCls+'" data-raw="'+cwEsc(m.message)+'">'+msgText+'</div>'+
+        '<div class="cw-mt">'+cwFmtL(m.sent_at)+(seen?'<span class="cw-seen">&#x2713;&#x2713; Seen</span>':'')+'</div>'+
+      '</div>'+
+    '</div>';
+  }
+
+  // ── Send ─────────────────────────────────────────────────────
+  function cwSend(){
+    if(!cwAct||cwSending)return;
+    var inp=document.getElementById('cwInp'),msg=inp.value.trim();if(!msg)return;
+    // Edit mode
+    if(cwEditId){cwSubmitEdit(cwEditId,msg);return;}
+    cwSending=true;
+    var btn=document.getElementById('cwSendBtn');btn.disabled=true;
+    var sentMsg=msg;inp.value='';cwResize(inp);
+    var fd=new FormData();fd.append('action','send');fd.append('to',cwAct.user_id);fd.append('message',sentMsg);
+    fd.append('csrf_token', CSRF_TOKEN);
+    fetch(CW_API,{method:'POST',body:fd})
+      .then(function(r){return r.json();})
+      .then(function(j){
+        if(j.success){cwAppendMsgs([j.data]);cwLastT=j.data.message_id;cwLoadCons();}
+      })
+      .catch(function(){})
+      .finally(function(){cwSending=false;btn.disabled=false;inp.focus();});
+  }
+
+  // ── Edit ─────────────────────────────────────────────────────
+  function cwStartEdit(msgId,btn){
+    var row=document.querySelector('.cw-mrow[data-msgid="'+msgId+'"]');
+    if(!row)return;
+    var bubble=row.querySelector('.cw-bubble');
+    if(!bubble)return;
+    cwEditId=msgId;
+    var raw=bubble.getAttribute('data-raw')||bubble.textContent;
+    var inp=document.getElementById('cwInp');
+    inp.value=raw.replace(/<br>/g,'\n');
+    cwResize(inp);inp.focus();
+    document.getElementById('cwEditBar').classList.add('show');
+    document.getElementById('cwSendBtn').innerHTML='&#x2713;';
+    // Highlight the bubble being edited
+    document.querySelectorAll('.cw-bubble').forEach(function(b){b.style.opacity='0.5';});
+    bubble.style.opacity='1';bubble.style.outline='2px solid #2563eb';bubble.style.outlineOffset='2px';
+  }
+
+  function cwSubmitEdit(msgId,newMsg){
+    cwSending=true;
+    var btn=document.getElementById('cwSendBtn');btn.disabled=true;
+    var fd=new FormData();fd.append('action','edit');fd.append('message_id',msgId);fd.append('message',newMsg);
+    fd.append('csrf_token', CSRF_TOKEN);
+    fetch(CW_API,{method:'POST',body:fd})
+      .then(function(r){return r.json();})
+      .then(function(j){
+        if(j.success){
+          var row=document.querySelector('.cw-mrow[data-msgid="'+msgId+'"]');
+          if(row){
+            var bubble=row.querySelector('.cw-bubble');
+            if(bubble){bubble.innerHTML=cwEsc(newMsg);bubble.setAttribute('data-raw',newMsg);bubble.classList.add('edited');}
+          }
+          cwCancelEdit();
+        }
+      })
+      .catch(function(){})
+      .finally(function(){cwSending=false;btn.disabled=false;});
+  }
+
+  function cwCancelEdit(){
+    cwEditId=null;
+    document.getElementById('cwEditBar').classList.remove('show');
+    document.getElementById('cwSendBtn').innerHTML='&#x27A4;';
+    document.getElementById('cwInp').value='';
+    document.querySelectorAll('.cw-bubble').forEach(function(b){b.style.opacity='';b.style.outline='';b.style.outlineOffset='';});
+  }
+
+  // ── Unsend ───────────────────────────────────────────────────
+  function cwUnsend(msgId){
+    if(!confirm('Unsend this message? It will be removed for everyone.'))return;
+    var fd=new FormData();fd.append('action','unsend');fd.append('message_id',msgId);
+    fd.append('csrf_token', CSRF_TOKEN);
+    fetch(CW_API,{method:'POST',body:fd})
+      .then(function(r){return r.json();})
+      .then(function(j){
+        if(j.success){
+          var row=document.querySelector('.cw-mrow[data-msgid="'+msgId+'"]');
+          if(row){
+            var bubble=row.querySelector('.cw-bubble');
+            if(bubble){
+              bubble.innerHTML='You unsent a message';
+              bubble.className='cw-bubble unsent';
+              bubble.removeAttribute('data-raw');
+            }
+            var actions=row.querySelector('.cw-msg-actions');
+            if(actions)actions.remove();
+          }
+          cwLoadCons();
+        }
+      }).catch(function(){});
+  }
+
+  function cwKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();e.stopPropagation();cwSend();}}
+  function cwResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,90)+'px';}
+
+  // ── Chat notification toast CSS ──────────────────────────────
+  var _ns = document.createElement('style');
+  _ns.textContent = `
+    .cw-notif-toast {
+      position:fixed;bottom:24px;left:24px;z-index:99999;
+      display:flex;align-items:center;gap:12px;
+      background:#1e293b;color:#fff;
+      padding:13px 18px;border-radius:14px;
+      box-shadow:0 8px 32px rgba(0,0,0,.28);
+      font-family:'Nunito',sans-serif;font-size:.85rem;font-weight:700;
+      cursor:pointer;max-width:300px;
+      animation:_cwni .35s cubic-bezier(.34,1.4,.64,1) both;
+      border-left:4px solid #2563eb;
+    }
+    @keyframes _cwni{from{opacity:0;transform:translateY(20px) scale(.92);}to{opacity:1;transform:translateY(0) scale(1);}}
+    .cw-notif-toast:hover{background:#334155;}
+    .cw-nt-av{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:800;color:#fff;flex-shrink:0;}
+    .cw-nt-body{flex:1;min-width:0;}
+    .cw-nt-name{font-size:.82rem;font-weight:800;margin-bottom:2px;}
+    .cw-nt-msg{font-size:.74rem;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;}
+    .cw-nt-x{background:none;border:none;color:#64748b;font-size:1rem;cursor:pointer;padding:0;flex-shrink:0;}
+    .cw-nt-x:hover{color:#fff;}
+  `;
+  document.head.appendChild(_ns);
+
+  var cwPrevCount = 0, cwNotifTimer = null;
+
+  function cwShowToast(name, msg, userId) {
+    var old = document.querySelector('.cw-notif-toast');
+    if (old) old.remove();
+    var colors = ['#2563eb','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4'];
+    var col = colors[Math.abs([...(name||'?')].reduce(function(a,c){return a+c.charCodeAt(0);},0)) % colors.length];
+    var ini = (name||'?').split(' ').map(function(w){return w[0]||'';}).join('').slice(0,2).toUpperCase();
+    var t = document.createElement('div');
+    t.className = 'cw-notif-toast';
+    t.innerHTML =
+      '<div class="cw-nt-av" style="background:'+col+'">'+ini+'</div>'+
+      '<div class="cw-nt-body"><div class="cw-nt-name">'+name+'</div><div class="cw-nt-msg">'+msg+'</div></div>'+
+      '<button class="cw-nt-x" onclick="event.stopPropagation();this.parentNode.remove();">&#x2715;</button>';
+    t.addEventListener('click', function(){
+      t.remove();
+      if (!cwOpen) cwToggle();
+      if (userId) setTimeout(function(){ var c=cwCons.find(function(x){return x.user_id==userId;}); if(c) cwOpenChat(userId); }, 350);
+    });
+    document.body.appendChild(t);
+    clearTimeout(cwNotifTimer);
+    cwNotifTimer = setTimeout(function(){
+      if (t.parentNode){ t.style.transition='opacity .4s,transform .4s'; t.style.opacity='0'; t.style.transform='translateY(10px)'; setTimeout(function(){if(t.parentNode)t.remove();},400); }
+    }, 6000);
+  }
+
+  // Poll every 5s — update 💬 badge + show toast on new messages
+  function cwPollUnread(){
+    fetch(CW_API+'?action=contacts')
+      .then(function(r){return r.json();})
+      .then(function(j){
+        if (!j.success) return;
+        var total = j.data.reduce(function(s,c){return s+(c.unread||0);},0);
+
+        // Always update badge on 💬 button
+        var b = document.getElementById('cwBadge');
+        if (b){ b.textContent=total||''; b.style.display=total?'flex':'none'; }
+
+        // Toast when new message arrives and widget is closed
+        if (!cwOpen && total > cwPrevCount) {
+          var sender = j.data.find(function(c){return c.unread>0;});
+          if (sender) cwShowToast(sender.full_name||sender.email||'Employee', sender.last_message||'Sent you a message', sender.user_id);
+        }
+
+        // Refresh contact list if widget is open
+        if (cwOpen){ cwCons=j.data; cwRenderCons(cwCons); }
+        cwPrevCount = total;
+      }).catch(function(){});
+  }
+  // Run immediately on page load then every 5s
+  cwPollUnread();
+  setInterval(cwPollUnread, 5000);
+  </script>
+
+</body>
+</html>

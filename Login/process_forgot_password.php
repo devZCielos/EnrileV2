@@ -1,0 +1,118 @@
+<?php
+// ============================================================
+//  LGU ENRILE HRMS — Forgot Password Processor
+//  File: Landingpage/process_forgot_password.php
+//
+//  Flow:
+//  1. Validate the submitted email
+//  2. Look up the email in user_accounts
+//  3. Generate a secure token + store with a 1-hour expiry
+//  4. Send a reset link via PHP mail()
+//  5. Always show a success message (never reveal if email exists)
+// ============================================================
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    header('Location: ../Landingpage/forgot_password.php');
+    exit();
+}
+
+require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../config/csrf.php';
+csrf_verify();
+    exit();
+}
+
+require_once __DIR__ . '/../config/db.php';
+
+// ── Collect & validate input ──────────────────────────────────
+$email = trim($_POST['email'] ?? '');
+
+if (empty($email)) {
+    header('Location: ../Landingpage/forgot_password.php?error=' . urlencode('Email address is required.'));
+    exit();
+}
+
+if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+    header('Location: ../Landingpage/forgot_password.php?error=' . urlencode('Please enter a valid email address.'));
+    exit();
+}
+
+// ── Look up email & send reset link ───────────────────────────
+// We wrap everything in try/catch and ALWAYS show the same
+// success message — this prevents email enumeration attacks.
+try {
+
+    $stmt = $pdo->prepare("SELECT user_id FROM user_accounts WHERE email = ? LIMIT 1");
+    $stmt->execute([$email]);
+    $user = $stmt->fetch();
+
+    if ($user) {
+
+        // ── 1. Generate a cryptographically secure token ──────
+        $token     = bin2hex(random_bytes(32));          // 64-char hex string
+        $expiresAt = date('Y-m-d H:i:s', time() + 3600); // 1 hour from now
+
+        // We store "token|expiry" in the remember_token column.
+        // For a production system, create a dedicated password_resets table.
+        $storedValue = $token . '|' . $expiresAt;
+
+        $pdo->prepare("
+            UPDATE user_accounts
+            SET    remember_token = ?
+            WHERE  user_id = ?
+        ")->execute([$storedValue, $user['user_id']]);
+
+        // ── 2. Build the reset URL ────────────────────────────
+        $protocol  = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $host      = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        $resetUrl  = $protocol . '://' . $host
+                   . '/enrile/Login/reset_password.php'
+                   . '?token=' . urlencode($token)
+                   . '&email=' . urlencode($email);
+
+        // ── 3. Compose the email ──────────────────────────────
+        $subject = 'LGU Enrile HRMS — Password Reset Request';
+        $message = "Hello,\r\n\r\n"
+                 . "We received a request to reset your password for the\r\n"
+                 . "LGU Enrile HR Management System.\r\n\r\n"
+                 . "Click the link below to reset your password.\r\n"
+                 . "This link will expire in 1 hour.\r\n\r\n"
+                 . $resetUrl . "\r\n\r\n"
+                 . "If you did not request a password reset, you can safely\r\n"
+                 . "ignore this email. Your password will not be changed.\r\n\r\n"
+                 . "— LGU Enrile HR Administrator";
+
+        $headers  = "From: noreply@lgu-enrile.gov.ph\r\n";
+        $headers .= "Reply-To: hr@lgu-enrile.gov.ph\r\n";
+        $headers .= "X-Mailer: PHP/" . phpversion() . "\r\n";
+        $headers .= "Content-Type: text/plain; charset=UTF-8";
+
+        // ── 4. Try to send email via PHP mail() ─────────────
+        $sent = @mail($email, $subject, $message, $headers);
+        // Always store reset URL in session so it can be shown on screen
+        // (useful on XAMPP where mail() is not configured)
+        session_start();
+        $_SESSION['reset_link']  = $resetUrl;
+        $_SESSION['reset_email'] = $email;
+        if (!$sent) {
+            error_log('[HRMS] Reset email not sent (mail() unavailable). Link: ' . $resetUrl);
+        }
+
+        // ── 5. Log the action ─────────────────────────────────
+        $pdo->prepare("
+            INSERT INTO activity_logs (user_id, action, module, ip_address)
+            VALUES (?, 'Password reset requested', 'Auth', ?)
+        ")->execute([$user['user_id'], $_SERVER['REMOTE_ADDR'] ?? null]);
+    }
+    // If $user is false (email not found), we do nothing — same response
+
+} catch (PDOException $e) {
+    error_log('[HRMS] Forgot password DB error: ' . $e->getMessage());
+    // Still fall through to the success redirect
+}
+
+// ── Always show success (don't reveal if email exists) ────────
+header('Location: ../Landingpage/forgot_password.php?success=' . urlencode(
+    'If an account exists with that email address, a password reset link has been sent. Please check your inbox (and spam folder).'
+));
+exit();
