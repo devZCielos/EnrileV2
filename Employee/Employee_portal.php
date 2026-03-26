@@ -138,12 +138,28 @@ if ($action) {
 
             // ── LEAVE BALANCES ────────────────────────────────
             case 'balances':
-                // Get employee gender/civil status for filtering
-                $empBal = $pdo->prepare("SELECT gender, civil_status FROM employees WHERE employee_id = ?");
+                // ── AUTO-INITIALIZE LEAVE BALANCES FOR NEW EMPLOYEES OR NEW CALENDAR YEAR ──
+                $checkBal = $pdo->prepare("SELECT COUNT(*) FROM leave_balances WHERE employee_id = ? AND calendar_year = YEAR(NOW())");
+                $checkBal->execute([$employeeId]);
+                $hasBalance = (int)($checkBal->fetchColumn() ?: 0) > 0;
+                
+                if (!$hasBalance && $employeeId) {
+                    // Get all active leave types
+                    $ltypes = $pdo->query("SELECT leave_type_id, max_days FROM leave_types WHERE is_active = 1")->fetchAll();
+                    foreach ($ltypes as $lt) {
+                        $pdo->prepare("
+                            INSERT INTO leave_balances (employee_id, leave_type_id, calendar_year, total_credits, used_days)
+                            VALUES (?, ?, YEAR(NOW()), ?, 0)
+                            ON DUPLICATE KEY UPDATE total_credits = VALUES(total_credits)
+                        ")->execute([$employeeId, $lt['leave_type_id'], $lt['max_days']]);
+                    }
+                }
+                
+                // Get employee gender for filtering
+                $empBal = $pdo->prepare("SELECT gender FROM employees WHERE employee_id = ?");
                 $empBal->execute([$employeeId]);
                 $empBalRow    = $empBal->fetch();
-                $balGender    = strtolower($empBalRow['gender']       ?? '');
-                $balCivil     = strtolower($empBalRow['civil_status'] ?? '');
+                $balGender    = strtolower($empBalRow['gender'] ?? '');
 
                 $stmt = $pdo->prepare("
                     SELECT lb.balance_id, lb.total_credits, lb.used_days, lb.remaining_days,
@@ -179,17 +195,12 @@ if ($action) {
                 }
 
                 foreach ($balances as &$b) {
-                    $needsMarry = (int)($b['require_married'] ?? 0);
-                    $b['disabled_reason'] = ($needsMarry && $balCivil !== 'married')
-                        ? 'Available for married employees only' : null;
-                    
                     // Add pending days info
                     $leaveTypeId = $b['leave_type_id'];
                     $b['pending_days'] = $pendingByType[$leaveTypeId] ?? 0;
                     
                     // Calculate available days accounting for pending requests
                     $b['available_after_pending'] = max(0, $b['remaining_days'] - $b['pending_days']);
-
 
                     $hist = $pdo->prepare("
                         SELECT date_from, date_to, days_requested, status
@@ -334,6 +345,29 @@ if ($action) {
                 }
                 // ── End eligibility check ────────────────────────────────────
 
+                // ── Check for past dates ──────────────────────────────────
+                $today = (new DateTime())->format('Y-m-d');
+                if ($dateFrom < $today) {
+                    echo json_encode(['success' => false, 'message' => '🚫 Cannot apply for leave on past dates. Please select today or a future date.']); break;
+                }
+                
+                // ── Check for overlapping leaves (any leave type) ──────────────
+                $overlapCheck = $pdo->prepare("
+                    SELECT COUNT(*) as cnt FROM leave_requests
+                    WHERE employee_id = ? 
+                      AND (status = 'Pending' OR status = 'Approved')
+                      AND (
+                        (date_from <= ? AND date_to >= ?)
+                        OR (date_from >= ? AND date_from <= ?)
+                      )
+                ");
+                $overlapCheck->execute([$employeeId, $dateTo, $dateFrom, $dateFrom, $dateTo]);
+                $overlapCount = (int)($overlapCheck->fetchColumn() ?: 0);
+                if ($overlapCount > 0) {
+                    echo json_encode(['success' => false, 'message' => '❌ You cannot apply for leave on the same date as your existing leave request (any leave type).']); break;
+                }
+                // ── End overlap check ────────────────────────────────────────
+
                 // Get current balance
                 $bal = $pdo->prepare("
                     SELECT remaining_days FROM leave_balances
@@ -384,12 +418,11 @@ if ($action) {
 
             // ── LEAVE TYPES ───────────────────────────────────
             case 'leave_types':
-                // Fetch employee's gender and civil status for filtering
-                $empInfo = $pdo->prepare("SELECT gender, civil_status FROM employees WHERE employee_id = ?");
+                // Fetch employee's gender for filtering
+                $empInfo = $pdo->prepare("SELECT gender FROM employees WHERE employee_id = ?");
                 $empInfo->execute([$employeeId]);
                 $empRow  = $empInfo->fetch();
-                $empGender     = $empRow['gender']       ?? 'Unknown';
-                $empCivilStatus= $empRow['civil_status'] ?? 'Single';
+                $empGender     = $empRow['gender'] ?? 'Unknown';
 
                 // Get leave types with balances (avoiding duplicate rows from LEFT JOIN)
                 $stmt = $pdo->prepare("
@@ -411,28 +444,17 @@ if ($action) {
                 $allTypes = $stmt->fetchAll();
 
                 // Filter: remove leave types that don't apply to this employee's gender
-                $filtered = array_filter($allTypes, function($lt) use ($empGender) {
+                $result = array_values(array_filter($allTypes, function($lt) use ($empGender) {
                     $ag = $lt['applicable_gender'] ?? 'All';
                     if ($ag === 'Male'   && strtolower($empGender) !== 'male')   return false;
                     if ($ag === 'Female' && strtolower($empGender) !== 'female') return false;
                     return true;
-                });
-
-                // For each remaining type, flag if marriage is required but employee is not married
-                $result = array_values(array_map(function($lt) use ($empCivilStatus) {
-                    $isMarried  = strtolower($empCivilStatus) === 'married';
-                    $needsMarry = (int)($lt['require_married'] ?? 0);
-                    $lt['disabled_reason'] = ($needsMarry && !$isMarried)
-                        ? 'Available for married employees only'
-                        : null;
-                    return $lt;
-                }, $filtered));
+                }));
 
                 echo json_encode([
                     'success'      => true,
                     'data'         => $result,
                     'emp_gender'   => $empGender,
-                    'emp_civil'    => $empCivilStatus,
                 ]);
                 break;
 
@@ -1197,6 +1219,9 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     .doc-filter:focus{border-color:var(--primary);}
     .doc-upload-btn{margin-left:auto;display:flex;align-items:center;gap:6px;padding:8px 18px;background:linear-gradient(135deg,var(--primary),var(--primary-dk));color:#fff;border:none;border-radius:var(--r-sm);font-family:'Nunito',sans-serif;font-size:.83rem;font-weight:700;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(37,99,235,.28);white-space:nowrap;}
     .doc-upload-btn:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(37,99,235,.38);}
+    .doc-reset-btn{display:flex;align-items:center;gap:6px;padding:8px 16px;background:var(--g100);color:var(--g600);border:1.5px solid var(--g200);border-radius:var(--r-sm);font-family:'Nunito',sans-serif;font-size:.83rem;font-weight:700;cursor:pointer;transition:all .2s;white-space:nowrap;}
+    .doc-reset-btn:hover{background:var(--g200);border-color:var(--g300);color:var(--g700);transform:translateY(-1px);}
+    .doc-reset-btn:active{transform:translateY(0);}
 
     .doc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;padding:18px;}
     .doc-card{background:var(--white);border-radius:var(--r);border:1.5px solid var(--g200);box-shadow:var(--sh-sm);overflow:hidden;transition:transform .2s,box-shadow .2s;animation:fadeUp .35s ease both;}
@@ -1267,9 +1292,368 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     .overlay-mob{display:none;position:fixed;inset:0;background:rgba(0,0,0,.48);z-index:250;}
     .overlay-mob.show{display:block;}
 
-    @media(max-width:1100px){.dash-grid{grid-template-columns:1fr;}.balances-grid{grid-template-columns:1fr;}.profile-grid{grid-template-columns:1fr;}.doc-stat-row{grid-template-columns:1fr 1fr 1fr;}}
-    @media(max-width:768px){.sidebar{transform:translateX(-100%);}.sidebar.open{transform:translateX(0);}.main{margin-left:0;}.menu-toggle{display:block;}.page{padding:14px;}.topbar{padding:0 14px;}.tb-chip{display:none;}.hero-date{display:none;}.lt-grid{grid-template-columns:repeat(2,1fr);}.fg-row{grid-template-columns:1fr;}.req-tabs{width:100%;}.doc-stat-row{grid-template-columns:1fr;}.doc-grid{grid-template-columns:1fr;}.fl-wrap{grid-template-columns:1fr;}}
-    @media(max-width:480px){.page{padding:10px;}.toast{left:10px;right:10px;bottom:10px;max-width:100%;}}
+    @media(max-width:1100px){
+      .dash-grid{grid-template-columns:1fr;}
+      .balances-grid{grid-template-columns:1fr;}
+      .profile-grid{grid-template-columns:1fr;}
+      .doc-stat-row{grid-template-columns:1fr 1fr 1fr;}
+    }
+
+    @media(max-width:768px){
+      :root{--sidebar-w:220px;--topbar-h:56px;}
+      
+      /* Sidebar */
+      .sidebar{
+        transform:translateX(-100%);
+        width:220px;
+        z-index:300;
+      }
+      .sidebar.open{transform:translateX(0);}
+      .sb-brand{padding:16px 14px 12px;gap:8px;}
+      .sb-logo{width:36px;height:36px;}
+      .sb-brand-text h2{font-size:.88rem;}
+      .sb-brand-text span{font-size:.56rem;}
+      .sb-user{padding:12px 14px 10px;gap:8px;}
+      .sb-avatar{width:40px;height:40px;font-size:.80rem;}
+      .sb-uname{font-size:.78rem;}
+      .sb-upos{font-size:.62rem;}
+      .sb-nav{padding:8px;}
+      .sb-item{padding:8px 10px;font-size:.80rem;gap:8px;}
+      .sb-icon{width:26px;height:26px;font-size:.85rem;}
+      .sb-section{font-size:.55rem;padding:8px 8px 3px;}
+      .sb-label{font-size:.56rem;padding:8px 8px 2px;}
+      .sb-logout{padding:8px 10px;font-size:.80rem;gap:8px;}
+      
+      /* Topbar */
+      .main{margin-left:0;}
+      .topbar{
+        height:var(--topbar-h);
+        padding:0 12px;
+        gap:10px;
+      }
+      .menu-toggle{display:block;font-size:1.2rem;padding:2px;}
+      .tb-title{font-size:.95rem;}
+      .tb-sub{font-size:.65rem;}
+      .tb-chip{display:none;}
+      .tb-btn{width:32px;height:32px;font-size:.88rem;}
+      .tb-btn .notif{width:12px;height:12px;font-size:.50rem;}
+      
+      /* Pages */
+      .page{padding:14px;}
+      
+      /* Hero */
+      .hero{padding:16px 14px;gap:12px;margin-bottom:14px;}
+      .hero-av{width:56px;height:56px;font-size:1.2rem;}
+      .hero-body h2{font-size:1.1rem;}
+      .hero-body p{font-size:.74rem;}
+      .hero-date{display:none;}
+      
+      /* Dashboard grid */
+      .dash-grid{grid-template-columns:1fr;gap:14px;}
+      .mini-tbl{font-size:.77rem;}
+      .mini-tbl th{padding:7px 10px;font-size:.62rem;}
+      .mini-tbl td{padding:9px 10px;}
+      
+      /* Cards */
+      .card{margin-bottom:2px;}
+      .card-title{font-size:.87rem;}
+      .card-header{padding:12px 16px 10px;}
+      
+      /* Quick actions */
+      .qa-grid{grid-template-columns:1fr 1fr;padding:12px;gap:8px;}
+      .qa-btn{padding:12px 6px;gap:6px;}
+      .qa-icon{width:36px;height:36px;font-size:1rem;}
+      .qa-lbl{font-size:.68rem;}
+      
+      /* Announcements */
+      .ann-item{padding:9px 14px;}
+      
+      /* Profile */
+      .profile-grid{grid-template-columns:1fr;gap:14px;}
+      .field-grid{grid-template-columns:1fr;gap:8px;}
+      .sec-title{font-size:.68rem;margin-bottom:10px;}
+      
+      /* Leave requests */
+      .req-tabs{width:100%;flex-wrap:nowrap;overflow-x:auto;}
+      .req-tab{padding:7px 14px;font-size:.78rem;white-space:nowrap;}
+      .req-card{margin-bottom:2px;}
+      .req-body{padding:12px 14px;}
+      .req-top{gap:6px;}
+      .req-title{font-size:.85rem;}
+      .req-meta{font-size:.73rem;}
+      
+      /* File leave */
+      .fl-wrap{grid-template-columns:1fr;gap:14px;}
+      .fl-right{order:2;}
+      .lt-grid{grid-template-columns:repeat(2,1fr);gap:8px;}
+      .lt-opt{padding:10px 8px;}
+      .form-section-body{padding:14px;}
+      .fg{margin-bottom:12px;}
+      .fg label{font-size:.70rem;}
+      .fg input,.fg select,.fg textarea{padding:8px 10px;font-size:.83rem;}
+      .fg textarea{height:65px;}
+      .fg-row{grid-template-columns:1fr;gap:10px;}
+      
+      /* Balances */
+      .balances-grid{grid-template-columns:1fr;gap:14px;}
+      .bal-card{padding:16px 18px;}
+      .bc-nums{gap:8px;}
+      
+      /* Documents */
+      .doc-stat-row{grid-template-columns:1fr;gap:12px;}
+      .doc-stat{padding:12px 14px;}
+      .doc-toolbar{gap:8px;flex-wrap:wrap;padding:10px 14px;}
+      .doc-search{min-width:140px;max-width:100%;flex:1;}
+      .doc-upload-btn{margin-left:0;padding:7px 14px;font-size:.80rem;}
+      .doc-reset-btn{padding:7px 12px;font-size:.80rem;}
+      .doc-grid{grid-template-columns:1fr;gap:12px;padding:12px;}
+      .doc-card{margin-bottom:2px;}
+      
+      /* Modal */
+      .modal{width:94%;max-width:100%;}
+      .modal-head{padding:14px 18px 10px;}
+      .modal-head h3{font-size:.95rem;}
+      .modal-body{padding:16px 18px;}
+      .drop-zone{padding:20px;margin-bottom:12px;}
+      
+      /* Forms in modals */
+      .fg input,.fg select,.fg textarea{font-size:.83rem;}
+    }
+
+    @media(max-width:480px){
+      :root{--sidebar-w:180px;--topbar-h:52px;}
+      
+      html{font-size:13px;}
+      
+      /* Sidebar */
+      .sidebar{width:180px;}
+      .sb-brand{padding:12px 10px 8px;gap:6px;}
+      .sb-logo{width:32px;height:32px;}
+      .sb-brand-text h2{font-size:.80rem;}
+      .sb-brand-text span{font-size:.52rem;letter-spacing:.08em;}
+      .sb-user{padding:10px 10px 8px;gap:6px;}
+      .sb-avatar{width:36px;height:36px;font-size:.75rem;}
+      .sb-uname{font-size:.75rem;}
+      .sb-upos{font-size:.60rem;}
+      .sb-nav{padding:6px;}
+      .sb-item{padding:7px 8px;font-size:.75rem;margin-bottom:1px;}
+      .sb-icon{width:24px;height:24px;font-size:.80rem;}
+      .sb-section{font-size:.52rem;padding:6px 6px 2px;}
+      .sb-label{font-size:.52rem;padding:6px 6px 2px;}
+      .sb-logout{padding:7px 8px;font-size:.75rem;}
+      .sb-badge{font-size:.54rem;}
+      
+      /* Topbar */
+      .topbar{
+        padding:0 10px;
+        gap:8px;
+        height:var(--topbar-h);
+      }
+      .menu-toggle{font-size:1.1rem;padding:1px;}
+      .tb-left{flex:1;}
+      .tb-title{font-size:.90rem;font-weight:700;}
+      .tb-sub{font-size:.62rem;display:none;}
+      .tb-right{gap:6px;}
+      .notif-btn-ep{width:32px;height:32px;}
+      .notif-cnt-ep{width:14px;height:14px;font-size:.48rem;}
+      
+      /* General */
+      .page{padding:10px;}
+      
+      /* Hero */
+      .hero{
+        padding:12px 10px;
+        gap:10px;
+        border-radius:11px;
+        flex-wrap:wrap;
+      }
+      .hero::before{display:none;}
+      .hero-av{width:48px;height:48px;font-size:1rem;}
+      .hero-body h2{font-size:1rem;margin-bottom:1px;}
+      .hero-body p{font-size:.70rem;margin-top:1px;}
+      .hero-chips{gap:5px;margin-top:6px;}
+      .hero-chip{padding:2px 10px;font-size:.64rem;}
+      
+      /* Cards */
+      .card{border-radius:10px;margin-bottom:1px;}
+      .card-header{padding:10px 12px 8px;gap:6px;flex-wrap:wrap;}
+      .card-title{font-size:.82rem;}
+      .card-sub{font-size:.65rem;}
+      .card-link{font-size:.70rem;}
+      
+      /* Tables */
+      .mini-tbl{font-size:.72rem;}
+      .mini-tbl th{padding:6px 8px;font-size:.60rem;}
+      .mini-tbl td{padding:8px;}
+      .mini-tbl tbody tr{font-size:.72rem;}
+      
+      /* Dashboard */
+      .dash-grid{grid-template-columns:1fr;gap:10px;}
+      
+      /* Quick actions */
+      .qa-grid{grid-template-columns:1fr 1fr;padding:10px;gap:6px;}
+      .qa-btn{padding:10px 4px;border-radius:8px;}
+      .qa-icon{width:32px;height:32px;font-size:.95rem;border-radius:8px;}
+      .qa-lbl{font-size:.65rem;}
+      
+      /* Announcements */
+      .ann-item{padding:7px 10px;gap:8px;}
+      .ann-strong{font-size:.77rem;}
+      .ann-p{font-size:.70rem;}
+      .ann-small{font-size:.62rem;}
+      
+      /* Profile */
+      .profile-hero{
+        padding:16px;
+        gap:12px;
+        border-radius:11px;
+      }
+      .profile-hero .ph-edit{
+        padding:6px 12px;
+        font-size:.75rem;
+        top:10px;
+        right:10px;
+      }
+      .ph-av{width:56px;height:56px;font-size:1.2rem;border-width:2px;}
+      .ph-info h2{font-size:1rem;}
+      .ph-info p{font-size:.72rem;}
+      .profile-grid{grid-template-columns:1fr;gap:12px;}
+      .field-grid{grid-template-columns:1fr;gap:6px;}
+      .sec-title{font-size:.65rem;margin-bottom:8px;}
+      .field{padding:8px 10px;border-radius:7px;}
+      .field label{font-size:.60rem;margin-bottom:2px;}
+      .field span{font-size:.80rem;}
+      
+      /* Leave requests */
+      .req-tabs{width:100%;overflow-x:auto;}
+      .req-tab{padding:6px 12px;font-size:.74rem;white-space:nowrap;}
+      .req-card{border-radius:10px;margin-bottom:1px;}
+      .req-body{padding:10px 12px;}
+      .req-top{gap:6px;margin-bottom:6px;}
+      .req-title{font-size:.82rem;}
+      .req-meta{font-size:.70rem;gap:6px;}
+      .req-reason{font-size:.72rem;padding:6px 8px;border-radius:6px;margin-bottom:6px;}
+      .cancel-btn{padding:4px 10px;font-size:.68rem;border-radius:5px;}
+      
+      /* File leave */
+      .fl-wrap{grid-template-columns:1fr;gap:10px;}
+      .fl-right{gap:12px;order:2;}
+      .lt-grid{grid-template-columns:1fr 1fr;gap:6px;}
+      .lt-opt{padding:8px 6px;border-radius:8px;}
+      .lt-icon{font-size:1.1rem;margin-bottom:3px;}
+      .lt-name{font-size:.70rem;}
+      .lt-avail{font-size:.60rem;}
+      .days-box{gap:10px;padding:10px 12px;border-radius:8px;margin-bottom:10px;}
+      .days-num{font-size:1.8rem;}
+      .days-lbl{font-size:.73rem;}
+      .form-header{padding:14px 16px;border-radius:9px 9px 0 0;}
+      .form-header h3{font-size:.95rem;}
+      .form-header p{font-size:.70rem;}
+      .form-section-hd{padding:8px 14px;font-size:.76rem;border-radius:7px 7px 0 0;}
+      .form-section-body{padding:12px;border-radius:0 0 7px 7px;}
+      .fg{margin-bottom:10px;}
+      .fg label{font-size:.68rem;margin-bottom:3px;}
+      .fg input,.fg select,.fg textarea{padding:8px 10px;font-size:.82rem;border-radius:6px;}
+      .fg textarea{height:60px;}
+      .fg-row{grid-template-columns:1fr;gap:8px;}
+      .submit-btn{padding:10px;font-size:.90rem;border-radius:7px;margin-top:2px;}
+      .detail-section{padding:10px 12px;border-radius:6px;margin-bottom:10px;}
+      .detail-section-title{font-size:.65rem;margin-bottom:8px;}
+      
+      /* Balances */
+      .balances-grid{grid-template-columns:1fr;gap:12px;}
+      .bal-card{padding:14px 16px;border-radius:10px;}
+      .bc-top{margin-bottom:12px;}
+      .bc-title{font-size:.85rem;}
+      .bc-icon{width:40px;height:40px;font-size:1.1rem;}
+      .bc-nums{gap:8px;margin-bottom:10px;}
+      .bc-nb{padding:8px 4px;border-radius:6px;}
+      .bc-n{font-size:1.3rem;margin-bottom:1px;}
+      .bc-nl{font-size:.60rem;}
+      .hist-label{font-size:.62rem;margin-bottom:5px;}
+      .hist-row{padding:5px 0;font-size:.72rem;}
+      
+      /* Documents */
+      .doc-stat-row{grid-template-columns:1fr;gap:10px;}
+      .doc-stat{padding:10px 12px;border-radius:9px;}
+      .doc-stat-icon{width:40px;height:40px;font-size:1.1rem;border-radius:8px;}
+      .doc-stat-val{font-size:1.4rem;}
+      .doc-stat-lbl{font-size:.68rem;margin-top:1px;}
+      .doc-toolbar{gap:6px;padding:8px 10px;flex-wrap:wrap;}
+      .doc-search{min-width:130px;max-width:100%;padding:7px 10px;border-radius:6px;}
+      .doc-search input{font-size:.80rem;}
+      .doc-filter{padding:7px 10px;border-radius:6px;font-size:.80rem;}
+      .doc-upload-btn{margin-left:0;padding:7px 12px;font-size:.78rem;border-radius:6px;}
+      .doc-grid{grid-template-columns:1fr;gap:10px;padding:10px;}
+      .doc-card{border-radius:9px;margin-bottom:1px;overflow:hidden;}
+      .doc-card-top{padding:12px 12px 10px;gap:10px;}
+      .doc-file-icon{width:40px;height:40px;font-size:1.1rem;border-radius:8px;}
+      .doc-file-name{font-size:.80rem;}
+      .doc-file-size{font-size:.65rem;}
+      
+      /* Modals */
+      .modal{width:96%;max-width:100%;max-height:95vh;border-radius:11px;}
+      .modal-head{padding:12px 16px 10px;border-radius:11px 11px 0 0;}
+      .modal-head h3{font-size:.90rem;}
+      .modal-head p{font-size:.68rem;}
+      .modal-x{width:28px;height:28px;font-size:.90rem;}
+      .modal-body{padding:14px 16px;}
+      .modal-footer{padding:10px 16px;gap:8px;}
+      .drop-zone{padding:16px;border-radius:8px;margin-bottom:10px;}
+      .drop-zone .dz-ic{font-size:1.8rem;margin-bottom:6px;}
+      .drop-zone p{font-size:.80rem;}
+      .drop-zone span{font-size:.67rem;}
+      
+      /* Toast */
+      .toast{
+        bottom:12px;
+        right:8px;
+        left:8px;
+        padding:10px 14px;
+        font-size:.80rem;
+        border-radius:8px;
+        max-width:none;
+      }
+      
+      /* Modals and other */
+      .m-btn{padding:7px 16px;font-size:.80rem;border-radius:6px;}
+      .confirm-body{padding:20px 16px;}
+      .confirm-icon{font-size:2rem;margin-bottom:8px;}
+      .confirm-body h4{font-size:.90rem;margin-bottom:4px;}
+      .confirm-body p{font-size:.78rem;}
+    }
+
+    @media(max-width:360px){
+      html{font-size:12px;}
+      
+      .sidebar{width:160px;}
+      .sb-brand-text h2{font-size:.75rem;}
+      .sb-item{font-size:.70rem;padding:6px 6px;}
+      .sb-icon{width:22px;height:22px;font-size:.75rem;}
+      
+      .topbar{padding:0 8px;}
+      .page{padding:8px;}
+      
+      .card-title{font-size:.78rem;}
+      .field-grid{grid-template-columns:1fr;}
+      .lt-grid{grid-template-columns:1fr;}
+    }
+
+    /* Touch device optimizations */
+    @media(hover:none) and (pointer:coarse){
+      /* Make buttons bigger for touch */
+      .sb-item{min-height:40px;padding:6px 8px;}
+      .qa-btn{min-height:50px;touch-action:manipulation;}
+      .btn,.m-btn,.submit-btn,.cancel-btn{min-height:44px;touch-action:manipulation;}
+      .card-link{min-height:40px;padding:6px 8px;display:inline-flex;align-items:center;}
+      .req-tab{min-height:40px;}
+      
+      /* Remove hover effects */
+      .hero:hover{transform:none;}
+      .req-card:hover{transform:none;}
+      .doc-card:hover{transform:none;}
+      .qa-btn:hover{transform:none;}
+    }
 
     /* ── Document Preview Modal ── */
     .modal.preview{max-width:860px;width:96%;max-height:96vh;display:flex;flex-direction:column;}
@@ -1613,6 +1997,15 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
               </div>
             </div>
 
+            <!-- Others Leave Type -->
+            <div class="detail-section" id="detail-others">
+              <div class="detail-section-title">📋 Details of Leave — Specify Type</div>
+              <div class="detail-extra">
+                <label>What kind of leave are you filing? <span class="req">*</span></label>
+                <input type="text" id="others_leave_spec" placeholder="e.g. Personal, Family emergency, Cultural activity…"/>
+              </div>
+            </div>
+
             <div class="fg"><label>Reason / Remarks <span class="req">*</span></label><textarea id="flReason" placeholder="Briefly describe why you are filing this leave…"></textarea></div>
             <button class="submit-btn" onclick="submitLeave()">📤 Submit Leave Request</button>
           </div>
@@ -1644,13 +2037,6 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
   <!-- ══ LEAVE BALANCES ══ -->
   <div class="page" id="page-balances">
     <div class="balances-grid" id="balancesGrid"><div style="color:var(--g400);padding:20px;">Loading…</div></div>
-    <div class="card" style="max-width:660px;">
-      <div class="card-header"><div class="card-title">📊 Summary — CY <?= date('Y') ?></div></div>
-      <table class="mini-tbl">
-        <thead><tr><th>Leave Type</th><th>Total</th><th>Used</th><th>Remaining</th><th>Status</th></tr></thead>
-        <tbody id="balSummary"><tr><td colspan="5" style="text-align:center;padding:20px;color:var(--g400);">Loading…</td></tr></tbody>
-      </table>
-    </div>
   </div>
 
   <!-- ══ MY DOCUMENTS ══ -->
@@ -1695,7 +2081,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
           <option value="ID">Government ID</option>
           <option value="Other">Other</option>
         </select>
-        <button style="margin-left:auto;padding:7px 14px;border:1.5px solid var(--g200);border-radius:var(--r-sm);background:var(--white);font-family:'Nunito',sans-serif;font-size:.82rem;font-weight:700;color:var(--g600);cursor:pointer;" onclick="clearDocFilters()">🔁 Reset</button>
+        <button class="doc-reset-btn" onclick="clearDocFilters()" title="Clear all filters and search">🔁 Reset</button>
       </div>
       <div class="doc-grid" id="docGrid">
         <div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--g400);font-size:.875rem;">Loading…</div>
@@ -3639,7 +4025,7 @@ function renderFlRecent(requests) {
 /* ── Show/hide 6B detail panels based on selected leave type ── */
 function updateDetailSection(typeName) {
   var name = (typeName || '').toLowerCase();
-  var sections = ['vacation','sick','women','study','other'];
+  var sections = ['vacation','sick','women','study','other','others'];
   sections.forEach(function(s) {
     var el = document.getElementById('detail-' + s);
     if (el) el.classList.remove('show');
@@ -3658,6 +4044,9 @@ function updateDetailSection(typeName) {
     if (el) el.classList.add('show');
   } else if (name.indexOf('monetization') >= 0 || name.indexOf('terminal') >= 0) {
     var el = document.getElementById('detail-other');
+    if (el) el.classList.add('show');
+  } else if (name.indexOf('others') >= 0) {
+    var el = document.getElementById('detail-others');
     if (el) el.classList.add('show');
   }
 }
@@ -3702,6 +4091,10 @@ function getLeaveDetail() {
     var op = document.querySelector('input[name="other_purpose"]:checked');
     return op ? op.value : '';
   }
+  if (name.indexOf('others') >= 0) {
+    var spec = (document.getElementById('others_leave_spec').value || '').trim();
+    return spec ? 'Leave Type: ' + spec : '';
+  }
   return '';
 }
 
@@ -3711,8 +4104,31 @@ async function submitLeave() {
   document.getElementById('flFrom').classList.toggle('err',!from); if(!from)ok=false;
   document.getElementById('flTo').classList.toggle('err',!to);if(!to)ok=false;
   document.getElementById('flReason').classList.toggle('err',!reason);if(!reason)ok=false;
+  // If "Others" leave type, check if specification is provided
+  if(selTypeName && selTypeName.toLowerCase().indexOf('others') >= 0) {
+    const spec = (document.getElementById('others_leave_spec').value || '').trim();
+    const elem = document.getElementById('others_leave_spec');
+    if (!spec) {
+      if (elem) elem.classList.add('err');
+      ok = false;
+    } else if (elem) {
+      elem.classList.remove('err');
+    }
+  }
   if(!ok){showToast('⚠️ Please complete all required fields.','info');return;}
   if(days<1){showToast('⚠️ Date To must be on or after Date From.','info');return;}
+  
+  // Check if dates are in the past (cannot file leave for past dates)
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  const fromDate = new Date(from);
+  fromDate.setHours(0,0,0,0);
+  if (fromDate < today) {
+    showToast('🚫 Cannot apply for leave on past dates. Please select today or a future date.','error');
+    document.getElementById('flFrom').classList.add('err');
+    return;
+  }
+  
   if(days>selTypeBal){showToast(`⚠️ ${days} days exceeds your ${selTypeBal}-day ${selTypeName} balance.`,'error');return;}
   if(!selTypeId){showToast('⚠️ Please select a leave type.','info');return;}
   // Check if selected type is disabled (marriage-restricted)
@@ -3723,10 +4139,10 @@ async function submitLeave() {
   // Combine detail + reason
   var detail = getLeaveDetail();
   var fullReason = detail ? '[' + detail + '] ' + reason : reason;
-  const body=new FormData();body.append('action','submit_leave');body.append('leave_type_id',selTypeId);body.append('date_from',from);body.append('date_to',to);body.append('days_requested',days);body.append('reason',fullReason);
+  const body=new FormData();body.append('action','submit_leave');body.append('csrf_token',CSRF_TOKEN);body.append('leave_type_id',selTypeId);body.append('date_from',from);body.append('date_to',to);body.append('days_requested',days);body.append('reason',fullReason);
   try {
     const res=await fetch('Employee_portal.php',{method:'POST',body});const json=await res.json();
-    if(json.success){showToast('✅ Leave request submitted!','success');document.getElementById('flFrom').value='';document.getElementById('flTo').value='';document.getElementById('flReason').value='';document.getElementById('daysNum').textContent='0';['flFrom','flTo','flReason'].forEach(id=>document.getElementById(id).classList.remove('err'));updateDetailSection('');await loadBalances();await loadLeaveTypes();await loadRecentRequests();setTimeout(()=>goPage('requests',document.querySelectorAll('.sb-item')[2]),900);}
+    if(json.success){showToast('✅ Leave request submitted!','success');document.getElementById('flFrom').value='';document.getElementById('flTo').value='';document.getElementById('flReason').value='';document.getElementById('others_leave_spec').value='';document.getElementById('daysNum').textContent='0';['flFrom','flTo','flReason','others_leave_spec'].forEach(id=>document.getElementById(id).classList.remove('err'));updateDetailSection('');await loadBalances();await loadLeaveTypes();await loadRecentRequests();setTimeout(()=>goPage('requests',document.querySelectorAll('.sb-item')[2]),900);}
     else showToast('❌ '+json.message,'error');
   } catch(e){showToast('❌ Failed.','error');}
 }
@@ -3786,7 +4202,12 @@ async function loadDocuments() {
 }
 
 function debounceDoc() { clearTimeout(docDebounce); docDebounce = setTimeout(loadDocuments, 300); }
-function clearDocFilters() { document.getElementById('docSearch').value=''; document.getElementById('docTypeFilter').value=''; loadDocuments(); }
+function clearDocFilters() { 
+  document.getElementById('docSearch').value=''; 
+  document.getElementById('docTypeFilter').value=''; 
+  loadDocuments();
+  showToast('✨ Filters cleared. Showing all documents.', 'success');
+}
 
 // Upload
 function openDocUpload() {

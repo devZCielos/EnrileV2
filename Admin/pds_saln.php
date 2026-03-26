@@ -4,6 +4,19 @@
 //  File: Admin/pds_saln.php
 // ============================================================
 session_start();
+// ── Session timeout — 8 hours ─────────────────────────────────
+$_sessionLifetime = 8 * 60 * 60;
+if (isset($_SESSION['login_time']) && (time() - strtotime($_SESSION['login_time']) > $_sessionLifetime)) {
+    $_isAjax = !empty($_GET['action']) || !empty($_POST['action']);
+    session_unset(); session_destroy();
+    if ($_isAjax) {
+        header('Content-Type: application/json');
+        echo json_encode(['success'=>false,'message'=>'SESSION_EXPIRED: Your session has expired. Please log in again.']);
+        exit();
+    }
+    header('Location: ../Login/login.php?error=' . urlencode('Your session has expired. Please log in again.'));
+    exit();
+}
 if (empty($_SESSION['user_id']) || empty($_SESSION['user_email'])) {
     header('Location: ../Login/login.php'); exit();
 }

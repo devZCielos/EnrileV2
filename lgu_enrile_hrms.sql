@@ -181,6 +181,26 @@ CREATE TABLE IF NOT EXISTS activity_logs (
 ) ENGINE=InnoDB;
 
 -- ============================================================
+--  TABLE 11: chat_messages
+--  Stores messages between admins and employees
+-- ============================================================
+CREATE TABLE IF NOT EXISTS chat_messages (
+  message_id      INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  sender_id       INT UNSIGNED  NOT NULL,
+  receiver_id     INT UNSIGNED  NOT NULL,
+  message         TEXT          NOT NULL,
+  is_read         TINYINT(1)    DEFAULT 0,
+  is_unsent       TINYINT(1)    DEFAULT 0,
+  is_edited       TINYINT(1)    DEFAULT 0,
+  sent_at         TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+  edited_at       TIMESTAMP     NULL,
+  CONSTRAINT fk_chat_sender FOREIGN KEY (sender_id) REFERENCES user_accounts(user_id) ON DELETE CASCADE,
+  CONSTRAINT fk_chat_receiver FOREIGN KEY (receiver_id) REFERENCES user_accounts(user_id) ON DELETE CASCADE,
+  INDEX idx_sender_receiver (sender_id, receiver_id),
+  INDEX idx_receiver_unread (receiver_id, is_read)
+) ENGINE=InnoDB;
+
+-- ============================================================
 --  INDEXES  (for common query patterns)
 -- ============================================================
 CREATE INDEX idx_emp_dept       ON employees (department_id);

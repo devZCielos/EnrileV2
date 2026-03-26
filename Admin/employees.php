@@ -5,6 +5,19 @@
 //  All CRUD operations talk to MySQL via AJAX (fetch API).
 // ============================================================
 session_start();
+// ── Session timeout — 8 hours ─────────────────────────────────
+$_sessionLifetime = 8 * 60 * 60;
+if (isset($_SESSION['login_time']) && (time() - strtotime($_SESSION['login_time']) > $_sessionLifetime)) {
+    $_isAjax = !empty($_GET['action']) || !empty($_POST['action']);
+    session_unset(); session_destroy();
+    if ($_isAjax) {
+        header('Content-Type: application/json');
+        echo json_encode(['success'=>false,'message'=>'SESSION_EXPIRED: Your session has expired. Please log in again.']);
+        exit();
+    }
+    header('Location: ../Login/login.php?error=' . urlencode('Your session has expired. Please log in again.'));
+    exit();
+}
 
 // ── Session guard ─────────────────────────────────────────────
 if (empty($_SESSION['user_id']) || empty($_SESSION['user_email'])) {
@@ -169,6 +182,14 @@ if ($action) {
                 }
 
                 if ($id) {
+                    // Check for duplicate employee_code (excluding current employee)
+                    $checkCode = $pdo->prepare("SELECT COUNT(*) FROM employees WHERE employee_code = ? AND employee_id != ?");
+                    $checkCode->execute([$fields['employee_code'], $id]);
+                    if ($checkCode->fetchColumn() > 0) {
+                        echo json_encode(['success' => false, 'message' => 'Employee code already exists. Please use a unique code.']);
+                        break;
+                    }
+
                     $setCols = implode(', ', array_map(fn($k) => "$k = ?", array_keys($fields)));
                     $stmt    = $pdo->prepare("UPDATE employees SET $setCols WHERE employee_id = ?");
                     $stmt->execute([...array_values($fields), $id]);
@@ -180,13 +201,13 @@ if ($action) {
                     $stmt->execute(array_values($fields));
                     $newId  = (int)$pdo->lastInsertId();
 
-                    $ltStmt = $pdo->query("SELECT leave_type_id, max_days FROM leave_types");
+                    $ltStmt = $pdo->query("SELECT leave_type_id, max_days FROM leave_types WHERE is_active = 1");
                     $lbIns  = $pdo->prepare("
-                        INSERT IGNORE INTO leave_balances (employee_id, leave_type_id, calendar_year, total_credits, used_days)
-                        VALUES (?, ?, YEAR(NOW()), ?, 0)
+                        INSERT IGNORE INTO leave_balances (employee_id, leave_type_id, calendar_year, total_credits, used_days, remaining_days)
+                        VALUES (?, ?, YEAR(NOW()), ?, 0, ?)
                     ");
                     foreach ($ltStmt->fetchAll() as $lt) {
-                        $lbIns->execute([$newId, $lt['leave_type_id'], $lt['max_days']]);
+                        $lbIns->execute([$newId, $lt['leave_type_id'], $lt['max_days'], $lt['max_days']]);
                     }
 
                     echo json_encode(['success' => true, 'message' => 'Employee added successfully.', 'id' => $newId]);
@@ -215,7 +236,13 @@ if ($action) {
         }
     } catch (PDOException $e) {
         error_log('[HRMS] employees.php error: ' . $e->getMessage());
-        echo json_encode(['success' => false, 'message' => 'A database error occurred.']);
+        $errorMsg = 'A database error occurred.';
+        if (strpos($e->getMessage(), 'Duplicate entry') !== false || strpos($e->getMessage(), 'UNIQUE') !== false) {
+            $errorMsg = '⚠️ Duplicate entry detected. Please check Employee Code or other unique fields.';
+        } elseif (strpos($e->getMessage(), 'foreign key') !== false) {
+            $errorMsg = '⚠️ Invalid department or other reference. Please try again.';
+        }
+        echo json_encode(['success' => false, 'message' => $errorMsg]);
     }
     exit();
 }

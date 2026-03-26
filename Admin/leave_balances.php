@@ -185,6 +185,46 @@ if ($action) {
                 echo json_encode(['success' => true, 'message' => "Created $created balance record(s) for $newYear."]);
                 break;
 
+            // ── INIT MISSING — fill gaps for current year ─────
+            // Creates leave_balance rows for any active employee
+            // who is missing one or more leave types for the given year.
+            // Safe to run multiple times (uses INSERT IGNORE).
+            case 'init_missing':
+                $year = (int)($_POST['year'] ?? date('Y'));
+                if ($year < 2020 || $year > 2040) {
+                    echo json_encode(['success'=>false,'message'=>'Invalid year.']); break;
+                }
+
+                $emps  = $pdo->query("SELECT employee_id FROM employees WHERE employment_status = 'Active'")->fetchAll();
+                $types = $pdo->query("SELECT leave_type_id, max_days FROM leave_types WHERE is_active = 1")->fetchAll();
+
+                $stmt = $pdo->prepare("
+                    INSERT IGNORE INTO leave_balances
+                        (employee_id, leave_type_id, calendar_year, total_credits, used_days)
+                    VALUES (?, ?, ?, ?, 0)
+                ");
+
+                $created = 0;
+                foreach ($emps as $emp) {
+                    foreach ($types as $type) {
+                        $stmt->execute([
+                            $emp['employee_id'],
+                            $type['leave_type_id'],
+                            $year,
+                            $type['max_days'],
+                        ]);
+                        $created += $stmt->rowCount();
+                    }
+                }
+
+                $skipped = (count($emps) * count($types)) - $created;
+                echo json_encode([
+                    'success' => true,
+                    'message' => "Done. Created {$created} missing record(s) for {$year}."
+                              . ($skipped ? " {$skipped} already existed and were left unchanged." : ''),
+                ]);
+                break;
+
             // ── FILTERS DATA ──────────────────────────────────
             case 'filters':
                 $depts = $pdo->query("SELECT department_id, name FROM departments WHERE is_active=1 ORDER BY name")->fetchAll();
@@ -558,6 +598,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button class="action-btn primary" onclick="openResetYear()">🔄 Init New Year</button>
+          <button class="action-btn" style="background:#f59e0b;color:#fff;" onclick="openFixMissing()">🩹 Fix Missing</button>
         </div>
       </div>
 
@@ -665,6 +706,68 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     </div>
   </div>
 </div>
+
+<!-- FIX MISSING BALANCES MODAL -->
+<div class="modal-overlay" id="modalFixMissing">
+  <div class="modal sm">
+    <div class="modal-header">
+      <div><h3>🩹 Fix Missing Balances</h3><p>Create records for employees missing balances this year</p></div>
+      <button class="modal-close" onclick="closeModal('modalFixMissing')">✕</button>
+    </div>
+    <div class="modal-body">
+      <p>This will create leave balance records for <strong>active employees</strong> who are missing one or more leave types for <strong id="fixMissingYearLabel"></strong>.</p>
+      <br/>
+      <p>Existing records are <strong>not</strong> overwritten — only gaps are filled.</p>
+      <br/>
+      <div class="fg">
+        <label>Year to fix</label>
+        <select id="fixMissingYearSel"></select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-cancel" onclick="closeModal('modalFixMissing')">Cancel</button>
+      <button class="btn btn-green" id="fixMissingBtn" onclick="confirmFixMissing()">🩹 Fix Missing Balances</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function openFixMissing() {
+  const sel = document.getElementById('fixMissingYearSel');
+  sel.innerHTML = '';
+  const y = currentYear;
+  for (let i = y + 1; i >= y - 3; i--) {
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = i;
+    if (i === y) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  document.getElementById('fixMissingYearLabel').textContent = sel.value;
+  sel.onchange = () => document.getElementById('fixMissingYearLabel').textContent = sel.value;
+  openModal('modalFixMissing');
+}
+
+async function confirmFixMissing() {
+  const year = document.getElementById('fixMissingYearSel').value;
+  const btn  = document.getElementById('fixMissingBtn');
+  btn.disabled = true; btn.textContent = '⏳ Processing…';
+  try {
+    const fd = new FormData();
+    fd.append('action', 'init_missing');
+    fd.append('year', year);
+    fd.append('csrf_token', CSRF_TOKEN);
+    const res  = await fetch('leave_balances.php', { method: 'POST', body: fd });
+    const json = await res.json();
+    closeModal('modalFixMissing');
+    showToast(json.message, json.success ? 'success' : 'error');
+    if (json.success) loadData();
+  } catch(e) {
+    showToast('❌ Network error.', 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '🩹 Fix Missing Balances';
+  }
+}
+</script>
 
 <script>
 const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;

@@ -238,31 +238,315 @@ tbody tr:hover { background: #eff6ff; }
 
 @keyframes fadeIn { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
 
-/* MOBILE */
-.overlay-mob { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:150; }
-.overlay-mob.show { display:block; }
-@media(max-width:1280px) {
-  /* slightly compact stats for medium-large screens */
+/* ══════════════════════════════════
+   RESPONSIVE MEDIA QUERIES
+══════════════════════════════════ */
+
+/* Tablet landscape (1280px) */
+@media(max-width: 1280px) {
   .stats-row { flex-wrap: wrap; }
   .stats-row .stat-chip { flex: 1 1 30%; }
+  .content { padding: 20px 24px; }
 }
-@media(max-width:1100px) {
+
+/* Tablet portrait (1100px) */
+@media(max-width: 1100px) {
   .stats-row .stat-chip { flex: 1 1 45%; }
+  .form-grid { grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .cards-grid { grid-template-columns: repeat(2, 1fr); }
 }
-@media(max-width:768px) {
-  .sidebar { transform:translateX(-100%); }
-  .sidebar.open { transform:translateX(0); }
-  .main { margin-left:0; }
-  .menu-toggle { display:block; }
-  .content { padding:16px; }
-  .form-grid { grid-template-columns:1fr; }
-  .profile-grid { grid-template-columns:1fr; }
-  .add-btn { margin-left:0; }
-  /* stack stats vertically on smaller devices */
-  .stats-row { flex-direction: column; }
-  .stats-row .stat-chip { width: 100%; }
+
+/* Tablet to mobile (768px) */
+@media(max-width: 768px) {
+  :root { --sidebar-w: 0px; }
+  
+  body { flex-direction: column; }
+  
+  .sidebar {
+    transform: translateX(-100%);
+    width: 260px;
+  }
+  
+  .sidebar.open { transform: translateX(0); }
+  .overlay-mob.show { display: block; }
+  
+  .main { margin-left: 0; }
+  .menu-toggle { display: block; }
+  
+  .content { 
+    padding: 14px 16px;
+  }
+  
+  .topbar { 
+    padding: 0 12px;
+    gap: 8px;
+  }
+  
+  .topbar-title h1 {
+    font-size: 1rem;
+  }
+  
+  .topbar-title p { display: none; }
+  .topbar-date { display: none; }
+  
+  .form-grid { grid-template-columns: 1fr; gap: 12px; }
+  .profile-grid { grid-template-columns: 1fr; }
+  
+  .cards-grid { grid-template-columns: 1fr; gap: 14px; }
+  .card { padding: 16px 14px; }
+  
+  .stats-row { 
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  
+  .stats-row .stat-chip {
+    width: 100%;
+    padding: 10px 14px;
+  }
+  
+  .add-btn { 
+    margin-left: 0;
+    width: 100%;
+  }
+  
+  .search-box { min-width: auto; flex: 1; }
+  
+  /* Profile adjustments */
+  .profile-hero {
+    padding: 18px 16px 14px;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  
+  .profile-avatar-lg {
+    width: 56px;
+    height: 56px;
+    font-size: 1.2rem;
+    border: 2px solid rgba(255,255,255,0.75);
+  }
+  
+  .profile-info h3 {
+    font-size: 0.95rem;
+  }
+  
+  .profile-info p {
+    font-size: 0.72rem;
+  }
+  
+  .profile-body { padding: 16px 14px; }
+  .profile-section-title { font-size: 0.66rem; margin: 12px 0 8px; }
+  .profile-field { padding: 8px 12px; }
+  .profile-field label { font-size: 0.60rem; }
+  .profile-field span { font-size: 0.78rem; }
+  
+  .lb-row { gap: 8px; }
+  .lb-chip { min-width: 70px; padding: 10px 8px; }
+  .lb-chip .lb-num { font-size: 1.3rem; }
+  .lb-chip .lb-label { font-size: 0.62rem; }
+  
+  .modal { 
+    width: 96%;
+    max-width: 96%;
+  }
+  
+  .modal-header { padding: 16px 18px 12px; }
+  .modal-body { padding: 16px 18px; }
+  .modal-footer { padding: 10px 18px; }
+  
+  .form-group { margin-bottom: 12px; }
+  .form-group input, .form-group select, .form-group textarea { font-size: 0.875rem; }
+  
+  .btn { padding: 8px 18px; font-size: 0.80rem; }
+  
+  table { font-size: 0.75rem; }
+  th { padding: 8px 10px; font-size: 0.62rem; }
+  td { padding: 10px; }
 }
-@media(max-width:480px) {
-  .stats-row .stat-chip:nth-child(n+5) { display:none; }
-  .modal { width:96%; }
+
+/* Large phones (600px) */
+@media(max-width: 600px) {
+  .content { padding: 12px 14px; }
+  
+  .card {
+    padding: 14px 12px;
+  }
+  
+  .card-value { font-size: 1.6rem; }
+  .card-label { font-size: 0.72rem; }
+  
+  .stats-row .stat-chip { padding: 8px 10px; }
+  .stats-row .stat-chip .dot { width: 6px; height: 6px; }
+  
+  .profile-hero {
+    padding: 16px 14px 12px;
+  }
+  
+  .profile-avatar-lg {
+    width: 48px;
+    height: 48px;
+    font-size: 1rem;
+  }
+  
+  .profile-info h3 {
+    font-size: 0.88rem;
+  }
+  
+  .form-grid { gap: 10px; }
+  .search-box { max-width: 100%; }
+  
+  .modal { width: 94%; }
+  .modal-header h3 { font-size: 0.95rem; }
+  
+  table { font-size: 0.70rem; }
+}
+
+/* Small phones (480px) */
+@media(max-width: 480px) {
+  :root { --radius: 12px; --topbar-h: 52px; }
+  
+  .content { padding: 11px 12px; }
+  .topbar { padding: 0 8px; gap: 4px; }
+  .topbar-title h1 { font-size: 0.85rem; }
+  
+  .cards-grid { gap: 10px; margin-bottom: 12px; }
+  .card { 
+    padding: 12px 10px;
+    border-radius: 10px;
+  }
+  
+  .card-icon { width: 36px; height: 36px; font-size: 1rem; }
+  .card-value { font-size: 1.4rem; }
+  .card-label { font-size: 0.65rem; }
+  
+  .stats-row { gap: 8px; margin-bottom: 12px; }
+  .stats-row .stat-chip {
+    padding: 8px 10px;
+    flex: 0 1 48%;
+  }
+  
+  .stats-row .stat-chip:nth-child(n+3) {
+    display: none;
+  }
+  
+  .add-btn {
+    width: auto;
+    min-height: 44px;
+    font-size: 0.75rem;
+    padding: 8px 12px;
+  }
+  
+  .search-box { padding: 6px 8px; }
+  .search-box input { font-size: 0.80rem; }
+  
+  .sidebar { width: 240px; }
+  
+  .profile-hero {
+    padding: 14px 12px 10px;
+    gap: 10px;
+  }
+  
+  .profile-avatar-lg {
+    width: 40px;
+    height: 40px;
+    font-size: 0.85rem;
+    border: 2px solid rgba(255,255,255,0.75);
+  }
+  
+  .profile-info h3 { font-size: 0.80rem; }
+  .profile-info p { font-size: 0.65rem; }
+  .profile-tags { gap: 4px; }
+  .profile-tag { padding: 2px 8px; font-size: 0.60rem; }
+  .profile-close-btn { width: 28px; height: 28px; }
+  
+  .profile-body { padding: 12px 12px; }
+  .profile-section-title { font-size: 0.60rem; margin: 10px 0 6px; }
+  .profile-grid { gap: 8px; }
+  .profile-field { padding: 7px 10px; border-radius: 7px; }
+  .profile-field label { font-size: 0.55rem; }
+  .profile-field span { font-size: 0.72rem; }
+  
+  .lb-row { gap: 6px; }
+  .lb-chip { min-width: 60px; padding: 8px 6px; border-radius: 7px; }
+  .lb-chip .lb-num { font-size: 1.1rem; }
+  .lb-chip .lb-label { font-size: 0.55rem; }
+  
+  .modal { width: 92%; max-width: 92%; }
+  .modal-header { padding: 14px 16px 10px; }
+  .modal-header h3 { font-size: 0.90rem; }
+  .modal-body { padding: 14px 16px; }
+  .modal-footer { padding: 9px 16px 12px; }
+  
+  .form-group { margin-bottom: 10px; }
+  .form-group label { font-size: 0.70rem; }
+  .form-group input, .form-group select, .form-group textarea { 
+    font-size: 16px;
+    padding: 8px 10px;
+  }
+  
+  .btn { padding: 7px 14px; font-size: 0.70rem; min-height: 40px; }
+  
+  .delete-body { padding: 20px 16px; }
+  .delete-body .del-icon { font-size: 2.2rem; margin-bottom: 8px; }
+  .delete-body h4 { font-size: 0.90rem; }
+  .delete-body p { font-size: 0.78rem; }
+  
+  .toast {
+    bottom: 16px;
+    right: 16px;
+    left: 16px;
+    max-width: none;
+    font-size: 0.78rem;
+    padding: 10px 14px;
+  }
+  
+  table { font-size: 0.65rem; }
+  th { padding: 5px 6px; font-size: 0.55rem; }
+  td { padding: 6px; }
+}
+
+/* Extra small phones (360px) */
+@media(max-width: 380px) {
+  .content { padding: 10px 10px; }
+  .topbar { padding: 0 6px; gap: 2px; }
+  .topbar-title h1 { font-size: 0.75rem; }
+  
+  .cards-grid { gap: 8px; }
+  .card { padding: 10px 8px; }
+  .card-value { font-size: 1.2rem; }
+  
+  .stats-row .stat-chip {
+    padding: 6px 8px;
+    flex: 0 1 100%;
+  }
+  
+  .stats-row .stat-chip:nth-child(n+2) {
+    display: none;
+  }
+  
+  .add-btn { font-size: 0.65rem; padding: 6px 10px; }
+  
+  .profile-avatar-lg { width: 36px; height: 36px; font-size: 0.75rem; }
+  .profile-info h3 { font-size: 0.75rem; }
+  
+  .modal { width: 90%; }
+  .form-group input, .form-group select, .form-group textarea { font-size: 16px; }
+  .btn { font-size: 0.65rem; }
+}
+
+/* Touch device optimizations */
+@media (hover: none) and (pointer: coarse) {
+  button, .btn, .add-btn {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  
+  input, select, textarea {
+    font-size: 16px;
+    min-height: 44px;
+  }
+  
+  .card:hover { transform: none; }
+  .profile-close-btn { min-height: 44px; min-width: 44px; }
 }

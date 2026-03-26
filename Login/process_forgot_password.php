@@ -19,10 +19,6 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
 csrf_verify();
-    exit();
-}
-
-require_once __DIR__ . '/../config/db.php';
 
 // ── Collect & validate input ──────────────────────────────────
 $email = trim($_POST['email'] ?? '');
