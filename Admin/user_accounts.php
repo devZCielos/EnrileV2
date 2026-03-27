@@ -249,8 +249,8 @@ if ($action) {
                 if (!$id || empty($password)) {
                     echo json_encode(['success' => false, 'message' => 'Invalid request.']); break;
                 }
-                if (strlen($password) < 6) {
-                    echo json_encode(['success' => false, 'message' => 'Password must be at least 6 characters.']); break;
+                if (strlen($password) < 8) {
+                    echo json_encode(['success' => false, 'message' => 'Password must be at least 8 characters.']); break;
                 }
                 
                 // Get user email before updating password
@@ -644,7 +644,18 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           </div>
         </div>
         <button class="topbar-btn" onclick="cwToggle()" style="position:relative;">💬<span id="cwBadge" style="position:absolute;top:-2px;right:-2px;width:16px;height:16px;background:#ef4444;border-radius:50%;font-size:.55rem;color:#fff;font-weight:800;display:none;align-items:center;justify-content:center;border:2px solid rgba(255,255,255,.3);"></span></button>
-        <button class="topbar-btn">👤</button>
+        <div class="tb-profile-wrap" id="tbProfileWrap">
+          <div class="tb-profile-btn" onclick="toggleProfileDropdown()" title="Account" id="tbProfileBtn"><?= strtoupper(substr($adminName,0,2)) ?></div>
+          <div class="tb-dropdown" id="tbDropdown">
+            <div class="tb-dd-header">
+              <div class="tb-dd-name"><?= htmlspecialchars($adminName) ?></div>
+              <div class="tb-dd-role"><?= htmlspecialchars($roleLabel) ?></div>
+            </div>
+            <a href="switch_to_employee.php" class="tb-dd-item" style="color:#d97706;">🔄 Switch to Employee Account</a>
+            <div class="tb-dd-divider"></div>
+            <a href="../Landingpage/logout.php" class="tb-dd-item danger" onclick="return confirm('Log out?')">🚪 Logout</a>
+          </div>
+        </div>
       </div>
     </div>
 

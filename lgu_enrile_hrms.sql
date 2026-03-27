@@ -89,6 +89,9 @@ CREATE TABLE IF NOT EXISTS leave_types (
   max_days        DECIMAL(6,2)  NOT NULL DEFAULT 15.00,
   description     TEXT          NULL,
   is_active       TINYINT(1)    DEFAULT 1,
+  applicable_gender ENUM('Male','Female','All') DEFAULT 'All',
+  require_married TINYINT(1)    DEFAULT 0,
+  advance_notice_days INT        DEFAULT 0 COMMENT 'Days in advance employee must file leave (0 = same-day filing allowed)',
   created_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 

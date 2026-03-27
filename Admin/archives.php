@@ -192,6 +192,11 @@ if (isset($pdo)) { try {
     $notifCount=count($notifications);
 } catch(Exception $ex){ $notifCount=0; } }
 if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time()-strtotime($dt);if($d<60)return 'Just now';if($d<3600)return (int)($d/60).'m ago';if($d<86400)return (int)($d/3600).'h ago';if($d<172800)return 'Yesterday';return date('M j',strtotime($dt));}}
+
+// ── Page variables ────────────────────────────────────────────
+$adminName  = ucwords($_SESSION['user_name'] ?? 'Administrator');
+$roleLabels = ['admin'=>'Super Admin','hr_staff'=>'HR Staff','dept_head'=>'Department Head'];
+$roleLabel  = $roleLabels[$_SESSION['user_role']] ?? 'Admin';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -483,6 +488,18 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           </div>
         </div>
       <button class="topbar-btn" onclick="cwToggle()" style="position:relative;">💬<span id="cwBadge" style="position:absolute;top:-2px;right:-2px;width:16px;height:16px;background:#ef4444;border-radius:50%;font-size:.55rem;color:#fff;font-weight:800;display:none;align-items:center;justify-content:center;border:2px solid rgba(255,255,255,.3);"></span></button>
+        <div class="tb-profile-wrap" id="tbProfileWrap">
+          <div class="tb-profile-btn" onclick="toggleProfileDropdown()" title="Account" id="tbProfileBtn"><?= strtoupper(substr($adminName,0,2)) ?></div>
+          <div class="tb-dropdown" id="tbDropdown">
+            <div class="tb-dd-header">
+              <div class="tb-dd-name"><?= htmlspecialchars($adminName) ?></div>
+              <div class="tb-dd-role"><?= htmlspecialchars($roleLabel) ?></div>
+            </div>
+            <a href="switch_to_employee.php" class="tb-dd-item" style="color:#d97706;">🔄 Switch to Employee Account</a>
+            <div class="tb-dd-divider"></div>
+            <a href="../Landingpage/logout.php" class="tb-dd-item danger" onclick="return confirm('Log out?')">🚪 Logout</a>
+          </div>
+        </div>
     </div>
   </div>
 

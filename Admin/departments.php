@@ -466,7 +466,18 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           </div>
         </div>
         <button class="topbar-btn" onclick="cwToggle()" style="position:relative;">💬<span id="cwBadge" style="position:absolute;top:-2px;right:-2px;width:16px;height:16px;background:#ef4444;border-radius:50%;font-size:.55rem;color:#fff;font-weight:800;display:none;align-items:center;justify-content:center;border:2px solid rgba(255,255,255,.3);"></span></button>
-        <button class="topbar-btn">👤</button>
+        <div class="tb-profile-wrap" id="tbProfileWrap">
+          <div class="tb-profile-btn" onclick="toggleProfileDropdown()" title="Account" id="tbProfileBtn"><?= strtoupper(substr($adminName,0,2)) ?></div>
+          <div class="tb-dropdown" id="tbDropdown">
+            <div class="tb-dd-header">
+              <div class="tb-dd-name"><?= htmlspecialchars($adminName) ?></div>
+              <div class="tb-dd-role"><?= htmlspecialchars($roleLabel) ?></div>
+            </div>
+            <a href="switch_to_employee.php" class="tb-dd-item" style="color:#d97706;">🔄 Switch to Employee Account</a>
+            <div class="tb-dd-divider"></div>
+            <a href="../Landingpage/logout.php" class="tb-dd-item danger" onclick="return confirm('Log out?')">🚪 Logout</a>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -757,6 +768,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     btn.disabled = true; btn.textContent = '⏳ Saving…';
 
     const body = new FormData();
+    body.append('csrf_token',      CSRF_TOKEN);
     body.append('action',          'save');
     body.append('department_id',   document.getElementById('fId').value);
     body.append('name',            name);
@@ -796,6 +808,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
 
   async function confirmDelete() {
     const body = new FormData();
+    body.append('csrf_token', CSRF_TOKEN);
     body.append('action', 'delete');
     body.append('id',     deleteTarget);
     try {

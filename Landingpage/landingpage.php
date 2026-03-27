@@ -10,7 +10,7 @@
 <body>
   <header>
     <!-- logo path corrected relative to Landingpage folder -->
-    <h1><img src="../images/Enrile.png" alt="Logo" class="header-logo" /> Welcome to E-Leave Mo</h1>
+    <h1><img src="../images/Enrile.png" alt="Logo" class="header-logo" />E-Leave Mo</h1>
     <nav>
       <a href="#features">Features</a>
       <a href="#about">About</a>
@@ -59,14 +59,26 @@ nav a {
 }
 
 .hero {
-  padding: 80px 40px;
+  padding: 120px 40px;
   text-align: center;
-  background: linear-gradient(to right, #2563eb, #22c55e);
+  background-image: url('../images/Municipal_Hall_of_Enrile,_Cagayan.jpg');
+  background-size: cover;
+  background-position: center top;
+  background-repeat: no-repeat;
   color: white;
+  position: relative;
 }
 
-.hero h1 { font-size: 3rem; margin-bottom: 20px; }
-.hero p { font-size: 1.2rem; margin-bottom: 30px; }
+.hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(10, 30, 60, 0.52);
+}
+
+.hero h1 { font-size: 3rem; margin-bottom: 20px; position: relative; z-index: 1; }
+.hero p { font-size: 1.2rem; margin-bottom: 30px; position: relative; z-index: 1; }
+.hero .btn { position: relative; z-index: 1; }
 
 .btn {
   background: white;

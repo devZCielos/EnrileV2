@@ -5,19 +5,6 @@
 //  All CRUD operations talk to MySQL via AJAX (fetch API).
 // ============================================================
 session_start();
-// ── Session timeout — 8 hours ─────────────────────────────────
-$_sessionLifetime = 8 * 60 * 60;
-if (isset($_SESSION['login_time']) && (time() - strtotime($_SESSION['login_time']) > $_sessionLifetime)) {
-    $_isAjax = !empty($_GET['action']) || !empty($_POST['action']);
-    session_unset(); session_destroy();
-    if ($_isAjax) {
-        header('Content-Type: application/json');
-        echo json_encode(['success'=>false,'message'=>'SESSION_EXPIRED: Your session has expired. Please log in again.']);
-        exit();
-    }
-    header('Location: ../Login/login.php?error=' . urlencode('Your session has expired. Please log in again.'));
-    exit();
-}
 
 // ── Session guard ─────────────────────────────────────────────
 if (empty($_SESSION['user_id']) || empty($_SESSION['user_email'])) {
@@ -133,10 +120,12 @@ if ($action) {
                 $row = $stmt->fetch();
                 if ($row) {
                     $lb = $pdo->prepare("
-                        SELECT lt.name, lb.total_credits, lb.used_days, lb.remaining_days
+                        SELECT lt.name, lt.code, lt.applicable_gender,
+                               lb.total_credits, lb.used_days, lb.remaining_days
                         FROM   leave_balances lb
                         JOIN   leave_types lt ON lb.leave_type_id = lt.leave_type_id
                         WHERE  lb.employee_id = ? AND lb.calendar_year = YEAR(NOW())
+                        ORDER  BY lt.name ASC
                     ");
                     $lb->execute([$id]);
                     $row['leave_balances'] = $lb->fetchAll();
@@ -182,14 +171,6 @@ if ($action) {
                 }
 
                 if ($id) {
-                    // Check for duplicate employee_code (excluding current employee)
-                    $checkCode = $pdo->prepare("SELECT COUNT(*) FROM employees WHERE employee_code = ? AND employee_id != ?");
-                    $checkCode->execute([$fields['employee_code'], $id]);
-                    if ($checkCode->fetchColumn() > 0) {
-                        echo json_encode(['success' => false, 'message' => 'Employee code already exists. Please use a unique code.']);
-                        break;
-                    }
-
                     $setCols = implode(', ', array_map(fn($k) => "$k = ?", array_keys($fields)));
                     $stmt    = $pdo->prepare("UPDATE employees SET $setCols WHERE employee_id = ?");
                     $stmt->execute([...array_values($fields), $id]);
@@ -201,13 +182,13 @@ if ($action) {
                     $stmt->execute(array_values($fields));
                     $newId  = (int)$pdo->lastInsertId();
 
-                    $ltStmt = $pdo->query("SELECT leave_type_id, max_days FROM leave_types WHERE is_active = 1");
+                    $ltStmt = $pdo->query("SELECT leave_type_id, max_days FROM leave_types");
                     $lbIns  = $pdo->prepare("
-                        INSERT IGNORE INTO leave_balances (employee_id, leave_type_id, calendar_year, total_credits, used_days, remaining_days)
-                        VALUES (?, ?, YEAR(NOW()), ?, 0, ?)
+                        INSERT IGNORE INTO leave_balances (employee_id, leave_type_id, calendar_year, total_credits, used_days)
+                        VALUES (?, ?, YEAR(NOW()), ?, 0)
                     ");
                     foreach ($ltStmt->fetchAll() as $lt) {
-                        $lbIns->execute([$newId, $lt['leave_type_id'], $lt['max_days'], $lt['max_days']]);
+                        $lbIns->execute([$newId, $lt['leave_type_id'], $lt['max_days']]);
                     }
 
                     echo json_encode(['success' => true, 'message' => 'Employee added successfully.', 'id' => $newId]);
@@ -236,13 +217,7 @@ if ($action) {
         }
     } catch (PDOException $e) {
         error_log('[HRMS] employees.php error: ' . $e->getMessage());
-        $errorMsg = 'A database error occurred.';
-        if (strpos($e->getMessage(), 'Duplicate entry') !== false || strpos($e->getMessage(), 'UNIQUE') !== false) {
-            $errorMsg = '⚠️ Duplicate entry detected. Please check Employee Code or other unique fields.';
-        } elseif (strpos($e->getMessage(), 'foreign key') !== false) {
-            $errorMsg = '⚠️ Invalid department or other reference. Please try again.';
-        }
-        echo json_encode(['success' => false, 'message' => $errorMsg]);
+        echo json_encode(['success' => false, 'message' => 'A database error occurred.']);
     }
     exit();
 }
@@ -393,7 +368,18 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           </div>
         </div>
         <button class="topbar-btn" onclick="cwToggle()" style="position:relative;">💬<span id="cwBadge" style="position:absolute;top:-2px;right:-2px;width:16px;height:16px;background:#ef4444;border-radius:50%;font-size:.55rem;color:#fff;font-weight:800;display:none;align-items:center;justify-content:center;border:2px solid rgba(255,255,255,.3);"></span></button>
-        <button class="topbar-btn">👤</button>
+        <div class="tb-profile-wrap" id="tbProfileWrap">
+          <div class="tb-profile-btn" onclick="toggleProfileDropdown()" title="Account" id="tbProfileBtn"><?= strtoupper(substr($adminName,0,2)) ?></div>
+          <div class="tb-dropdown" id="tbDropdown">
+            <div class="tb-dd-header">
+              <div class="tb-dd-name"><?= htmlspecialchars($adminName) ?></div>
+              <div class="tb-dd-role"><?= htmlspecialchars($roleLabel) ?></div>
+            </div>
+            <a href="switch_to_employee.php" class="tb-dd-item" style="color:#d97706;">🔄 Switch to Employee Account</a>
+            <div class="tb-dd-divider"></div>
+            <a href="../Landingpage/logout.php" class="tb-dd-item danger" onclick="return confirm('Log out?')">🚪 Logout</a>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -586,8 +572,11 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         <div class="profile-grid" id="vPersonal"></div>
         <div class="profile-section-title" style="margin-top:18px;">💼 Employment Details</div>
         <div class="profile-grid" id="vEmployment"></div>
-        <div class="profile-section-title" style="margin-top:18px;">📅 Leave Balances (<?= date('Y') ?>)</div>
-        <div class="lb-row" id="vLeave"></div>
+        <div class="profile-section-title" style="margin-top:18px;">
+          📅 Leave Balances (<span id="vLeaveYear"><?= date('Y') ?></span>)
+          <span id="vLeaveGenderTag" style="margin-left:8px;font-size:.70rem;font-weight:700;padding:2px 10px;border-radius:20px;vertical-align:middle;display:none;"></span>
+        </div>
+        <div id="vLeave"></div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-cancel" onclick="closeModal('modalView')">Close</button>
@@ -807,14 +796,92 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     document.getElementById('vEmployment').innerHTML =
       eInfo.map(([l,v]) => `<div class="profile-field"><label>${l}</label><span>${v||'—'}</span></div>`).join('');
 
-    const lb = e.leave_balances || [];
-    document.getElementById('vLeave').innerHTML = lb.length
-      ? lb.map(l => `
-          <div class="lb-chip">
-            <div class="lb-num">${l.remaining_days}</div>
-            <div class="lb-label">${l.name}</div>
-          </div>`).join('')
-      : '<p style="color:var(--gray-400);font-size:0.82rem;">No leave balances found.</p>';
+    const lb     = e.leave_balances || [];
+    const gender = (e.gender || '').toLowerCase(); // 'male', 'female', or ''
+
+    // Show gender tag in section header
+    const genderTag = document.getElementById('vLeaveGenderTag');
+    if (gender === 'male') {
+      genderTag.textContent = '👨 Male';
+      genderTag.style.display = 'inline';
+      genderTag.style.background = '#dbeafe';
+      genderTag.style.color = '#1e40af';
+    } else if (gender === 'female') {
+      genderTag.textContent = '👩 Female';
+      genderTag.style.display = 'inline';
+      genderTag.style.background = '#fce7f3';
+      genderTag.style.color = '#9d174d';
+    } else {
+      genderTag.style.display = 'none';
+    }
+
+    // Filter: hide leaves that don't apply to this employee's gender
+    const filtered = lb.filter(l => {
+      const ag = (l.applicable_gender || 'All');
+      if (ag === 'All') return true;
+      if (ag === 'Male'   && gender === 'male')   return true;
+      if (ag === 'Female' && gender === 'female') return true;
+      return false;
+    });
+
+    const vLeaveEl = document.getElementById('vLeave');
+    if (!filtered.length) {
+      vLeaveEl.innerHTML = '<p style="color:var(--gray-400);font-size:0.82rem;padding:8px 0;">No leave balances found for this year.</p>';
+    } else {
+      // Group: universal leaves + gender-specific leaves
+      const universal = filtered.filter(l => (l.applicable_gender || 'All') === 'All');
+      const specific  = filtered.filter(l => (l.applicable_gender || 'All') !== 'All');
+
+      const renderCard = l => {
+        const rem  = parseFloat(l.remaining_days)  || 0;
+        const used = parseFloat(l.used_days)        || 0;
+        const tot  = parseFloat(l.total_credits)    || 0;
+        const pct  = tot > 0 ? Math.min(100, Math.round((used / tot) * 100)) : 0;
+        const isLow = rem <= 3 && tot > 0;
+        const isOut = rem <= 0 && tot > 0;
+        const barColor = isOut ? '#ef4444' : isLow ? '#f59e0b' : '#22c55e';
+        const isGenderSpecific = (l.applicable_gender || 'All') !== 'All';
+        const gBadge = isGenderSpecific
+          ? `<span style="position:absolute;top:8px;right:8px;font-size:.55rem;font-weight:800;padding:1px 6px;border-radius:20px;background:${l.applicable_gender==='Female'?'#fce7f3':'#dbeafe'};color:${l.applicable_gender==='Female'?'#9d174d':'#1e40af'};">${l.applicable_gender==='Female'?'♀':'♂'}</span>`
+          : '';
+        return `
+          <div style="position:relative;background:#fff;border:1.5px solid #e2e8f0;border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;${isLow&&!isOut?'border-color:#fbbf24;':isOut?'border-color:#fca5a5;':''}">
+            ${gBadge}
+            <div style="font-size:.72rem;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.04em;line-height:1.3;padding-right:${isGenderSpecific?'28px':'0'};">${l.name}</div>
+            <div style="display:flex;align-items:baseline;gap:6px;">
+              <span style="font-size:1.55rem;font-weight:900;color:${isOut?'#ef4444':isLow?'#f59e0b':'#2563eb'};line-height:1;">${rem}</span>
+              <span style="font-size:.68rem;color:#94a3b8;font-weight:600;">/ ${tot} days</span>
+            </div>
+            <div style="height:4px;background:#f1f5f9;border-radius:4px;overflow:hidden;">
+              <div style="height:100%;width:${pct}%;background:${barColor};border-radius:4px;transition:width .4s;"></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:.62rem;color:#94a3b8;font-weight:600;">
+              <span>${used} used</span>
+              <span>${rem <= 0 ? '<span style="color:#ef4444;">Exhausted</span>' : isLow ? '<span style="color:#f59e0b;">Low</span>' : '<span style="color:#22c55e;">Available</span>'}</span>
+            </div>
+          </div>`;
+      };
+
+      let html = '';
+
+      if (universal.length) {
+        html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:6px;">
+          ${universal.map(renderCard).join('')}
+        </div>`;
+      }
+
+      if (specific.length) {
+        const specLabel = gender === 'female' ? '👩 Female-Specific Leaves' : '👨 Male-Specific Leaves';
+        html += `<div style="margin-top:14px;">
+          <div style="font-size:.68rem;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">${specLabel}</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;">
+            ${specific.map(renderCard).join('')}
+          </div>
+        </div>`;
+      }
+
+      vLeaveEl.innerHTML = html;
+    }
 
     openModal('modalView');
   }

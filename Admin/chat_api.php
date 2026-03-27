@@ -51,7 +51,8 @@ try {
                     SELECT u.user_id, u.email, u.role,
                            COALESCE(CONCAT(e.first_name,' ',e.last_name), u.email) AS full_name,
                            COALESCE(e.position_title,'') AS position_title,
-                           COALESCE(d.name,'') AS department
+                           COALESCE(d.name,'') AS department,
+                           COALESCE(e.profile_photo,'') AS profile_photo
                     FROM user_accounts u
                     LEFT JOIN employees   e ON e.user_id=u.user_id
                     LEFT JOIN departments d ON d.department_id=e.department_id
@@ -63,7 +64,8 @@ try {
                     SELECT u.user_id, u.email, u.role,
                            COALESCE(CONCAT(e.first_name,' ',e.last_name), u.email) AS full_name,
                            COALESCE(e.position_title,'') AS position_title,
-                           COALESCE(d.name,'') AS department
+                           COALESCE(d.name,'') AS department,
+                           COALESCE(e.profile_photo,'') AS profile_photo
                     FROM user_accounts u
                     LEFT JOIN employees   e ON e.user_id=u.user_id
                     LEFT JOIN departments d ON d.department_id=e.department_id

@@ -504,7 +504,18 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
             <div class="notif-footer"><a href="leave_requests.php">View all leave requests →</a></div>
           </div>
         </div>
-        <button class="add-btn" onclick="openAddModal()">➕ Add Contract</button>
+        <div class="tb-profile-wrap" id="tbProfileWrap">
+          <div class="tb-profile-btn" onclick="toggleProfileDropdown()" title="Account" id="tbProfileBtn"><?= strtoupper(substr($adminName,0,2)) ?></div>
+          <div class="tb-dropdown" id="tbDropdown">
+            <div class="tb-dd-header">
+              <div class="tb-dd-name"><?= htmlspecialchars($adminName) ?></div>
+              <div class="tb-dd-role"><?= htmlspecialchars($roleLabel) ?></div>
+            </div>
+            <a href="switch_to_employee.php" class="tb-dd-item" style="color:#d97706;">🔄 Switch to Employee Account</a>
+            <div class="tb-dd-divider"></div>
+            <a href="../Landingpage/logout.php" class="tb-dd-item danger" onclick="return confirm('Log out?')">🚪 Logout</a>
+          </div>
+        </div>
       </div>
     </div>
 

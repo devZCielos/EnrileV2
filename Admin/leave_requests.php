@@ -745,6 +745,14 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         <div class="form-row">
           <div class="form-group form-full"><label>Reason / Remarks</label><textarea id="fReason" placeholder="State the reason for this leave application…"></textarea></div>
         </div>
+        <div class="form-row">
+          <div class="form-group form-full">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;">
+              <input type="checkbox" id="fOthersConfirm" style="width:16px;height:16px;cursor:pointer;"/>
+              <span>Confirm: This is an "Others" leave type with specified details</span>
+            </label>
+          </div>
+        </div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-cancel" onclick="closeModal('modalForm')">Cancel</button>
@@ -864,8 +872,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
                 <div class="csf-check-row"><span class="csf-chk" id="ck-slbw"></span><span>Special Leave Benefits for Women <em style="font-size:.60rem;">(RA No. 9710 / CSC MC No. 25, s. 2010)</em></span></div>
                 <div class="csf-check-row"><span class="csf-chk" id="ck-ecl"></span><span>Special Emergency (Calamity) Leave <em style="font-size:.60rem;">(CSC MC No. 2, s. 2012, as amended)</em></span></div>
                 <div class="csf-check-row"><span class="csf-chk" id="ck-adopt"></span><span>Adoption Leave <em style="font-size:.60rem;">(R.A. No. 8552)</em></span></div>
-                <div class="csf-check-row" style="margin-top:3px;align-items:center;">
-                  <em style="font-size:.66rem;flex-shrink:0;">Others:&nbsp;</em>
+                <div class="csf-check-row">
+                  <span class="csf-chk" id="ck-others"></span><em style="font-size:.66rem;">Others:&nbsp;</em>
                   <span id="cf-others-text" style="border-bottom:1px solid #000;flex:1;">&nbsp;</span>
                 </div>
               </div>
@@ -1272,7 +1280,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     ];
     // Reset all leave type checkboxes
     ['ck-vl','ck-ml2','ck-sl','ck-mat','ck-pat','ck-spl','ck-solo',
-     'ck-study','ck-vawc','ck-rehab','ck-slbw','ck-ecl','ck-adopt'].forEach(function(id) {
+     'ck-study','ck-vawc','ck-rehab','ck-slbw','ck-ecl','ck-adopt','ck-others'].forEach(function(id) {
       var el = document.getElementById(id);
       if (el) el.className = 'csf-chk';
     });
@@ -1290,13 +1298,8 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
         if (el) { el.className = 'csf-chk checked'; foundCk = true; }
       }
     });
-    // If nothing matched, put in "Others"
-    if (!foundCk && leaveTypeName) {
-      var othersEl2 = document.getElementById('cf-others-text');
-      if (othersEl2) othersEl2.textContent = leaveTypeName;
-    }
 
-    // 6B — parse detail prefix from reason field e.g. "[Location: Within the Philippines] ..."
+    // Parse detail prefix early (before using it for Others)
     var rawReason = r.reason || '';
     var detailPrefix = '';
     var cleanReason  = rawReason;
@@ -1305,6 +1308,25 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
       detailPrefix = prefixMatch[1];
       cleanReason  = rawReason.substring(prefixMatch[0].length);
     }
+
+    // If nothing matched, put in "Others"
+    if (!foundCk && leaveTypeName) {
+      var othersEl2 = document.getElementById('cf-others-text');
+      if (othersEl2) {
+        // Extract the actual specified leave type from detailPrefix
+        // Format: "Leave Type: [specified_type] ☑"
+        if (detailPrefix && detailPrefix.indexOf('Leave Type:') >= 0) {
+          var specType = detailPrefix.replace(/^Leave Type:\s*/i, '').replace(/\s*☑\s*$/i, '').trim();
+          othersEl2.textContent = specType || leaveTypeName;
+        } else {
+          othersEl2.textContent = leaveTypeName;
+        }
+      }
+      // Check the "Others" checkbox when Others leave type is used
+      var othersChk = document.getElementById('ck-others');
+      if (othersChk) othersChk.className = 'csf-chk checked';
+    }
+
     var ltLow = leaveTypeName.toLowerCase();
     var detLow = detailPrefix.toLowerCase();
 
@@ -1587,6 +1609,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
   function openAdd(){
     ['fEmployee','fLeaveType','fFrom','fTo','fReason'].forEach(id=>{const el=document.getElementById(id);if(el){el.value='';el.classList.remove('err');}});
     document.getElementById('fDays').value='';
+    document.getElementById('fOthersConfirm').checked = false;
     openModal('modalForm');
   }
 
@@ -1603,7 +1626,12 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     body.append('date_from',document.getElementById('fFrom').value);
     body.append('date_to',document.getElementById('fTo').value);
     body.append('days',document.getElementById('fDays').value);
-    body.append('reason',document.getElementById('fReason').value.trim());
+    let reason = document.getElementById('fReason').value.trim();
+    // If Others leave type is confirmed, append checkbox indicator
+    if (document.getElementById('fOthersConfirm').checked) {
+      reason = '[Others Confirmed ☑] ' + reason;
+    }
+    body.append('reason',reason);
     try{
       const res=await fetch('leave_requests.php',{method:'POST',body});
       const json=await res.json();

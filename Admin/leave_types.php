@@ -4,19 +4,6 @@
 //  File: Admin/leave_types.php
 // ============================================================
 session_start();
-// ── Session timeout — 8 hours ─────────────────────────────────
-$_sessionLifetime = 8 * 60 * 60;
-if (isset($_SESSION['login_time']) && (time() - strtotime($_SESSION['login_time']) > $_sessionLifetime)) {
-    $_isAjax = !empty($_GET['action']) || !empty($_POST['action']);
-    session_unset(); session_destroy();
-    if ($_isAjax) {
-        header('Content-Type: application/json');
-        echo json_encode(['success'=>false,'message'=>'SESSION_EXPIRED: Your session has expired. Please log in again.']);
-        exit();
-    }
-    header('Location: ../Login/login.php?error=' . urlencode('Your session has expired. Please log in again.'));
-    exit();
-}
 
 if (empty($_SESSION['user_id'])) {
     header('Location: ../Login/login.php'); exit();
@@ -840,6 +827,7 @@ async function saveType() {
   if (document.getElementById('fActive').checked)     body.append('is_active',      '1');
   body.append('applicable_gender', document.getElementById('fGender').value);
   if (document.getElementById('fReqMarried').checked) body.append('require_married', '1');
+  body.append('csrf_token', CSRF_TOKEN);
 
   try {
     const res  = await fetch('leave_types.php', { method:'POST', body });
@@ -862,6 +850,7 @@ async function toggleType(id) {
   const body = new FormData();
   body.append('action', 'toggle');
   body.append('id', id);
+  body.append('csrf_token', CSRF_TOKEN);
   try {
     const res  = await fetch('leave_types.php', { method:'POST', body });
     const json = await res.json();
@@ -890,6 +879,7 @@ async function confirmDelete() {
   const body = new FormData();
   body.append('action', 'delete');
   body.append('id', deleteTarget);
+  body.append('csrf_token', CSRF_TOKEN);
   try {
     const res  = await fetch('leave_types.php', { method:'POST', body });
     const json = await res.json();
