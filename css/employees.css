@@ -147,6 +147,7 @@ tbody tr:hover { background: #eff6ff; }
 .badge-perm   { background: #dbeafe; color: #1e40af; }
 .badge-cont   { background: #f3e8ff; color: #6b21a8; }
 .badge-cas    { background: #fef3c7; color: #92400e; }
+.badge-jo     { background: #f0fdf4; color: #166534; }
 .badge-active   { background: #dcfce7; color: #166534; }
 .badge-onleave  { background: #fef3c7; color: #92400e; }
 .badge-inactive { background: #fee2e2; color: #991b1b; }

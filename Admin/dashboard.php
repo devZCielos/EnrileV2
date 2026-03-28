@@ -34,6 +34,7 @@ foreach ($possibleDb as $p) { if (file_exists($p)) { require_once $p; break; } }
 // ── Dashboard data ─────────────────────────────────────────────────────────
 $totalEmp      = 0; $pendingLeave = 0; $approvedLeave = 0; $onLeave = 0;
 $leaveRows     = []; $activityRows = []; $leaveByType = []; $expiringContracts = 0;
+$srRequestRows = []; $pendingSRCount = 0;
 $chartApproved = array_fill(1,12,0);
 $chartDenied   = array_fill(1,12,0);
 $chartPending  = array_fill(1,12,0);
@@ -137,6 +138,24 @@ if (isset($pdo)) {
                 AND DATEDIFF(end_date, CURDATE()) BETWEEN 0 AND 30
             ")->fetchColumn();
         } catch (Exception $ex) {}
+
+        // Pending service record requests
+        $pendingSRCount = (int)$pdo->query(
+            "SELECT COUNT(*) FROM sr_requests WHERE status='Pending'"
+        )->fetchColumn();
+        
+        $srRequestRows = $pdo->query("
+            SELECT sr.req_id, sr.purpose, sr.requested_at,
+                   e.first_name, e.last_name,
+                   e.position_title,
+                   COALESCE(d.name,'') AS department
+            FROM sr_requests sr
+            JOIN employees e ON sr.employee_id = e.employee_id
+            LEFT JOIN departments d ON d.department_id = e.department_id
+            WHERE sr.status = 'Pending'
+            ORDER BY sr.requested_at DESC
+            LIMIT 10
+        ")->fetchAll(PDO::FETCH_ASSOC);
 
     } catch (Exception $e) {
         error_log('[Dashboard] '.$e->getMessage());
@@ -447,7 +466,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     }
 
     /* CONTENT */
-    .content { padding: 24px 28px; flex: 1; }
+    .content { padding: 32px 36px; flex: 1; }
 
     /* ══════════════════════════════════
        SUMMARY CARDS
@@ -455,22 +474,22 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .cards-grid {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
-      gap: 18px;
-      margin-bottom: 22px;
+      gap: 20px;
+      margin-bottom: 28px;
     }
 
     .card {
       background: var(--white);
       border-radius: var(--radius);
-      padding: 20px 20px 18px;
-      box-shadow: var(--shadow-sm);
+      padding: 24px;
+      box-shadow: 0 2px 8px rgba(30,41,59,0.08);
       border: 1px solid var(--gray-200);
       position: relative; overflow: hidden;
       animation: cardIn 0.5s ease both;
-      transition: transform 0.22s, box-shadow 0.22s;
+      transition: transform 0.28s cubic-bezier(0.4,0,0.2,1), box-shadow 0.28s cubic-bezier(0.4,0,0.2,1);
       cursor: default;
     }
-    .card:hover { transform: translateY(-4px); box-shadow: var(--shadow-md); }
+    .card:hover { transform: translateY(-6px); box-shadow: 0 12px 24px rgba(37,99,235,0.12); }
     .card:nth-child(1) { animation-delay: 0.05s; }
     .card:nth-child(2) { animation-delay: 0.10s; }
     .card:nth-child(3) { animation-delay: 0.15s; }
@@ -498,11 +517,12 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .card.orange::after { background: #f59e0b; }
     .card.red::after    { background: #ef4444; }
 
-    .card-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 14px; }
+    .card-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 18px; }
 
     .card-icon {
-      width: 46px; height: 46px; border-radius: 12px;
-      display: flex; align-items: center; justify-content: center; font-size: 1.3rem;
+      width: 52px; height: 52px; border-radius: 14px;
+      display: flex; align-items: center; justify-content: center; font-size: 1.6rem;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.08);
     }
     .card.blue   .card-icon { background: #dbeafe; }
     .card.green  .card-icon { background: #dcfce7; }
@@ -517,15 +537,15 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .card-trend.warn { background: #fef3c7; color: #92400e; }
     .card-trend.down { background: #fee2e2; color: #991b1b; }
 
-    .card-value { font-size: 2.1rem; font-weight: 800; color: var(--gray-800); line-height: 1; margin-bottom: 4px; }
-    .card-label { font-size: 0.78rem; color: var(--gray-400); font-weight: 600; }
+    .card-value { font-size: 2.4rem; font-weight: 900; color: var(--gray-800); line-height: 1; margin-bottom: 6px; letter-spacing: -0.5px; }
+    .card-label { font-size: 0.81rem; color: var(--gray-500); font-weight: 600; letter-spacing: 0.02em; }
 
     /* ══════════════════════════════════
        GRID ROWS
     ══════════════════════════════════ */
-    .row-2 { display: grid; grid-template-columns: 1fr 330px; gap: 18px; margin-bottom: 22px; }
-    .row-3 { display: grid; grid-template-columns: 1fr 1fr 330px; gap: 18px; margin-bottom: 22px; }
-    .row-4 { display: grid; grid-template-columns: 1fr 340px; gap: 18px; }
+    .row-2 { display: grid; grid-template-columns: 1fr 340px; gap: 20px; margin-bottom: 26px; }
+    .row-3 { display: grid; grid-template-columns: 1fr 1fr 340px; gap: 20px; margin-bottom: 26px; }
+    .row-4 { display: grid; grid-template-columns: 1fr 345px; gap: 20px; }
 
     /* ══════════════════════════════════
        PANEL (card wrapper)
@@ -534,26 +554,31 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
       background: var(--white);
       border-radius: var(--radius);
       border: 1px solid var(--gray-200);
-      box-shadow: var(--shadow-sm);
+      box-shadow: 0 2px 8px rgba(30,41,59,0.08);
       overflow: hidden;
       animation: cardIn 0.5s 0.22s ease both;
+      transition: box-shadow 0.3s ease, border-color 0.3s ease;
     }
+    .panel:hover { box-shadow: 0 8px 16px rgba(30,41,59,0.12); }
 
     .panel-header {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 16px 20px 13px;
-      border-bottom: 1px solid var(--gray-100);
+      padding: 22px 24px 18px;
+      border-bottom: 1.5px solid var(--gray-100);
+      background: linear-gradient(135deg, rgba(37,99,235,0.02), rgba(34,197,94,0.02));
     }
-    .panel-title { font-size: 0.92rem; font-weight: 800; color: var(--gray-800); }
-    .panel-sub   { font-size: 0.72rem; color: var(--gray-400); margin-top: 1px; }
+    .panel-title { font-size: 0.98rem; font-weight: 900; color: var(--gray-800); letter-spacing: -0.3px; }
+    .panel-sub   { font-size: 0.75rem; color: var(--gray-500); margin-top: 3px; font-weight: 500; }
     .panel-action {
-      font-size: 0.76rem; color: var(--primary); font-weight: 700;
-      text-decoration: none; cursor: pointer; transition: color 0.2s;
+      font-size: 0.78rem; color: var(--primary); font-weight: 700;
+      text-decoration: none; cursor: pointer; transition: all 0.2s;
+      padding: 4px 8px;
+      border-radius: 6px;
     }
-    .panel-action:hover { color: var(--primary-dark); }
+    .panel-action:hover { color: var(--primary-dark); background: rgba(37,99,235,0.08); }
 
     /* CHART */
-    .chart-wrap { padding: 16px 20px; }
+    .chart-wrap { padding: 20px 24px; }
 
     /* ══════════════════════════════════
        QUICK ACTIONS
@@ -604,75 +629,94 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
 
     .emp-cell { display: flex; align-items: center; gap: 10px; }
     .emp-avatar {
-      width: 32px; height: 32px; border-radius: 50%;
+      width: 36px; height: 36px; border-radius: 50%;
       background: linear-gradient(135deg, var(--primary), #60a5fa);
       display: flex; align-items: center; justify-content: center;
-      font-size: 0.70rem; font-weight: 800; color: white; flex-shrink: 0;
+      font-size: 0.78rem; font-weight: 800; color: white; flex-shrink: 0;
+      box-shadow: 0 2px 6px rgba(37,99,235,0.2);
     }
-    .emp-name { font-weight: 700; font-size: 0.82rem; }
-    .emp-dept { font-size: 0.68rem; color: var(--gray-400); }
+    .emp-name { font-weight: 800; font-size: 0.86rem; }
+    .emp-dept { font-size: 0.72rem; color: var(--gray-600); }
 
     .badge-status {
-      display: inline-flex; align-items: center; gap: 4px;
-      padding: 3px 9px; border-radius: 20px;
-      font-size: 0.68rem; font-weight: 700; white-space: nowrap;
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 6px 12px; border-radius: 22px;
+      font-size: 0.72rem; font-weight: 800; white-space: nowrap;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     }
     .badge-status.pending  { background: #fef3c7; color: #92400e; }
     .badge-status.approved { background: #dcfce7; color: #166534; }
     .badge-status.denied   { background: #fee2e2; color: #991b1b; }
 
     .badge-leave {
-      padding: 2px 8px; border-radius: 6px;
-      font-size: 0.68rem; font-weight: 700;
+      padding: 5px 11px; border-radius: 8px;
+      font-size: 0.72rem; font-weight: 800;
       background: #dbeafe; color: #1e40af;
+      box-shadow: 0 1px 3px rgba(30,58,175,0.15);
     }
 
-    .action-btns { display: flex; gap: 5px; }
+    .action-btns { display: flex; gap: 7px; }
     .act-btn {
-      padding: 4px 9px; border-radius: 6px; border: none;
-      font-size: 0.70rem; font-weight: 700; cursor: pointer; transition: all 0.2s;
+      padding: 7px 12px; border-radius: 7px; border: none;
+      font-size: 0.74rem; font-weight: 700; cursor: pointer; transition: all 0.25s cubic-bezier(0.4,0,0.2,1);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     }
     .act-btn.approve { background: #dcfce7; color: #166534; }
-    .act-btn.approve:hover { background: #22c55e; color: white; }
+    .act-btn.approve:hover { background: #22c55e; color: white; transform: translateY(-2px); box-shadow: 0 4px 10px rgba(34,197,94,0.2); }
     .act-btn.deny    { background: #fee2e2; color: #991b1b; }
-    .act-btn.deny:hover { background: #ef4444; color: white; }
+    .act-btn.deny:hover { background: #ef4444; color: white; transform: translateY(-2px); box-shadow: 0 4px 10px rgba(239,68,68,0.2); }
 
     /* ══════════════════════════════════
        ACTIVITY LOG
     ══════════════════════════════════ */
-    .activity-list { padding: 10px 16px; max-height: 320px; overflow-y: auto; }
+    .activity-list { padding: 16px 24px; max-height: 420px; overflow-y: auto; }
 
     .activity-item {
-      display: flex; gap: 11px;
-      padding: 11px 0; border-bottom: 1px solid var(--gray-100);
+      display: flex; gap: 14px;
+      padding: 16px 0; border-bottom: 1.5px solid var(--gray-100);
       animation: cardIn 0.4s ease both;
+      transition: background-color 0.2s;
     }
+    .activity-item:hover { background: rgba(37,99,235,0.02); }
     .activity-item:last-child { border-bottom: none; }
 
-    .act-dot {
-      width: 32px; height: 32px; border-radius: 50%;
+    .av {
+      width: 42px; height: 42px; border-radius: 50%;
       display: flex; align-items: center; justify-content: center;
-      font-size: 0.85rem; flex-shrink: 0; margin-top: 1px;
+      font-size: 0.90rem; flex-shrink: 0; font-weight: 800; color: white;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+    }
+    .act-dot {
+      width: 36px; height: 36px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.90rem; flex-shrink: 0; margin-top: 2px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
     }
     .act-dot.green  { background: #dcfce7; }
     .act-dot.blue   { background: #dbeafe; }
     .act-dot.orange { background: #fef3c7; }
     .act-dot.red    { background: #fee2e2; }
 
+    .ai-body { flex: 1; }
+    .ai-title { font-size: 0.85rem; font-weight: 800; color: var(--gray-800); display: block; line-height: 1.3; }
+    .ai-sub { font-size: 0.75rem; color: var(--gray-600); margin-top: 3px; line-height: 1.4; }
+    .ai-meta { font-size: 0.70rem; color: var(--gray-500); margin-top: 5px; font-weight: 500; }
     .act-text { flex: 1; }
-    .act-text strong { font-size: 0.80rem; font-weight: 700; color: var(--gray-800); display: block; }
-    .act-text p { font-size: 0.72rem; color: var(--gray-400); margin-top: 1px; }
-    .act-time { font-size: 0.66rem; color: var(--gray-400); white-space: nowrap; margin-top: 2px; }
+    .act-text strong { font-size: 0.84rem; font-weight: 800; color: var(--gray-800); display: block; }
+    .act-text p { font-size: 0.75rem; color: var(--gray-600); margin-top: 3px; }
+    .act-time { font-size: 0.69rem; color: var(--gray-500); white-space: nowrap; margin-top: 4px; }
 
     /* ══════════════════════════════════
        ANNOUNCEMENTS
     ══════════════════════════════════ */
-    .announce-list { padding: 10px 16px; }
+    .announce-list { padding: 16px 24px; }
 
     .announce-item {
-      display: flex; gap: 12px;
-      padding: 12px 0; border-bottom: 1px solid var(--gray-100);
+      display: flex; gap: 14px;
+      padding: 15px 0; border-bottom: 1.5px solid var(--gray-100);
+      transition: background-color 0.2s;
     }
+    .announce-item:hover { background: rgba(37,99,235,0.02); }
     .announce-item:last-child { border-bottom: none; }
 
     .announce-dot {
@@ -685,13 +729,14 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .announce-dot.red    { background: #ef4444; }
 
     .announce-body { flex: 1; }
-    .announce-title { font-size: 0.82rem; font-weight: 700; color: var(--gray-800); }
-    .announce-text  { font-size: 0.72rem; color: var(--gray-600); margin-top: 2px; line-height: 1.5; }
-    .announce-meta  { font-size: 0.66rem; color: var(--gray-400); margin-top: 4px; }
+    .announce-title { font-size: 0.86rem; font-weight: 800; color: var(--gray-800); }
+    .announce-text  { font-size: 0.76rem; color: var(--gray-600); margin-top: 4px; line-height: 1.5; }
+    .announce-meta  { font-size: 0.70rem; color: var(--gray-500); margin-top: 6px; font-weight: 500; }
 
     .announce-tag {
-      display: inline-block; padding: 1px 7px; border-radius: 5px;
-      font-size: 0.62rem; font-weight: 800; margin-right: 4px;
+      display: inline-block; padding: 4px 9px; border-radius: 6px;
+      font-size: 0.66rem; font-weight: 800; margin-right: 5px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     }
     .announce-tag.info    { background: #dbeafe; color: #1e40af; }
     .announce-tag.success { background: #dcfce7; color: #166534; }
@@ -700,39 +745,41 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
 
     /* ADD ANNOUNCEMENT FORM */
     .announce-form {
-      padding: 12px 16px 14px;
-      border-top: 1px solid var(--gray-100);
-      background: var(--gray-50);
+      padding: 18px 24px 20px;
+      border-top: 1.5px solid var(--gray-100);
+      background: linear-gradient(135deg, rgba(37,99,235,0.02), rgba(34,197,94,0.02));
     }
     .announce-form textarea {
-      width: 100%; padding: 9px 12px;
+      width: 100%; padding: 12px 14px;
       border: 1.5px solid var(--gray-200); border-radius: var(--radius-sm);
-      font-size: 0.80rem; font-family: 'Nunito', sans-serif;
-      resize: none; height: 60px;
-      transition: border-color 0.2s;
+      font-size: 0.82rem; font-family: 'Nunito', sans-serif;
+      resize: none; height: 70px;
+      transition: border-color 0.2s, box-shadow 0.2s;
       background: white;
     }
-    .announce-form textarea:focus { outline: none; border-color: var(--primary); }
-    .announce-form-actions { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+    .announce-form textarea:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+    .announce-form-actions { display: flex; gap: 10px; margin-top: 12px; align-items: center; }
     .announce-form select {
-      flex: 1; padding: 7px 10px;
+      flex: 1; padding: 9px 12px;
       border: 1.5px solid var(--gray-200); border-radius: var(--radius-sm);
-      font-size: 0.76rem; font-family: 'Nunito', sans-serif;
-      color: var(--gray-600); background: white;
-      cursor: pointer;
+      font-size: 0.78rem; font-family: 'Nunito', sans-serif;
+      color: var(--gray-700); background: white;
+      cursor: pointer; transition: border-color 0.2s, box-shadow 0.2s;
     }
-    .announce-form select:focus { outline: none; border-color: var(--primary); }
+    .announce-form select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
     .post-btn {
-      padding: 7px 16px;
+      padding: 10px 20px;
       background: linear-gradient(135deg, var(--primary), var(--primary-dark));
       color: white; border: none; border-radius: var(--radius-sm);
-      font-size: 0.76rem; font-weight: 700; font-family: 'Nunito', sans-serif;
-      cursor: pointer; transition: all 0.2s; white-space: nowrap;
+      font-size: 0.80rem; font-weight: 700; font-family: 'Nunito', sans-serif;
+      cursor: pointer; transition: all 0.3s cubic-bezier(0.4,0,0.2,1); white-space: nowrap;
+      box-shadow: 0 2px 8px rgba(37,99,235,0.25);
     }
+    .post-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(37,99,235,0.35); }
     .post-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(37,99,235,0.35); }
 
     /* LEAVE TYPE MINI CHART */
-    .mini-chart-wrap { padding: 16px 20px; }
+    .mini-chart-wrap { padding: 20px 24px; }
     .leave-type-bars { display: flex; flex-direction: column; gap: 12px; }
     .lbar-row { display: flex; align-items: center; gap: 10px; }
     .lbar-label { font-size: 0.75rem; font-weight: 700; color: var(--gray-600); width: 80px; flex-shrink: 0; }
@@ -957,39 +1004,32 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           </div>
         </div>
 
-        <!-- Quick Actions -->
+        <!-- Pending Service Record Requests -->
         <div class="panel">
           <div class="panel-header">
             <div>
-              <div class="panel-title">⚡ Quick Actions</div>
-              <div class="panel-sub">Frequently used shortcuts</div>
+              <div class="panel-title">📋 Pending Service Record Requests</div>
+              <div class="panel-sub"><?= $pendingSRCount ?> pending request<?= $pendingSRCount!==1?'s':'' ?></div>
             </div>
           </div>
-          <div class="quick-actions">
-            <a class="qa-btn" href="add_employee.php">
-              <div class="qa-icon" style="background:#dbeafe;">➕</div>
-              <span>Add Employee</span>
-            </a>
-            <a class="qa-btn" href="leave_requests.php">
-              <div class="qa-icon" style="background:#fef3c7;">📋</div>
-              <span>Leave Requests</span>
-            </a>
-            <a class="qa-btn" href="documents.php">
-              <div class="qa-icon" style="background:#dcfce7;">📄</div>
-              <span>Upload Document</span>
-            </a>
-            <a class="qa-btn" href="reports.php">
-              <div class="qa-icon" style="background:#f3e8ff;">📊</div>
-              <span>Generate Report</span>
-            </a>
-            <a class="qa-btn" href="user_accounts.php">
-              <div class="qa-icon" style="background:#fee2e2;">🔐</div>
-              <span>Manage Accounts</span>
-            </a>
-            <a class="qa-btn" href="announcements.php">
-              <div class="qa-icon" style="background:#e0f2fe;">📢</div>
-              <span>Post Notice</span>
-            </a>
+          <div class="activity-list">
+            <?php if (empty($srRequestRows)): ?>
+              <div style="padding:20px;text-align:center;color:#999;">
+                <div style="font-size:2rem;margin-bottom:8px;">✓</div>
+                <div>No pending requests</div>
+              </div>
+            <?php else: ?>
+              <?php foreach ($srRequestRows as $sr): ?>
+                <div class="activity-item">
+                  <div class="av" style="background:<?= dashColor($sr['first_name'].' '.$sr['last_name'], $avColors) ?>;color:#fff;font-size:12px;font-weight:700;"><?= dashIni($sr['first_name'].' '.$sr['last_name']) ?></div>
+                  <div class="ai-body">
+                    <div class="ai-title"><?= htmlspecialchars($sr['first_name'].' '.$sr['last_name']) ?></div>
+                    <div class="ai-sub"><?= htmlspecialchars($sr['purpose']??'No purpose specified'); ?></div>
+                    <div class="ai-meta"><?= htmlspecialchars($sr['position_title']??'') ?> • <?= htmlspecialchars($sr['department']??'') ?> • <?= date('M d, Y', strtotime($sr['requested_at']??'')) ?></div>
+                  </div>
+                </div>
+              <?php endforeach ?>
+            <?php endif ?>
           </div>
         </div>
 

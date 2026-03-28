@@ -138,6 +138,14 @@ if ($action) {
 
             // ── LEAVE BALANCES ────────────────────────────────
             case 'balances':
+                // ── CHECK EMPLOYMENT TYPE: Only Permanent can view leave balances ──
+                $empTypeCheck = $pdo->prepare("SELECT employment_type FROM employees WHERE employee_id = ?");
+                $empTypeCheck->execute([$employeeId]);
+                $empTypeRow = $empTypeCheck->fetch();
+                $empType = $empTypeRow['employment_type'] ?? 'Unknown';
+                if ($empType !== 'Permanent') {
+                    echo json_encode(['success' => false, 'message' => "Leave balances are only available to Permanent employees. You are employed as: {$empType}."]); break;
+                }
                 // ── AUTO-INITIALIZE LEAVE BALANCES FOR NEW EMPLOYEES OR NEW CALENDAR YEAR ──
                 $checkBal = $pdo->prepare("SELECT COUNT(*) FROM leave_balances WHERE employee_id = ? AND calendar_year = YEAR(NOW())");
                 $checkBal->execute([$employeeId]);
@@ -277,6 +285,15 @@ if ($action) {
                     echo json_encode(['success' => false, 'message' => 'No employee record linked to your account. Please contact HR to link your account.']); break;
                 }
                 
+                // ── CHECK EMPLOYMENT TYPE: Only Permanent can view leave requests ──
+                $empTypeCheck = $pdo->prepare("SELECT employment_type FROM employees WHERE employee_id = ?");
+                $empTypeCheck->execute([$employeeId]);
+                $empTypeRow = $empTypeCheck->fetch();
+                $empType = $empTypeRow['employment_type'] ?? 'Unknown';
+                if ($empType !== 'Permanent') {
+                    echo json_encode(['success' => false, 'message' => "Leave requests are only available to Permanent employees. You are employed as: {$empType}."]); break;
+                }
+                
                 $status = $_GET['status'] ?? 'all';
                 $where  = 'lr.employee_id = ?';
                 $params = [$employeeId];
@@ -312,6 +329,16 @@ if ($action) {
                 if (!$employeeId) {
                     echo json_encode(['success' => false, 'message' => 'Employee record not found.']); break;
                 }
+                
+                // ── CHECK EMPLOYMENT TYPE: Only Permanent can file leave ──
+                $empTypeCheck = $pdo->prepare("SELECT employment_type FROM employees WHERE employee_id = ?");
+                $empTypeCheck->execute([$employeeId]);
+                $empTypeRow = $empTypeCheck->fetch();
+                $empType = $empTypeRow['employment_type'] ?? 'Unknown';
+                if ($empType !== 'Permanent') {
+                    echo json_encode(['success' => false, 'message' => "Only Permanent employees can file leave requests. Your employment type is: {$empType}. Please contact HR for more information."]); break;
+                }
+                
                 $leaveTypeId = (int)($_POST['leave_type_id']    ?? 0);
                 $dateFrom    = $_POST['date_from']              ?? '';
                 $dateTo      = $_POST['date_to']                ?? '';
@@ -477,6 +504,14 @@ if ($action) {
 
             // ── LEAVE TYPES ───────────────────────────────────
             case 'leave_types':
+                // ── CHECK EMPLOYMENT TYPE: Only Permanent can access leave types ──
+                $empTypeCheck = $pdo->prepare("SELECT employment_type FROM employees WHERE employee_id = ?");
+                $empTypeCheck->execute([$employeeId]);
+                $empTypeRow = $empTypeCheck->fetch();
+                $empType = $empTypeRow['employment_type'] ?? 'Unknown';
+                if ($empType !== 'Permanent') {
+                    echo json_encode(['success' => false, 'message' => "Leave functionality is only available to Permanent employees. You are employed as: {$empType}.", 'data' => []]); break;
+                }
                 // Fetch employee's gender for filtering
                 $empInfo = $pdo->prepare("SELECT gender FROM employees WHERE employee_id = ?");
                 $empInfo->execute([$employeeId]);
@@ -571,6 +606,7 @@ if ($action) {
                     'trainings'         => json_encode($data['trainings']         ?? []),
                     'other_info'        => json_encode($data['other_info']        ?? []),
                     'pds_references'    => json_encode($data['references']        ?? []),
+                    'pds_character_references' => json_encode($data['character_references'] ?? []),
                     'q4_questions'      => json_encode($data['q4_questions']      ?? []),
                     'updated_at'        => date('Y-m-d H:i:s'),
                 ];
@@ -2302,7 +2338,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
         </div>
         <div style="font-size:.76rem;font-weight:800;color:var(--primary);margin:14px 0 8px;">23. NAME OF CHILDREN (Write full name and list all)</div>
         <div id="pds_children_list"></div>
-        <button class="add-row-btn" onclick="addChild()">+ Add Child</button>
+        <button class="add-row-btn" onclick="addChild(null, false)">+ Add Child</button>
         <div style="font-size:.76rem;font-weight:800;color:var(--primary);margin:14px 0 8px;">24. FATHER</div>
         <div class="fg3">
           <div class="fg"><label>Surname</label><input type="text" id="pds_fa_surname"/></div>
@@ -2319,7 +2355,10 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
       </div>
 
       <!-- III. Educational Background -->
-      <div class="form-section-hd">III. Educational Background (26)</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="form-section-hd">III. Educational Background (26)</div>
+        <button type="button" class="add-row-btn" onclick="if(confirm('Are you sure you want to reset all Education entries? This cannot be undone.')) resetEducation()" style="background:#ef4444;margin:0;">↻ Reset</button>
+      </div>
       <div class="form-section-body" style="padding:10px;">
         <p style="font-size:.75rem;color:var(--g600);margin-bottom:10px;">Write in full. Do not abbreviate.</p>
         <div style="overflow-x:auto;">
@@ -2396,12 +2435,15 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
             </tbody>
           </table>
         </div>
-        <button class="add-row-btn" onclick="addGradStudy()">+ Add Graduate Studies</button>
+        <button class="add-row-btn" onclick="addGradStudy(null, false)">+ Add Graduate Studies</button>
       </div>
 
       <!-- ── PAGE 2 ── -->
       <!-- IV. Civil Service Eligibility -->
-      <div class="form-section-hd">IV. Civil Service Eligibility (27)</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="form-section-hd">IV. Civil Service Eligibility (27)</div>
+        <button type="button" class="add-row-btn" onclick="if(confirm('Are you sure you want to reset all Civil Service Eligibility entries? This cannot be undone.')) resetSection('pds_cs_list')" style="background:#ef4444;margin:0;">↻ Reset</button>
+      </div>
       <div class="form-section-body" style="padding:10px;">
         <p style="font-size:.75rem;color:var(--g600);margin-bottom:10px;">CES/CSEE/Career Service/RA 1080 (Board/Bar)/Under Special Laws/Category II/IV Eligibility and Eligibilities for Uniformed Personnel</p>
         <div style="overflow-x:auto;">
@@ -2420,11 +2462,14 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
             <tbody id="pds_cs_list"></tbody>
           </table>
         </div>
-        <button class="add-row-btn" onclick="addCS()">+ Add Eligibility</button>
+        <button class="add-row-btn" onclick="addCS(null, false)">+ Add Eligibility</button>
       </div>
 
       <!-- V. Work Experience -->
-      <div class="form-section-hd">V. Work Experience (28)</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="form-section-hd">V. Work Experience (28)</div>
+        <button type="button" class="add-row-btn" onclick="if(confirm('Are you sure you want to reset all Work Experience entries? This cannot be undone.')) resetSection('pds_we_list')" style="background:#ef4444;margin:0;">↻ Reset</button>
+      </div>
       <div class="form-section-body" style="padding:10px;">
         <p style="font-size:.75rem;color:var(--g600);margin-bottom:10px;">Include private employment. Start from your most recent work. Description of duties should be indicated in the attached Work Experience Sheet.</p>
         <div style="overflow-x:auto;">
@@ -2445,12 +2490,15 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
             <tbody id="pds_we_list"></tbody>
           </table>
         </div>
-        <button class="add-row-btn" onclick="addWE()">+ Add Work Experience</button>
+        <button class="add-row-btn" onclick="addWE(null, false)">+ Add Work Experience</button>
       </div>
 
       <!-- ── PAGE 3 ── -->
       <!-- VI. Voluntary Work -->
-      <div class="form-section-hd">VI. Voluntary Work / Involvement in Civic / Non-Government / People / Voluntary Organization/s (29)</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="form-section-hd">VI. Voluntary Work / Involvement in Civic / Non-Government / People / Voluntary Organization/s (29)</div>
+        <button type="button" class="add-row-btn" onclick="if(confirm('Are you sure you want to reset all Voluntary Work entries? This cannot be undone.')) resetSection('pds_vw_list')" style="background:#ef4444;margin:0;">↻ Reset</button>
+      </div>
       <div class="form-section-body" style="padding:10px;">
         <div style="overflow-x:auto;">
           <table style="width:100%;border-collapse:collapse;font-size:.76rem;min-width:600px;">
@@ -2467,11 +2515,15 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
             <tbody id="pds_vw_list"></tbody>
           </table>
         </div>
-        <button class="add-row-btn" onclick="addVW()">+ Add Voluntary Work</button>
+        <button class="add-row-btn" onclick="addVW(null, false)">+ Add Voluntary Work</button>
       </div>
 
       <!-- VII. L&D / Trainings -->
-      <div class="form-section-hd">VII. Learning and Development (L&D) Interventions / Training Programs Attended (30)</div>
+      <!-- VII. Learning and Development -->
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="form-section-hd">VII. Learning and Development (L&D) Interventions / Training Programs Attended (30)</div>
+        <button type="button" class="add-row-btn" onclick="if(confirm('Are you sure you want to reset all Training Program entries? This cannot be undone.')) resetSection('pds_tr_list')" style="background:#ef4444;margin:0;">↻ Reset</button>
+      </div>
       <div class="form-section-body" style="padding:10px;">
         <div style="overflow-x:auto;">
           <table style="width:100%;border-collapse:collapse;font-size:.76rem;min-width:650px;">
@@ -2489,7 +2541,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
             <tbody id="pds_tr_list"></tbody>
           </table>
         </div>
-        <button class="add-row-btn" onclick="addTR()">+ Add Training</button>
+        <button class="add-row-btn" onclick="addTR(null, false)">+ Add Training</button>
       </div>
 
       <!-- VIII. Other Information -->
@@ -2499,7 +2551,10 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
 
           <!-- 31. Special Skills and Hobbies -->
           <div class="fg fg-full">
-            <label>31. Special Skills and Hobbies</label>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+              <label>31. Special Skills and Hobbies</label>
+            <button type="button" class="add-row-btn" onclick="if(confirm('Are you sure you want to reset all Skills entries? This cannot be undone.')) oiResetList('pds_skills_list', 'pds_skills_tpl')" style="background:#ef4444;margin:0;">↻ Reset</button>
+            </div>
             <div id="pds_skills_list" class="oi-list"></div>
             <template id="pds_skills_tpl">
               <div class="oi-row">
@@ -2507,12 +2562,15 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
                 <button type="button" class="oi-del" onclick="oiDelRow(this)" title="Remove">✕</button>
               </div>
             </template>
-            <button type="button" class="add-row-btn" onclick="oiAddRow('pds_skills_list','pds_skills_tpl')">+ Add Skill</button>
+            <button type="button" class="add-row-btn" onclick="oiAddRow('pds_skills_list','pds_skills_tpl', null, false)">+ Add Skill</button>
           </div>
 
           <!-- 32. Non-Academic Distinctions -->
           <div class="fg fg-full">
-            <label>32. Non-Academic Distinctions / Recognition (Write in full)</label>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+              <label>32. Non-Academic Distinctions / Recognition (Write in full)</label>
+              <button type="button" class="add-row-btn" onclick="if(confirm('Are you sure you want to reset all Distinctions entries? This cannot be undone.')) oiResetList('pds_distinctions_list', 'pds_distinctions_tpl')" style="background:#ef4444;margin:0;">↻ Reset</button>
+            </div>
             <div id="pds_distinctions_list" class="oi-list"></div>
             <template id="pds_distinctions_tpl">
               <div class="oi-row">
@@ -2520,12 +2578,15 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
                 <button type="button" class="oi-del" onclick="oiDelRow(this)" title="Remove">✕</button>
               </div>
             </template>
-            <button type="button" class="add-row-btn" onclick="oiAddRow('pds_distinctions_list','pds_distinctions_tpl')">+ Add Distinction</button>
+            <button type="button" class="add-row-btn" onclick="oiAddRow('pds_distinctions_list','pds_distinctions_tpl', null, false)">+ Add Distinction</button>
           </div>
 
           <!-- 33. Membership -->
           <div class="fg fg-full">
-            <label>33. Membership in Association/Organization (Write in full)</label>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+              <label>33. Membership in Association/Organization (Write in full)</label>
+              <button type="button" class="add-row-btn" onclick="if(confirm('Are you sure you want to reset all Membership entries? This cannot be undone.')) oiResetList('pds_memberships_list', 'pds_memberships_tpl')" style="background:#ef4444;margin:0;">↻ Reset</button>
+            </div>
             <div id="pds_memberships_list" class="oi-list"></div>
             <template id="pds_memberships_tpl">
               <div class="oi-row">
@@ -2533,10 +2594,21 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
                 <button type="button" class="oi-del" onclick="oiDelRow(this)" title="Remove">✕</button>
               </div>
             </template>
-            <button type="button" class="add-row-btn" onclick="oiAddRow('pds_memberships_list','pds_memberships_tpl')">+ Add Membership</button>
+            <button type="button" class="add-row-btn" onclick="oiAddRow('pds_memberships_list','pds_memberships_tpl', null, false)">+ Add Membership</button>
           </div>
 
         </div>
+      </div>
+
+      <!-- VIII. References -->
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="form-section-hd">VIII. References (General Professional/Non-Character References)</div>
+        <button type="button" class="add-row-btn" onclick="if(confirm('Are you sure you want to reset all References? This cannot be undone.')) resetReferences()" style="background:#ef4444;margin:0;">↻ Reset</button>
+      </div>
+      <div class="form-section-body">
+        <div id="pds_ref_list"></div>
+        <button class="add-row-btn" onclick="addRef(null, false)">+ Add Reference</button>
+        <p style="font-size:.72rem;color:var(--g400);margin-top:8px;">Provide at least 7 professional references with their Office/Residential Address and Contact No./Email.</p>
       </div>
 
       <!-- ── PAGE 4 ── -->
@@ -2639,10 +2711,13 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
       </div>
 
       <!-- 41. References -->
-      <div class="form-section-hd">41. Character References (Person not related to applicant/appointee)</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="form-section-hd">41. Character References (Person not related to applicant/appointee)</div>
+        <button type="button" class="add-row-btn" onclick="if(confirm('Are you sure you want to reset all Character References? This cannot be undone.')) resetCharacterReferences()" style="background:#ef4444;margin:0;">↻ Reset</button>
+      </div>
       <div class="form-section-body">
-        <div id="pds_ref_list"></div>
-        <button class="add-row-btn" onclick="addRef()">+ Add Reference</button>
+        <div id="pds_character_ref_list"></div>
+        <button class="add-row-btn" onclick="addCharacterRef(null, false)">+ Add Reference</button>
         <p style="font-size:.72rem;color:var(--g400);margin-top:8px;">Provide at least 3 references with their Office/Residential Address and Contact No./Email.</p>
       </div>
 
@@ -3030,6 +3105,10 @@ let docDebounce = null;
   document.getElementById('tbDate').textContent    = now.toLocaleDateString('en-PH',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
 
   await loadProfile();
+  
+  // ── CHECK EMPLOYMENT TYPE AND APPLY RESTRICTIONS ──
+  restrictByEmploymentType();
+  
   loadBalances();
   loadLeaveTypes();
   loadRecentRequests();
@@ -3053,6 +3132,88 @@ const PAGE_META = {
   saln:     ['SALN',                'Statement of Assets, Liabilities and Net Worth'],
   service_record: ['Service Record', 'Your government service history'],
 };
+
+// ════════════════════════════════════════════════════════
+//  EMPLOYMENT TYPE RESTRICTIONS
+// ════════════════════════════════════════════════════════
+function restrictByEmploymentType() {
+  const empType = (window._profileData && window._profileData.employment_type) ? window._profileData.employment_type : 'Permanent';
+  const isPermanent = (empType === 'Permanent');
+  
+  // Store for use in other functions
+  window._employmentType = empType;
+  
+  if (!isPermanent) {
+    // Non-permanent employees cannot access leave-related features
+    const sidebarItems = document.querySelectorAll('.sb-item');
+    sidebarItems.forEach((item, idx) => {
+      // Disable: My Leave Requests (index 2), File Leave Request (index 3), Leave Balances (index 4)
+      if (idx === 2 || idx === 3 || idx === 4) {
+        item.style.opacity = '0.5';
+        item.style.cursor = 'not-allowed';
+        item.setAttribute('data-disabled', 'true');
+        item.onclick = function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          showToast(`📋 Leave features are only available to Permanent employees.`, 'info');
+          return false;
+        };
+      }
+    });
+    
+    // Disable Quick Action buttons for leave features
+    const qaButtons = document.querySelectorAll('.qa-btn');
+    if (qaButtons.length >= 2) {
+      // File Leave (index 0), Leave Balances (index 1)
+      for (let i = 0; i < Math.min(2, qaButtons.length); i++) {
+        qaButtons[i].style.opacity = '0.5';
+        qaButtons[i].style.cursor = 'not-allowed';
+        qaButtons[i].onclick = function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          showToast(`📋 Leave features are only available to Permanent employees.`, 'info');
+          return false;
+        };
+      }
+    }
+    
+    // Show employment type banner
+    showNonPermanentBanner(empType);
+  }
+}
+
+function showNonPermanentBanner(empType) {
+  const topbar = document.querySelector('.topbar');
+  if (topbar) {
+    const banner = document.createElement('div');
+    banner.style.cssText = `
+      position: sticky;
+      top: var(--topbar-h);
+      z-index: 190;
+      background: linear-gradient(135deg, #9333ea 0%, #7e22ce 50%, #6b21a8 100%);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 26px;
+      font-family: 'Nunito', sans-serif;
+      box-shadow: 0 3px 14px rgba(0,0,0,.25);
+      flex-wrap: wrap;
+      border-bottom: 2px solid #c084fc;
+    `;
+    banner.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div style="font-size:1.3rem;animation:pulse 2s infinite;">ℹ️</div>
+        <div>
+          <strong style="display:block;font-size:.90rem;font-weight:800;letter-spacing:.01em;">📌 Limited Access — ${empType} Employee</strong>
+          <span style="font-size:.75rem;opacity:.90;font-weight:600;">You can upload documents, fill PDS/SALN, and request service records. Leave features are available to Permanent employees only.</span>
+        </div>
+      </div>
+    `;
+    topbar.parentNode.insertBefore(banner, topbar.nextSibling);
+  }
+}
 
 function goPage(name, btn) {
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
@@ -4465,22 +4626,17 @@ function pdsGet(id) {
 }
 
 // ── OI multi-entry list helpers (items 31-33) ────────────────
-function oiAddRow(listId, tplId, value) {
+function oiAddRow(listId, tplId, value, isDefault) {
   var list = document.getElementById(listId);
   var tpl  = document.getElementById(tplId);
   if (!list || !tpl) return;
   var clone = tpl.content.cloneNode(true);
   var inp = clone.querySelector('.oi-inp');
   if (value) inp.value = value;
-  // Ensure delete button exists (in case template was defined without one)
-  if (!clone.querySelector('.oi-del')) {
-    var row = clone.querySelector('.oi-row');
-    if (row) {
-      var btn = document.createElement('button');
-      btn.type = 'button'; btn.className = 'oi-del'; btn.title = 'Remove'; btn.textContent = '✕';
-      btn.setAttribute('onclick', 'oiDelRow(this)');
-      row.appendChild(btn);
-    }
+  // If default row, remove the delete button
+  if (isDefault) {
+    var delBtn = clone.querySelector('.oi-del');
+    if (delBtn) delBtn.remove();
   }
   list.appendChild(clone);
   var inputs = list.querySelectorAll('.oi-inp');
@@ -4488,6 +4644,54 @@ function oiAddRow(listId, tplId, value) {
 }
 function oiDelRow(btn) {
   btn.closest('.oi-row').remove();
+}
+function oiResetList(listId, tplId) {
+  var list = document.getElementById(listId);
+  if (!list) return;
+  // Clear all inputs in the list
+  list.querySelectorAll('.oi-inp').forEach(function(inp) {
+    inp.value = '';
+  });
+  // Remove all rows that have delete buttons (user-added rows)
+  list.querySelectorAll('.oi-row').forEach(function(row) {
+    var delBtn = row.querySelector('.oi-del');
+    if (delBtn) row.remove();
+  });
+  // Ensure 7 default rows remain
+  while (list.children.length < 7) {
+    oiAddRow(listId, tplId, null, true);
+  }
+}
+function resetEducation() {
+  // Clear all input values in education table
+  var table = document.getElementById('pds_edu_table');
+  if (table) {
+    table.querySelectorAll('tbody input').forEach(function(inp) {
+      inp.value = '';
+    });
+  }
+  // Remove user-added graduate studies rows
+  var tbody = document.getElementById('pds_edu_list');
+  if (tbody) {
+    var rows = Array.from(tbody.querySelectorAll('tr[data-level="Graduate Studies"]'));
+    rows.forEach(function(row, idx) {
+      if (idx > 0) row.remove(); // Keep first default Graduate Studies row
+    });
+  }
+}
+function resetSection(listId) {
+  // Generic reset for CS, WE, VW, TR sections
+  var list = document.getElementById(listId);
+  if (!list) return;
+  // Clear all inputs
+  list.querySelectorAll('input, select').forEach(function(inp) {
+    inp.value = '';
+  });
+  // Remove all user-added rows (rows with delete buttons)
+  list.querySelectorAll('tr').forEach(function(row) {
+    var delBtn = row.querySelector('.rem-btn');
+    if (delBtn) row.remove();
+  });
 }
 function oiGetList(listId) {
   var list = document.getElementById(listId);
@@ -4500,7 +4704,7 @@ function oiLoadList(listId, tplId, arr) {
   var list = document.getElementById(listId);
   if (!list) return;
   list.innerHTML = '';
-  (arr || []).forEach(function(val){ if(val) oiAddRow(listId, tplId, val); });
+  (arr || []).forEach(function(val){ if(val) oiAddRow(listId, tplId, val, true); });
 }
 function pdsRadioGet(name) {
   var el = document.querySelector('input[name="'+name+'"]:checked');
@@ -4551,10 +4755,16 @@ async function loadPDS() {
   const j = await r.json();
   if (!j.data) {
     // Pre-fill from profile if available
-    ['pds_cs_list','pds_we_list','pds_vw_list','pds_tr_list','pds_ref_list','pds_children_list'].forEach(id => {
+    ['pds_cs_list','pds_we_list','pds_vw_list','pds_tr_list','pds_ref_list','pds_character_ref_list','pds_children_list','pds_skills_list','pds_distinctions_list','pds_memberships_list'].forEach(id => {
       var el = document.getElementById(id); if (el) el.innerHTML = '';
     });
-    addCS(); addWE(); addRef(); addRef(); addRef();
+    addCS(null, true); addWE(null, true); addRef(null, true); addRef(null, true); addRef(null, true); addRef(null, true); addRef(null, true); addRef(null, true); addRef(null, true);
+    for (var i = 0; i < 3; i++) addCharacterRef(null, true);
+    for (var i = 0; i < 3; i++) {
+      oiAddRow('pds_skills_list', 'pds_skills_tpl', null, true);
+      oiAddRow('pds_distinctions_list', 'pds_distinctions_tpl', null, true);
+      oiAddRow('pds_memberships_list', 'pds_memberships_tpl', null, true);
+    }
     return;
   }
   const d = j.data;
@@ -4592,8 +4802,8 @@ async function loadPDS() {
   ].forEach(function(k){ pdsVal('pds_'+k, fb[k]); });
 
   document.getElementById('pds_children_list').innerHTML = '';
-  (fb.children || []).forEach(function(ch){ addChild(ch); });
-  if (!(fb.children||[]).length) addChild();
+  (fb.children || []).forEach(function(ch){ addChild(ch, true); });
+  if (!(fb.children||[]).length) addChild(null, true);
 
   // Education — populate fixed table rows by matching level
   var eduData = safeJson(d.education) || [];
@@ -4610,21 +4820,21 @@ async function loadPDS() {
 
   // Civil Service
   document.getElementById('pds_cs_list').innerHTML = '';
-  (safeJson(d.civil_service) || []).forEach(function(e){ addCS(e); });
-  if (!document.getElementById('pds_cs_list').children.length) addCS();
+  (safeJson(d.civil_service) || []).forEach(function(e){ addCS(e, true); });
+  if (!document.getElementById('pds_cs_list').children.length) addCS(null, true);
 
   // Work Experience
   document.getElementById('pds_we_list').innerHTML = '';
-  (safeJson(d.work_experience) || []).forEach(function(e){ addWE(e); });
-  if (!document.getElementById('pds_we_list').children.length) addWE();
+  (safeJson(d.work_experience) || []).forEach(function(e){ addWE(e, true); });
+  if (!document.getElementById('pds_we_list').children.length) addWE(null, true);
 
   // Voluntary Work
   document.getElementById('pds_vw_list').innerHTML = '';
-  (safeJson(d.voluntary_work) || []).forEach(function(e){ addVW(e); });
+  (safeJson(d.voluntary_work) || []).forEach(function(e){ addVW(e, true); });
 
   // Trainings
   document.getElementById('pds_tr_list').innerHTML = '';
-  (safeJson(d.trainings) || []).forEach(function(e){ addTR(e); });
+  (safeJson(d.trainings) || []).forEach(function(e){ addTR(e, true); });
 
   // Other Info
   pdsVal('pds_skills',       oi.skills);
@@ -4634,6 +4844,10 @@ async function loadPDS() {
   oiLoadList('pds_skills_list',       'pds_skills_tpl',       oi.skills_arr       || (oi.skills       ? oi.skills.split('\n').filter(Boolean)       : []));
   oiLoadList('pds_distinctions_list', 'pds_distinctions_tpl', oi.distinctions_arr || (oi.distinctions ? oi.distinctions.split('\n').filter(Boolean) : []));
   oiLoadList('pds_memberships_list',  'pds_memberships_tpl',  oi.memberships_arr  || (oi.memberships  ? oi.memberships.split('\n').filter(Boolean)  : []));
+  // Ensure 7 default rows for each OI section
+  while (document.getElementById('pds_skills_list').children.length < 7) oiAddRow('pds_skills_list', 'pds_skills_tpl', null, true);
+  while (document.getElementById('pds_distinctions_list').children.length < 7) oiAddRow('pds_distinctions_list', 'pds_distinctions_tpl', null, true);
+  while (document.getElementById('pds_memberships_list').children.length < 7) oiAddRow('pds_memberships_list', 'pds_memberships_tpl', null, true);
 
   // Q34–40
   pdsRadioSet('q34a', q4.q34a||'No'); pdsRadioSet('q34b', q4.q34b||'No');
@@ -4654,10 +4868,17 @@ async function loadPDS() {
     if (det) { det.style.display = q4['q40'+l] ? 'block':'none'; det.value = q4['q40'+l+'_detail']||''; }
   });
 
-  // References
+  // References (Section VIII)
   document.getElementById('pds_ref_list').innerHTML = '';
-  (safeJson(d.pds_references) || []).forEach(function(e){ addRef(e); });
-  while (document.getElementById('pds_ref_list').children.length < 3) addRef();
+  (safeJson(d.pds_references) || []).forEach(function(e){ addRef(e, true); });
+  while (document.getElementById('pds_ref_list').children.length < 3) addRef(null, true);
+
+  // Character References (Section 41) — limit to 3 rows maximum
+  document.getElementById('pds_character_ref_list').innerHTML = '';
+  var charRefs = safeJson(d.pds_character_references) || [];
+  // Only load first 3 character references
+  charRefs.slice(0, 3).forEach(function(e){ addCharacterRef(e, true); });
+  while (document.getElementById('pds_character_ref_list').children.length < 3) addCharacterRef(null, true);
 }
 
 
@@ -4725,10 +4946,11 @@ async function savePDS() {
       q40c:pdsGet('pds_q40c_yes'), q40c_detail:pdsGet('pds_q40c_detail'),
     },
     references: collectRows('pds_ref_list', ['name','address','tel']),
+    character_references: collectRows('pds_character_ref_list', ['name','address','tel']),
   };
 
   const r = await fetch('Employee_portal.php?action=save_pds', {
-    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+    method:'POST', headers:{'Content-Type':'application/json','X-CSRF-TOKEN':CSRF_TOKEN}, body:JSON.stringify(payload)
   });
   const j = await r.json();
   const st = document.getElementById('pdsStatus');
@@ -4792,7 +5014,7 @@ function collectRows(containerId, fields) {
   });
 }
 
-function makeRepeaterRow(containerId, fieldDefs, values) {
+function makeRepeaterRow(containerId, fieldDefs, values, isDefault) {
   var row = document.createElement('div');
   row.className = 'repeater-row';
   fieldDefs.forEach(function(fd) {
@@ -4818,28 +5040,73 @@ function makeRepeaterRow(containerId, fieldDefs, values) {
     wrap.appendChild(inp);
     row.appendChild(wrap);
   });
-  var rem = document.createElement('button');
-  rem.className = 'rem-btn'; rem.textContent = '✕';
-  rem.onclick = function(){ row.remove(); };
-  row.appendChild(rem);
+  // Only show delete button if not a default row
+  if (!isDefault) {
+    var rem = document.createElement('button');
+    rem.className = 'rem-btn'; rem.textContent = '✕';
+    rem.onclick = function(){ row.remove(); };
+    row.appendChild(rem);
+  }
   document.getElementById(containerId).appendChild(row);
 }
 
 // PDS repeater row definitions
-function addChild(v) {
+function addChild(v, isDefault) {
   makeRepeaterRow('pds_children_list', [
     {key:'name', label:'Full Name of Child'},
     {key:'dob',  label:'Date of Birth', type:'date'}
-  ], v);
+  ], v, isDefault);
 }
-function addRef(v) {
+function addRef(v, isDefault) {
   makeRepeaterRow('pds_ref_list', [
     {key:'name',    label:'Name'},
     {key:'address', label:'Office / Residential Address'},
     {key:'tel',     label:'Contact No. / Email'}
-  ], v);
+  ], v, isDefault);
 }
-function addGradStudy(v) {
+function addCharacterRef(v, isDefault) {
+  makeRepeaterRow('pds_character_ref_list', [
+    {key:'name',    label:'Name'},
+    {key:'address', label:'Office / Residential Address'},
+    {key:'tel',     label:'Contact No. / Email'}
+  ], v, isDefault);
+}
+function resetReferences() {
+  var list = document.getElementById('pds_ref_list');
+  if (!list) return;
+  // Clear all inputs
+  list.querySelectorAll('input').forEach(function(inp) {
+    inp.value = '';
+  });
+  // Remove all user-added rows (rows with delete buttons)
+  list.querySelectorAll('.repeater-row').forEach(function(row) {
+    var btn = row.querySelector('.rem-btn');
+    if (btn) row.remove();
+  });
+  // Ensure at least 3 default rows remain
+  while (list.children.length < 3) addRef(null, true);
+}
+function resetCharacterReferences() {
+  var list = document.getElementById('pds_character_ref_list');
+  if (!list) return;
+  // Clear all inputs
+  list.querySelectorAll('input').forEach(function(inp) {
+    inp.value = '';
+  });
+  // Remove all user-added rows (rows with delete buttons)
+  list.querySelectorAll('.repeater-row').forEach(function(row) {
+    var btn = row.querySelector('.rem-btn');
+    if (btn) row.remove();
+  });
+  // Ensure at least 3 default rows remain
+  while (list.children.length < 3) addCharacterRef(null, true);
+  // Remove excess rows if more than 3 default rows somehow exist
+  while (list.children.length > 3) {
+    var rows = list.querySelectorAll('.repeater-row');
+    if (rows.length > 0) rows[rows.length - 1].remove();
+  }
+}
+function addGradStudy(v, isDefault) {
   // Graduate Studies extra row — same columns as the fixed edu table
   var tbody = document.getElementById('pds_edu_list');
   var inpStyle = 'width:100%;border:1.5px solid #94a3b8;border-radius:6px;padding:6px 8px;font-size:.80rem;font-family:Nunito,sans-serif;box-sizing:border-box;';
@@ -4872,18 +5139,20 @@ function addGradStudy(v) {
     td.appendChild(inp);
     tr.appendChild(td);
   });
-  // Remove button cell
+  // Remove button cell — only show delete button if not a default row
   var tdx = document.createElement('td');
   tdx.style.cssText = 'border:1px solid var(--g200);padding:4px;text-align:center;';
-  var btn = document.createElement('button');
-  btn.className = 'rem-btn'; btn.type = 'button'; btn.textContent = '✕';
-  btn.onclick = function(){ tr.remove(); };
-  tdx.appendChild(btn);
+  if (!isDefault) {
+    var btn = document.createElement('button');
+    btn.className = 'rem-btn'; btn.type = 'button'; btn.textContent = '✕';
+    btn.onclick = function(){ tr.remove(); };
+    tdx.appendChild(btn);
+  }
   tr.appendChild(tdx);
   tbody.appendChild(tr);
 }
 
-function addCS(v) {
+function addCS(v, isDefault) {
   makeTblRow('pds_cs_list', [
     {key:'eligibility',      type:'text'},
     {key:'rating',           type:'text'},
@@ -4891,9 +5160,9 @@ function addCS(v) {
     {key:'exam_place',       type:'text'},
     {key:'license_no',       type:'text'},
     {key:'license_validity', type:'date'},
-  ], v);
+  ], v, isDefault);
 }
-function addWE(v) {
+function addWE(v, isDefault) {
   makeTblRow('pds_we_list', [
     {key:'date_from',      type:'date'},
     {key:'date_to',        type:'date'},
@@ -4903,11 +5172,12 @@ function addWE(v) {
     {key:'salary_grade',   type:'text'},
     {key:'status',         type:'text'},
     {key:'govt_service',   options:['','Y','N']},
-  ], v);
+  ], v, isDefault);
 }
-function makeTblRow(tbodyId, fields, v) {
+function makeTblRow(tbodyId, fields, v, isDefault) {
   var tbody = document.getElementById(tbodyId);
   var tr = document.createElement('tr');
+  tr.setAttribute('data-is-default', isDefault ? 'true' : 'false');
   var inp_style = 'width:100%;border:1.5px solid #94a3b8;border-radius:6px;padding:6px 8px;font-size:.80rem;box-sizing:border-box;font-family:Nunito,sans-serif;';
   fields.forEach(function(fd) {
     var td = document.createElement('td');
@@ -4929,23 +5199,26 @@ function makeTblRow(tbodyId, fields, v) {
   });
   var tdx = document.createElement('td');
   tdx.style.cssText = 'border:1px solid var(--g200);padding:4px;text-align:center;';
-  var btn = document.createElement('button');
-  btn.className = 'rem-btn'; btn.textContent = '✕';
-  btn.onclick = function(){ tr.remove(); };
-  tdx.appendChild(btn);
+  // Only show delete button if not a default row
+  if (!isDefault) {
+    var btn = document.createElement('button');
+    btn.className = 'rem-btn'; btn.textContent = '✕';
+    btn.onclick = function(){ tr.remove(); };
+    tdx.appendChild(btn);
+  }
   tr.appendChild(tdx);
   tbody.appendChild(tr);
 }
-function addVW(v) {
+function addVW(v, isDefault) {
   makeTblRow('pds_vw_list', [
     {key:'org_name',  type:'text'},
     {key:'date_from', type:'date'},
     {key:'date_to',   type:'date'},
     {key:'no_hours',  type:'number'},
     {key:'position',  type:'text'},
-  ], v);
+  ], v, isDefault);
 }
-function addTR(v) {
+function addTR(v, isDefault) {
   makeTblRow('pds_tr_list', [
     {key:'title',        type:'text'},
     {key:'date_from',    type:'date'},
@@ -4953,7 +5226,7 @@ function addTR(v) {
     {key:'no_hours',     type:'number'},
     {key:'ld_type',      options:['Managerial','Supervisory','Technical','Foundation','Scholarship','Other']},
     {key:'conducted_by', type:'text'},
-  ], v);
+  ], v, isDefault);
 }
 
 
@@ -5016,6 +5289,7 @@ function printPDS() {
       q40c:pdsGet('pds_q40c_yes'), q40c_detail:pdsGet('pds_q40c_detail'),
     }),
     pds_references: JSON.stringify(collectRows('pds_ref_list',['name','address','tel'])),
+    pds_character_references: JSON.stringify(collectRows('pds_character_ref_list',['name','address','tel'])),
   };
   const html = buildPDSPrintHTML(d, null);
   const w = window.open('','_blank','width=960,height=1100');
@@ -5036,6 +5310,7 @@ function buildPDSPrintHTML(d, empRow) {
   const oi  = safeJson(d.other_info)        || {};
   const q4  = safeJson(d.q4_questions)      || {};
   const refs = safeJson(d.pds_references || d['references']) || [];
+  const charRefs = safeJson(d.pds_character_references) || [];
 
   const v    = x => (x===null||x===undefined||x===''||x==='null'||x==='undefined') ? '' : String(x);
   const fmtD = dt => { if(!dt||dt==='0000-00-00') return ''; try{ const x=new Date(dt); return isNaN(x)?dt:(x.getMonth()+1).toString().padStart(2,'0')+'/'+x.getDate().toString().padStart(2,'0')+'/'+x.getFullYear(); }catch(e){return dt||'';} };
@@ -5046,11 +5321,14 @@ function buildPDSPrintHTML(d, empRow) {
   const permAddr = pi.perm_same ? resAddr : [pi.perm_housenum,pi.perm_street,pi.perm_subdivision,pi.perm_barangay,pi.perm_city,pi.perm_province].filter(Boolean).join(', ');
 
   const edPad  = pad(ed,5);
-  const csPad  = pad(cs,4);
-  const wePad  = pad(we,9);
-  const vwPad  = pad(vw,5);
-  const trPad  = pad(tr,5);
-  const refPad = pad(refs,3);
+  const csPad  = pad(cs,7);
+  const wePad  = pad(we,28);
+  const vwPad  = pad(vw,7);
+  const trPad  = pad(tr,22);
+  const charRefPad = pad(charRefs,3);
+  const skillsPad = pad((oi.skills_arr&&oi.skills_arr.length?oi.skills_arr:oi.skills?oi.skills.split('\n').filter(Boolean):[]),7);
+  const distinctPad = pad((oi.distinctions_arr&&oi.distinctions_arr.length?oi.distinctions_arr:oi.distinctions?oi.distinctions.split('\n').filter(Boolean):[]),7);
+  const membershipPad = pad((oi.memberships_arr&&oi.memberships_arr.length?oi.memberships_arr:oi.memberships?oi.memberships.split('\n').filter(Boolean):[]),7);
 
   // ── Shared CSS ─────────────────────────────────────────────────
   const css = `
@@ -5301,16 +5579,16 @@ function buildPDSPrintHTML(d, empRow) {
       </tr>
     </thead>
     <tbody>
-      ${['Elementary','Secondary','Vocational / Trade Course','College','Graduate Studies'].map((lvl,i)=>`<tr>
+      ${ed.map(e=>`<tr>
         <td></td>
-        <td style="font-size:6pt;font-weight:700;">${lvl}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${v((edPad[i]||{}).school)}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${v((edPad[i]||{}).degree)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v((edPad[i]||{}).from)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v((edPad[i]||{}).to)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v((edPad[i]||{}).units)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v((edPad[i]||{}).year_grad)}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${v((edPad[i]||{}).honors)}</td>
+        <td style="font-size:6pt;font-weight:700;">${v(e.level)}</td>
+        <td style="font-size:6.5pt;font-weight:600;">${v(e.school)}</td>
+        <td style="font-size:6.5pt;font-weight:600;">${v(e.degree)}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v(e.from)}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v(e.to)}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v(e.units)}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v(e.year_grad)}</td>
+        <td style="font-size:6.5pt;font-weight:600;">${v(e.honors)}</td>
       </tr>`).join('')}
     </tbody>
   </table>
@@ -5341,12 +5619,12 @@ function buildPDSPrintHTML(d, empRow) {
     <tbody>
       ${csPad.map(e=>`<tr>
         <td></td>
-        <td style="font-size:6.5pt;font-weight:600;">${v(e.eligibility)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v(e.rating)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${fmtD(e.exam_date)}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${v(e.exam_place)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v(e.license_no)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${fmtD(e.license_validity)}</td>
+        <td style="font-size:6.5pt;font-weight:600;">${(e.eligibility ? v(e.eligibility) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.rating ? v(e.rating) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.exam_date ? fmtD(e.exam_date) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;">${(e.exam_place ? v(e.exam_place) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.license_no ? v(e.license_no) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.license_validity ? fmtD(e.license_validity) : '')}</td>
       </tr>`).join('')}
     </tbody>
   </table>
@@ -5374,14 +5652,14 @@ function buildPDSPrintHTML(d, empRow) {
     <tbody>
       ${wePad.map(e=>`<tr>
         <td></td>
-        <td style="font-size:6pt;text-align:center;">${fmtD(e.date_from)}</td>
-        <td style="font-size:6pt;text-align:center;">${fmtD(e.date_to)}</td>
-        <td style="font-size:6pt;">${v(e.position)}</td>
-        <td style="font-size:6pt;">${v(e.dept_agency)}</td>
-        <td style="font-size:6pt;text-align:right;">${e.monthly_salary?'₱'+parseFloat(e.monthly_salary).toLocaleString():''}</td>
-        <td style="font-size:6pt;text-align:center;">${v(e.salary_grade)}</td>
-        <td style="font-size:6pt;">${v(e.status)}</td>
-        <td style="font-size:6pt;text-align:center;">${v(e.govt_service)}</td>
+        <td style="font-size:6pt;text-align:center;">${(e.date_from ? fmtD(e.date_from) : '')}</td>
+        <td style="font-size:6pt;text-align:center;">${(e.date_to ? fmtD(e.date_to) : '')}</td>
+        <td style="font-size:6pt;">${(e.position ? v(e.position) : '')}</td>
+        <td style="font-size:6pt;">${(e.dept_agency ? v(e.dept_agency) : '')}</td>
+        <td style="font-size:6pt;text-align:right;">${(e.monthly_salary ? '₱'+parseFloat(e.monthly_salary).toLocaleString() : '')}</td>
+        <td style="font-size:6pt;text-align:center;">${(e.salary_grade ? v(e.salary_grade) : '')}</td>
+        <td style="font-size:6pt;">${(e.status ? v(e.status) : '')}</td>
+        <td style="font-size:6pt;text-align:center;">${(e.govt_service ? v(e.govt_service) : '')}</td>
       </tr>`).join('')}
     </tbody>
   </table>
@@ -5412,11 +5690,11 @@ function buildPDSPrintHTML(d, empRow) {
     <tbody>
       ${vwPad.map(e=>`<tr>
         <td></td>
-        <td style="font-size:6.5pt;font-weight:600;">${v(e.org_name)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${fmtD(e.date_from)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${fmtD(e.date_to)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v(e.no_hours)}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${v(e.position)}</td>
+        <td style="font-size:6.5pt;font-weight:600;">${(e.org_name ? v(e.org_name) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.date_from ? fmtD(e.date_from) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.date_to ? fmtD(e.date_to) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.no_hours ? v(e.no_hours) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;">${(e.position ? v(e.position) : '')}</td>
       </tr>`).join('')}
     </tbody>
   </table>
@@ -5439,39 +5717,33 @@ function buildPDSPrintHTML(d, empRow) {
     <tbody>
       ${trPad.map(e=>`<tr>
         <td></td>
-        <td style="font-size:6.5pt;font-weight:600;">${v(e.title)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${fmtD(e.date_from)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${fmtD(e.date_to)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v(e.no_hours)}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${v(e.ld_type)}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${v(e.conducted_by)}</td>
+        <td style="font-size:6.5pt;font-weight:600;">${(e.title ? v(e.title) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.date_from ? fmtD(e.date_from) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.date_to ? fmtD(e.date_to) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.no_hours ? v(e.no_hours) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;">${(e.ld_type ? v(e.ld_type) : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;">${(e.conducted_by ? v(e.conducted_by) : '')}</td>
       </tr>`).join('')}
     </tbody>
   </table>
   <div style="font-size:5.5pt;font-style:italic;text-align:right;padding:1pt 2pt;">(Continue on separate sheet if necessary)</div>
 
   <!-- VIII. Other Information -->
-  <table style="margin-top:1pt;"><tr><td colspan="6" class="sec">VIII. Other Information</td></tr></table>
+  <table style="margin-top:1pt;"><tr><td colspan="3" class="sec">VIII. Other Information</td></tr></table>
   <table>
     <thead>
       <tr>
-        <th class="hdr" style="width:3%;">31.</th>
-        <th class="hdr" style="width:30%;">SPECIAL SKILLS AND HOBBIES</th>
-        <th class="hdr" style="width:3%;">32.</th>
-        <th class="hdr" style="width:30%;">NON-ACADEMIC DISTINCTIONS / RECOGNITION<br><span style="font-size:4.5pt;font-weight:400;">(Write in full)</span></th>
-        <th class="hdr" style="width:3%;">33.</th>
-        <th class="hdr" style="width:31%;">MEMBERSHIP IN ASSOCIATION / ORGANIZATION<br><span style="font-size:4.5pt;font-weight:400;">(Write in full)</span></th>
+        <th class="hdr" style="width:33%;">31. SPECIAL SKILLS and HOBBIES</th>
+        <th class="hdr" style="width:33%;">32. NON-ACADEMIC DISTINCTIONS / RECOGNITION<br><span style="font-size:4.5pt;font-weight:400;">(Write in full)</span></th>
+        <th class="hdr" style="width:34%;">33. MEMBERSHIP IN ASSOCIATION/ORGANIZATION<br><span style="font-size:4.5pt;font-weight:400;">(Write in full)</span></th>
       </tr>
     </thead>
     <tbody>
-      <tr>
-        <td></td>
-        <td style="font-size:6.5pt;font-weight:600;min-height:40pt;vertical-align:top;">${(oi.skills_arr&&oi.skills_arr.length?oi.skills_arr:oi.skills?oi.skills.split('\n').filter(Boolean):[]).map(function(s){return v(s);}).join('<br>')}</td>
-        <td></td>
-        <td style="font-size:6.5pt;font-weight:600;vertical-align:top;">${(oi.distinctions_arr&&oi.distinctions_arr.length?oi.distinctions_arr:oi.distinctions?oi.distinctions.split('\n').filter(Boolean):[]).map(function(s){return v(s);}).join('<br>')}</td>
-        <td></td>
-        <td style="font-size:6.5pt;font-weight:600;vertical-align:top;">${(oi.memberships_arr&&oi.memberships_arr.length?oi.memberships_arr:oi.memberships?oi.memberships.split('\n').filter(Boolean):[]).map(function(s){return v(s);}).join('<br>')}</td>
-      </tr>
+      ${Array.from({length:7}).map((_, i)=>`<tr>
+        <td style="font-size:6.5pt;font-weight:600;min-height:14pt;height:14pt;vertical-align:top;padding:2pt 2.5pt;">${(typeof skillsPad[i] === 'string' ? skillsPad[i] : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;min-height:14pt;height:14pt;vertical-align:top;padding:2pt 2.5pt;">${(typeof distinctPad[i] === 'string' ? distinctPad[i] : '')}</td>
+        <td style="font-size:6.5pt;font-weight:600;min-height:14pt;height:14pt;vertical-align:top;padding:2pt 2.5pt;">${(typeof membershipPad[i] === 'string' ? membershipPad[i] : '')}</td>
+      </tr>`).join('')}
     </tbody>
   </table>
   <div style="font-size:5.5pt;font-style:italic;text-align:right;padding:1pt 2pt;">(Continue on separate sheet if necessary)</div>
@@ -5565,7 +5837,7 @@ function buildPDSPrintHTML(d, empRow) {
       </tr>
     </thead>
     <tbody>
-      ${refPad.map(r=>`<tr>
+      ${charRefPad.map(r=>`<tr>
         <td></td>
         <td style="font-size:6.5pt;font-weight:600;min-height:11pt;">${v(r.name)}</td>
         <td style="font-size:6.5pt;font-weight:600;">${v(r.address)}</td>
@@ -5820,7 +6092,7 @@ async function saveSALN() {
   };
 
   const r = await fetch('Employee_portal.php?action=save_saln', {
-    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+    method:'POST', headers:{'Content-Type':'application/json','X-CSRF-TOKEN':CSRF_TOKEN}, body:JSON.stringify(payload)
   });
   const j = await r.json();
   const st = document.getElementById('salnStatus');

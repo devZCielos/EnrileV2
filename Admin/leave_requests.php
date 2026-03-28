@@ -29,6 +29,9 @@ if (!in_array($_SESSION['user_role'] ?? '', $allowedRoles)) {
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
 
+// Initialize CSRF token in session
+csrf_token();
+
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
 
 if ($action) {
@@ -1074,7 +1077,49 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
   </div>
 
   <script>
-const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
+let CSRF_TOKEN = '';
+
+// Initialize CSRF token from meta tag with multiple fallbacks
+function initCSRFTokenAdmin() {
+  // Try meta tag first
+  let token = document.querySelector('meta[name="csrf-token"]')?.content;
+  if (token) {
+    CSRF_TOKEN = token;
+    console.log('✓ CSRF token loaded from meta tag');
+    return token;
+  }
+  
+  // Fallback: search all meta tags
+  const allMetas = document.querySelectorAll('meta');
+  for (let meta of allMetas) {
+    if (meta.getAttribute('name') === 'csrf-token') {
+      token = meta.getAttribute('content');
+      if (token) {
+        CSRF_TOKEN = token;
+        console.log('✓ CSRF token found in meta tags');
+        return token;
+      }
+    }
+  }
+  
+  console.warn('⚠ CSRF token not found - will attempt retry');
+  return '';
+}
+
+// Initialize on script load
+CSRF_TOKEN = initCSRFTokenAdmin();
+
+// Retry initialization if not found
+if (!CSRF_TOKEN) {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      if (!CSRF_TOKEN) {
+        CSRF_TOKEN = initCSRFTokenAdmin();
+      }
+    });
+  }
+}
+
   const COLORS=['#2563eb','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4','#ec4899','#0ea5e9','#84cc16','#f97316'];
   let currentTab='all',currentPage=1,sortKey='filed',sortAsc=false;
   let approveTarget=null,denyTarget=null,debounceTimer=null;
@@ -1633,7 +1678,8 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     }
     body.append('reason',reason);
     try{
-      const res=await fetch('leave_requests.php',{method:'POST',body});
+      if (!CSRF_TOKEN) CSRF_TOKEN = initCSRFTokenAdmin();
+      const res=await fetch('leave_requests.php',{method:'POST',headers:{'X-CSRF-TOKEN':CSRF_TOKEN},body});
       const json=await res.json();
       if(json.success){showToast('✅ '+json.message,'success');closeModal('modalForm');loadStats();loadRequests(1);}
       else showToast('❌ '+json.message,'error');
@@ -1654,7 +1700,8 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     const btn=document.getElementById('approveBtn');btn.disabled=true;btn.textContent='⏳ Processing…';
     const body=new FormData();body.append('action','approve');body.append('id',approveTarget);body.append('remark',document.getElementById('approveRemark').value.trim());
     try{
-      const res=await fetch('leave_requests.php',{method:'POST',body});
+      if (!CSRF_TOKEN) CSRF_TOKEN = initCSRFTokenAdmin();
+      const res=await fetch('leave_requests.php',{method:'POST',headers:{'X-CSRF-TOKEN':CSRF_TOKEN},body});
       const json=await res.json();
       if(json.success){showToast('✅ Leave request approved.','success');closeModal('modalApprove');loadStats();loadRequests(currentPage);}
       else showToast('❌ '+json.message,'error');
@@ -1675,7 +1722,8 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     const btn=document.getElementById('denyBtn');btn.disabled=true;btn.textContent='⏳ Processing…';
     const body=new FormData();body.append('action','deny');body.append('id',denyTarget);body.append('remark',document.getElementById('denyRemark').value.trim());
     try{
-      const res=await fetch('leave_requests.php',{method:'POST',body});
+      if (!CSRF_TOKEN) CSRF_TOKEN = initCSRFTokenAdmin();
+      const res=await fetch('leave_requests.php',{method:'POST',headers:{'X-CSRF-TOKEN':CSRF_TOKEN},body});
       const json=await res.json();
       if(json.success){showToast('Leave request denied.','error');closeModal('modalDeny');loadStats();loadRequests(currentPage);}
       else showToast('❌ '+json.message,'error');

@@ -93,7 +93,9 @@ if ($action) {
                         SUM(employment_status = 'On Leave')  AS on_leave,
                         SUM(employment_status = 'Inactive')  AS inactive,
                         SUM(employment_type   = 'Permanent') AS permanent,
-                        SUM(employment_type   = 'Contractual') AS contractual
+                        SUM(employment_type   = 'Contractual') AS contractual,
+                        SUM(employment_type   = 'Casual') AS casual,
+                        SUM(employment_type   = 'Job Order') AS job_order
                     FROM employees
                 ")->fetch();
 
@@ -393,6 +395,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         <div class="stat-chip" data-status="Inactive"><div class="dot" style="background:#ef4444;"></div>Inactive: &nbsp;<strong id="sc-inactive">—</strong></div>
         <div class="stat-chip" data-type="Permanent"><div class="dot" style="background:#6366f1;"></div>Permanent: &nbsp;<strong id="sc-perm">—</strong></div>
         <div class="stat-chip" data-type="Contractual"><div class="dot" style="background:#06b6d4;"></div>Contractual: &nbsp;<strong id="sc-cont">—</strong></div>
+        <div class="stat-chip" data-type="Casual"><div class="dot" style="background:#f59e0b;"></div>Casual: &nbsp;<strong id="sc-cas">—</strong></div>
+        <div class="stat-chip" data-type="Job Order"><div class="dot" style="background:#10b981;"></div>Job Order: &nbsp;<strong id="sc-jo">—</strong></div>
       </div>
 
       <!-- TOOLBAR -->
@@ -410,7 +414,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         </select>
         <select class="filter-select" id="fTypeFilter" onchange="loadEmployees()">
           <option value="">All Types</option>
-          <option>Permanent</option><option>Contractual</option><option>Casual</option>
+          <option>Permanent</option><option>Contractual</option><option>Casual</option><option>Job Order</option>
         </select>
         <button class="add-btn" onclick="openAdd()">➕ Add Employee</button>
       </div>
@@ -525,7 +529,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
             <label>Employment Type <span class="req">*</span></label>
             <select id="fEmpType">
               <option value="">Select type</option>
-              <option>Permanent</option><option>Contractual</option><option>Casual</option>
+              <option>Permanent</option><option>Contractual</option><option>Casual</option><option>Job Order</option>
             </select>
           </div>
           <div class="form-group">
@@ -624,7 +628,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     return `<span class="badge ${map[s]||'badge-active'}">${ico[s]||''} ${s}</span>`;
   }
   function typeBadge(t) {
-    const map = {Permanent:'badge-perm',Contractual:'badge-cont',Casual:'badge-cas'};
+    const map = {Permanent:'badge-perm',Contractual:'badge-cont',Casual:'badge-cas','Job Order':'badge-jo'};
     return `<span class="badge ${map[t]||'badge-perm'}">${t}</span>`;
   }
 
@@ -706,6 +710,8 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     document.getElementById('sc-inactive').textContent = s.inactive;
     document.getElementById('sc-perm').textContent     = s.permanent;
     document.getElementById('sc-cont').textContent     = s.contractual;
+    document.getElementById('sc-cas').textContent      = s.casual;
+    document.getElementById('sc-jo').textContent       = s.job_order;
     updateChipHighlights();
   }
 

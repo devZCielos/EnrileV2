@@ -351,10 +351,15 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
 
     /* TOOLBAR */
     .toolbar{display:flex;align-items:center;gap:10px;padding:12px 18px;background:var(--gray-50);border-bottom:1px solid var(--gray-100);flex-wrap:wrap;}
-    .search-box{display:flex;align-items:center;gap:8px;background:var(--white);border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);padding:8px 13px;flex:1;min-width:180px;max-width:280px;}
-    .search-box:focus-within{border-color:var(--primary);}
-    .search-box input{border:none;outline:none;font-family:'Nunito',sans-serif;font-size:0.84rem;width:100%;background:transparent;color:var(--gray-800);}
+    .search-box{display:flex;align-items:center;gap:8px;background:var(--white);border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);padding:8px 13px;flex:1;min-width:200px;max-width:350px;transition:all 0.2s;position:relative;}
+    .search-box:focus-within{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,0.10);}
+    .search-box input{border:none;outline:none;font-family:'Nunito',sans-serif;font-size:0.84rem;width:100%;background:transparent;color:var(--gray-800);padding:4px 0;}
     .search-box input::placeholder{color:var(--gray-400);}
+    .search-clear{display:none;background:none;border:none;color:var(--gray-400);cursor:pointer;font-size:0.95rem;padding:2px 4px;margin-left:-4px;transition:color 0.2s;}
+    .search-clear:hover{color:var(--gray-600);}
+    .search-box input:not(:placeholder-shown) ~ .search-clear{display:block;}
+    .search-indicator{display:none;font-size:0.70rem;color:var(--primary);font-weight:700;margin-left:auto;padding:0 8px;white-space:nowrap;}
+    .search-indicator.active{display:block;}
     .filter-sel{padding:8px 12px;border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);font-family:'Nunito',sans-serif;font-size:0.84rem;color:var(--gray-600);background:var(--white);cursor:pointer;outline:none;}
     .filter-sel:focus{border-color:var(--primary);}
     .toolbar-right{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;}
@@ -604,16 +609,23 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
 
       <!-- FILTERS -->
       <div class="toolbar">
-        <div class="search-box">
+        <div class="search-box" title="Search by employee name or ID">
           <span style="color:var(--gray-400);">🔍</span>
-          <input type="text" id="searchInput" placeholder="Search employee…" oninput="debounceLoad()"/>
+          <input type="text" id="searchInput" placeholder="Search by name or ID..." oninput="debounceLoad()" autocomplete="off"/>
+          <button class="search-clear" onclick="clearSearch()">✕</button>
+          <span class="search-indicator" id="searchIndicator">🔎 Searching</span>
         </div>
-        <select class="filter-sel" id="filterYear"  onchange="loadData()"><option value="">Loading years…</option></select>
-        <select class="filter-sel" id="filterDept"  onchange="loadData()"><option value="">All Departments</option></select>
-        <select class="filter-sel" id="filterType"  onchange="loadData()"><option value="">All Leave Types</option></select>
+        <select class="filter-sel" id="filterYear"  onchange="loadData()" title="Filter by calendar year"><option value="">Loading years…</option></select>
+        <select class="filter-sel" id="filterDept"  onchange="loadData()" title="Filter by department"><option value="">All Departments</option></select>
+        <select class="filter-sel" id="filterType"  onchange="loadData()" title="Filter by leave type"><option value="">All Leave Types</option></select>
         <div class="toolbar-right">
-          <button class="action-btn outline" onclick="clearFilters()">🔁 Reset</button>
+          <button class="action-btn outline" onclick="clearFilters()" title="Clear all filters">🔁 Reset</button>
         </div>
+      </div>
+      
+      <!-- SEARCH TIPS (shown when search is empty) -->
+      <div style="background:#eff6ff;border-bottom:1px solid #bfdbfe;padding:10px 18px;display:none;font-size:0.78rem;color:#1e40af;" id="searchTips">
+        💡 <strong>Search tips:</strong> Type employee name (e.g., "John") or employee ID (e.g., "EMP-001") to find specific records
       </div>
 
       <!-- TABLE -->
@@ -785,6 +797,7 @@ async function init() {
   await loadFilters();
   loadStats();
   loadData();
+  showSearchTips();
 }
 
 async function loadFilters() {
@@ -846,18 +859,62 @@ async function loadData() {
     const json = await res.json();
     if (!json.success) { showToast('⚠️ ' + json.message, 'error'); return; }
 
-    document.getElementById('panelSub').textContent =
-      `${json.total} record(s) — Year ${year || currentYear}`;
+    // Build panel subtitle with search context
+    let subtitle = `${json.total} record(s) — Year ${year || currentYear}`;
+    if (search) {
+      subtitle += ` 🔍 "${search}"`;
+    }
+    if (dept || type) {
+      const filters = [];
+      if (dept) filters.push('dept filter');
+      if (type) filters.push('leave type filter');
+      subtitle += ` (${filters.join(', ')})`;
+    }
+    document.getElementById('panelSub').textContent = subtitle;
+    
+    // Show/hide search tips
+    if (!search && !dept && !type) {
+      showSearchTips();
+    } else {
+      hideSearchTips();
+    }
 
     renderTable(json.data);
     renderPagination(json.total, json.pages, json.page);
   } catch(e) { showToast('❌ Failed to load.', 'error'); }
 }
 
+function showSearchTips() {
+  const tips = document.getElementById('searchTips');
+  if (tips) tips.style.display = 'block';
+}
+
+function hideSearchTips() {
+  const tips = document.getElementById('searchTips');
+  if (tips) tips.style.display = 'none';
+}
+
 function debounceLoad() {
   currentPage = 1;
   clearTimeout(debounceTimer);
+  const searchVal = document.getElementById('searchInput').value.trim();
+  
+  // Show/hide search indicator
+  const indicator = document.getElementById('searchIndicator');
+  if (searchVal.length > 0) {
+    indicator.classList.add('active');
+  } else {
+    indicator.classList.remove('active');
+  }
+  
   debounceTimer = setTimeout(loadData, 300);
+}
+
+function clearSearch() {
+  document.getElementById('searchInput').value = '';
+  document.getElementById('searchIndicator').classList.remove('active');
+  currentPage = 1;
+  loadData();
 }
 
 function clearFilters() {
@@ -865,8 +922,10 @@ function clearFilters() {
   document.getElementById('filterDept').value  = '';
   document.getElementById('filterType').value  = '';
   document.getElementById('filterYear').value  = currentYear;
+  document.getElementById('searchIndicator').classList.remove('active');
   currentPage = 1;
   loadData();
+  showSearchTips();
 }
 
 // ════════════════════════════════════════════════════
