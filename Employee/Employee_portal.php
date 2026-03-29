@@ -3067,7 +3067,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
   </div>
 
 <!-- ══ Shared Print Utilities (Official CS Form 212) ══ -->
-<script src="../../config/print-utilities.js"></script>
+<script src="../config/print-utilities.js"></script>
 
 <script>
 const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
