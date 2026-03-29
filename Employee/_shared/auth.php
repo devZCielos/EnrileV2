@@ -9,6 +9,12 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+// ── Security headers ──────────────────────────────────────────
+header('X-Frame-Options: SAMEORIGIN');
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: strict-origin-when-cross-origin');
+header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
+
 // ── Session timeout — 8 hours ──
 $_sessionLifetime = 8 * 60 * 60;
 if (isset($_SESSION['login_time']) && (time() - strtotime($_SESSION['login_time']) > $_sessionLifetime)) {
@@ -16,7 +22,7 @@ if (isset($_SESSION['login_time']) && (time() - strtotime($_SESSION['login_time'
     session_unset(); session_destroy();
     if ($_isAjax) {
         header('Content-Type: application/json');
-        echo json_encode(['success'=>false,'message'=>'SESSION_EXPIRED: Your session has expired. Please log in again.']);
+        echo json_encode(['success'=>false,'message'=>'Your session has expired. Please log in again.']);
         exit();
     }
     header('Location: ../Login/login.php?error=' . urlencode('Your session has expired. Please log in again.'));
@@ -28,7 +34,7 @@ if (empty($_SESSION['user_id']) || empty($_SESSION['user_email'])) {
     $_isAjax = !empty($_GET['action']) || !empty($_POST['action']);
     if ($_isAjax) {
         header('Content-Type: application/json');
-        echo json_encode(['success'=>false,'message'=>'SESSION_MISSING: Not logged in.']);
+        echo json_encode(['success'=>false,'message'=>'Not logged in. Please refresh the page.']);
         exit();
     }
     header('Location: ../Login/login.php'); exit();
@@ -39,7 +45,7 @@ if ($_SESSION['user_role'] !== 'employee' && empty($_SESSION['switched_from_admi
     $_isAjax = !empty($_GET['action']) || !empty($_POST['action']);
     if ($_isAjax) {
         header('Content-Type: application/json');
-        echo json_encode(['success'=>false,'message'=>'WRONG_ROLE: Expected employee role.']);
+        echo json_encode(['success'=>false,'message'=>'Access denied.']);
         exit();
     }
     header('Location: ../Admin/dashboard.php'); exit();

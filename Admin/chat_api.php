@@ -147,9 +147,10 @@ try {
             echo json_encode(['success'=>false,'message'=>"Unknown action: $action"]);
     }
 } catch (PDOException $e) {
-    error_log('[HRMS Chat] '.$e->getMessage());
-    echo json_encode(['success'=>false,'message'=>'DB error: '.$e->getMessage()]);
+    error_log('[HRMS Chat] ' . $e->getMessage());
+    echo json_encode(['success'=>false,'message'=>'A server error occurred. Please try again.']);
 } catch (Exception $e) {
-    echo json_encode(['success'=>false,'message'=>'Error: '.$e->getMessage()]);
+    error_log('[HRMS Chat] ' . $e->getMessage());
+    echo json_encode(['success'=>false,'message'=>'A server error occurred. Please try again.']);
 }
 exit();

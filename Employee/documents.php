@@ -39,18 +39,43 @@ if ($action) {
                     echo json_encode(['success' => false, 'message' => 'File size exceeds 50 MB.']);
                     break;
                 }
+
+                // ── MIME validation (server-side, not client filename) ────────────
+                // We detect the actual file content via finfo — the client-supplied
+                // name/extension is completely ignored for security decisions.
+                $allowedDocMimes = [
+                    'application/pdf'                                                        => 'pdf',
+                    'application/msword'                                                     => 'doc',
+                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'=> 'docx',
+                    'application/vnd.ms-excel'                                               => 'xls',
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'      => 'xlsx',
+                    'image/jpeg'                                                             => 'jpg',
+                    'image/png'                                                              => 'png',
+                ];
+                $finfo   = finfo_open(FILEINFO_MIME_TYPE);
+                $detectedMime = finfo_file($finfo, $file['tmp_name']);
+                finfo_close($finfo);
+
+                if (!array_key_exists($detectedMime, $allowedDocMimes)) {
+                    echo json_encode(['success' => false, 'message' => 'File type not allowed. Accepted: PDF, DOC, DOCX, XLS, XLSX, JPG, PNG.']);
+                    break;
+                }
+                // Use server-determined extension — never trust the client filename
+                $safeExt  = $allowedDocMimes[$detectedMime];
+                $safeName = preg_replace('/[^a-zA-Z0-9._-]/', '_', basename($file['name']));
+
                 $docType = sanitize($_POST['doc_type'] ?? 'Other');
                 $updir = dirname(__DIR__) . '/uploads/documents';
                 if (!is_dir($updir)) mkdir($updir, 0755, true);
-                
-                $ext = pathinfo($file['name'], PATHINFO_EXTENSION);
-                $newfile = $updir . '/' . $employeeId . '_' . time() . '.' . $ext;
+
+                $unique  = time() . '_' . bin2hex(random_bytes(6)) . '.' . $safeExt;
+                $newfile = $updir . '/' . $unique;
                 if (move_uploaded_file($file['tmp_name'], $newfile)) {
                     $stmt = $pdo->prepare("
                         INSERT INTO documents (employee_id, filename, file_url, doc_type, file_size, uploaded_at)
                         VALUES (?, ?, ?, ?, ?, NOW())
                     ");
-                    $stmt->execute([$employeeId, $file['name'], basename($newfile), $docType, $file['size']]);
+                    $stmt->execute([$employeeId, $safeName, basename($newfile), $docType, $file['size']]);
                     echo json_encode(['success' => true, 'message' => 'Document uploaded.']);
                 } else {
                     echo json_encode(['success' => false, 'message' => 'Upload failed.']);
@@ -135,7 +160,7 @@ if ($action) {
                             </div>
                           </div>
                           <div style="display:flex;gap:8px;">
-                            <a href="../uploads/documents/${d.file_url}" download style="padding:7px 12px;background:#dbeafe;color:#1e40af;border:none;border-radius:6px;font-size:.75rem;font-weight:700;cursor:pointer;text-decoration:none;">📥 Download</a>
+                            <a href="../Admin/serve_document.php?id=${d.doc_id}&inline=0" download style="padding:7px 12px;background:#dbeafe;color:#1e40af;border:none;border-radius:6px;font-size:.75rem;font-weight:700;cursor:pointer;text-decoration:none;">📥 Download</a>
                             <button onclick="deleteDoc(${d.doc_id})" style="padding:7px 12px;background:#fee2e2;color:#991b1b;border:none;border-radius:6px;font-size:.75rem;font-weight:700;cursor:pointer;">🗑️ Delete</button>
                           </div>
                         </div>

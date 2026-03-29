@@ -27,6 +27,13 @@ define('SESSION_LIFETIME', 8 * 60 * 60);
  */
 function require_admin_auth(array $allowedRoles = ['admin', 'hr_staff', 'dept_head']): void
 {
+    // ── Security headers ──────────────────────────────────────────────────
+    // Sent on every authenticated request so they can't be missed.
+    header('X-Frame-Options: SAMEORIGIN');
+    header('X-Content-Type-Options: nosniff');
+    header('Referrer-Policy: strict-origin-when-cross-origin');
+    header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
+
     // Detect AJAX: action param present (all admin AJAX pages use ?action=...)
     $isAjax = !empty($_GET['action']) || !empty($_POST['action']);
 
@@ -48,7 +55,7 @@ function require_admin_auth(array $allowedRoles = ['admin', 'hr_staff', 'dept_he
             session_destroy();
             if ($isAjax) {
                 header('Content-Type: application/json');
-                echo json_encode(['success' => false, 'message' => 'SESSION_EXPIRED: Your session has expired. Please log in again.']);
+                echo json_encode(['success' => false, 'message' => 'Your session has expired. Please log in again.']);
                 exit();
             }
             header('Location: ../Login/login.php?error=' . urlencode('Your session has expired. Please log in again.'));

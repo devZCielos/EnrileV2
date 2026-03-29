@@ -1,0 +1,11 @@
+# Block all direct browser access to uploaded documents.
+# Files must be served through Admin/serve_document.php which
+# enforces authentication and employee-ownership checks.
+Options -Indexes
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+    Order Allow,Deny
+    Deny from all
+</IfModule>

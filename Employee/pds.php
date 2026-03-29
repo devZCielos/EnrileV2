@@ -16,7 +16,6 @@ $action = $_GET['action'] ?? $_POST['action'] ?? '';
 
 if ($action) {
     ob_start();
-    @ini_set('display_errors', 0);
     header('Content-Type: application/json');
     
     // Only verify CSRF for state-changing requests (POST)
@@ -611,7 +610,7 @@ function buildPDSPrintHTML(d, empRow) {
     *{box-sizing:border-box;margin:0;padding:0;}
     body{font-family:'Arial Narrow',Arial,sans-serif;font-size:6.5pt;color:#000;background:#fff;}
     @page{size:A4 portrait;margin:4mm 5mm;}
-    @media print{body{margin:0;}}
+    @media print{body{margin:0;padding:0;}html{margin:0;padding:0;}}
     table{border-collapse:collapse;width:100%;}
     td,th{border:0.5pt solid #000;padding:1.5pt 2pt;vertical-align:top;font-size:6pt;}
     .lbl{font-size:4.5pt;font-weight:700;text-transform:uppercase;color:#333;display:block;line-height:1.0;margin-bottom:1pt;}
@@ -619,9 +618,11 @@ function buildPDSPrintHTML(d, empRow) {
     .sec{background:#000;color:#fff;font-size:5.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:1.5pt 3pt;}
     .hdr{background:#e0e0e0;font-size:5pt;font-weight:700;text-align:center;padding:1.5pt 2pt;}
     .yn{display:inline-block;border:0.5pt solid #000;width:6pt;height:6pt;text-align:center;font-size:5pt;line-height:6pt;margin:0 2pt 0 0;}
-    .pg-num{font-size:5pt;font-style:italic;text-align:right;margin-top:3pt;}
-    .page{page-break-after:always;padding:0;}
+    .pg-num{font-size:4.8pt;font-style:italic;text-align:right;padding:2pt 3pt;margin-top:2pt;page-break-inside:avoid;}
+    .page{page-break-after:always;padding:0;page-break-inside:avoid;}
     .page:last-child{page-break-after:avoid;}
+    .page-wrapper{display:flex;flex-direction:column;height:100%;page-break-after:always;}
+    .page-content{flex:1;}
   `;
   
   const pageHdr = `
@@ -643,6 +644,7 @@ function buildPDSPrintHTML(d, empRow) {
 
   // PAGE 1: Personal Information (I)
   const page1 = `<div class="page">
+  <div class="page-content">
   ${pageHdr}
   <table><tr><td colspan="8" class="sec">I. PERSONAL INFORMATION</td></tr></table>
   <table>
@@ -692,11 +694,13 @@ function buildPDSPrintHTML(d, empRow) {
       <td style="width:30%;"><span class="lbl">10. Email Address</span><span class="val">${v(pi.email)}</span></td>
     </tr>
   </table>
+  </div>
   <div class="pg-num">CS FORM 212 (Revised 2025), Page 1 of 4</div>
   </div>`;
 
   // PAGE 2: Family Background (II) & Education (III)
   const page2 = `<div class="page">
+  <div class="page-content">
   ${pageHdr}
   <table><tr><td colspan="8" class="sec">II. FAMILY BACKGROUND</td></tr></table>
   <table>
@@ -732,11 +736,13 @@ function buildPDSPrintHTML(d, empRow) {
       <tr><td></td><td style="text-align:center;font-size:5.5pt;font-weight:600;">Graduate</td><td style="font-size:5.5pt;">${v((edPad[4]||{}).school)}</td><td style="font-size:5.5pt;">${v((edPad[4]||{}).degree)}</td><td style="text-align:center;font-size:5.5pt;"></td><td style="text-align:center;font-size:5.5pt;"></td><td style="text-align:center;font-size:5.5pt;">${v((edPad[4]||{}).honors)}</td></tr>
     </tbody>
   </table>
+  </div>
   <div class="pg-num">CS FORM 212 (Revised 2025), Page 2 of 4</div>
   </div>`;
 
   // PAGE 3: Civil Service (IV), Work Experience (V), Voluntary Work (VI)
   const page3 = `<div class="page">
+  <div class="page-content">
   ${pageHdr}
   <table><tr><td colspan="8" class="sec">IV. CIVIL SERVICE ELIGIBILITY</td></tr></table>
   <table>
@@ -768,11 +774,13 @@ function buildPDSPrintHTML(d, empRow) {
       <tr><td colspan="7" style="height:8pt;"></td></tr>
     </tbody>
   </table>
+  </div>
   <div class="pg-num">CS FORM 212 (Revised 2025), Page 3 of 4</div>
   </div>`;
 
   // PAGE 4: More Work Experience, Trainings, Other Info, Q&A, References
   const page4 = `<div class="page">
+  <div class="page-content">
   ${pageHdr}
   <table style="margin-bottom:1pt;"><tr><td colspan="8" class="sec">V. WORK EXPERIENCE (CONTINUED)</td></tr></table>
   <table>
@@ -827,6 +835,7 @@ function buildPDSPrintHTML(d, empRow) {
       ${pad(refs,3).map(r=>`<tr><td></td><td style="font-size:5.5pt;">${v(r.name)}</td><td style="font-size:5.5pt;">${v(r.tel)}</td><td style="font-size:5.5pt;">${v(r.position)}</td></tr>`).join('')}
     </tbody>
   </table>
+  </div>
   <div class="pg-num">CS FORM 212 (Revised 2025), Page 4 of 4</div>
   </div>`;
 

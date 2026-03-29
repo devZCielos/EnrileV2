@@ -12,7 +12,6 @@ $action = $_GET['action'] ?? $_POST['action'] ?? '';
 
 if ($action) {
     ob_start();
-    @ini_set('display_errors', 0);
     header('Content-Type: application/json');
     if ($_SERVER['REQUEST_METHOD'] === 'POST') { csrf_verify(true); }
 

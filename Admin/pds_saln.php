@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 // ============================================================
 //  LGU ENRILE HRMS — PDS & SALN Viewer (Admin)
 //  File: Admin/pds_saln.php
@@ -11,7 +11,7 @@ if (isset($_SESSION['login_time']) && (time() - strtotime($_SESSION['login_time'
     session_unset(); session_destroy();
     if ($_isAjax) {
         header('Content-Type: application/json');
-        echo json_encode(['success'=>false,'message'=>'SESSION_EXPIRED: Your session has expired. Please log in again.']);
+        echo json_encode(['success'=>false,'message'=>'Your session has expired. Please log in again.']);
         exit();
     }
     header('Location: ../Login/login.php?error=' . urlencode('Your session has expired. Please log in again.'));

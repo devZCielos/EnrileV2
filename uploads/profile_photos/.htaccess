@@ -1,0 +1,15 @@
+# Block directory listing and PHP execution in profile photos folder.
+# Images must remain publicly readable (served via <img src="..."> tags).
+# We only need to prevent: directory browsing, and PHP/script execution.
+Options -Indexes -ExecCGI
+
+# Block execution of PHP and other scripts — images only allowed
+<FilesMatch "\.(php|php3|php4|php5|phtml|pl|py|cgi|sh)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order Allow,Deny
+        Deny from all
+    </IfModule>
+</FilesMatch>

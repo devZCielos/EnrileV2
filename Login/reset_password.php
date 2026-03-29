@@ -20,17 +20,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         $alertHtml = '<div class="alert warning">⚠️ Invalid or missing reset link. Please request a new one.</div>';
     } else {
         try {
-            $stmt = $pdo->prepare("SELECT user_id, remember_token FROM user_accounts WHERE email = ? LIMIT 1");
+            $stmt = $pdo->prepare("SELECT user_id, reset_token, reset_expires FROM user_accounts WHERE email = ? LIMIT 1");
             $stmt->execute([$email]);
             $user = $stmt->fetch();
 
-            if (!$user || empty($user['remember_token'])) {
+            if (!$user || empty($user['reset_token'])) {
                 $alertHtml = '<div class="alert error">❌ This reset link is invalid. Please request a new one.</div>';
             } else {
-                [$storedToken, $expiresAt] = explode('|', $user['remember_token'] . '|', 2);
-                if (!hash_equals(trim($storedToken), $token)) {
+                $hashToken = hash('sha256', $token); // hash the submitted token before comparing
+                if (!hash_equals($user['reset_token'], $hashToken)) {
                     $alertHtml = '<div class="alert error">❌ This reset link is invalid.</div>';
-                } elseif (strtotime($expiresAt) < time()) {
+                } elseif (strtotime($user['reset_expires']) < time()) {
                     $alertHtml = '<div class="alert warning">⏰ This link has expired. Please request a new one.</div>';
                 } else {
                     $showForm = true; // ✅ Token valid
@@ -59,24 +59,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $showForm  = true;
     } else {
         try {
-            $stmt = $pdo->prepare("SELECT user_id, remember_token FROM user_accounts WHERE email = ? LIMIT 1");
+            $stmt = $pdo->prepare("SELECT user_id, reset_token, reset_expires FROM user_accounts WHERE email = ? LIMIT 1");
             $stmt->execute([$email]);
             $user = $stmt->fetch();
 
-            if (!$user || empty($user['remember_token'])) {
+            if (!$user || empty($user['reset_token'])) {
                 $alertHtml = '<div class="alert error">❌ Invalid reset request.</div>';
             } else {
-                [$storedToken, $expiresAt] = explode('|', $user['remember_token'] . '|', 2);
+                $hashToken = hash('sha256', $token);
 
-                if (!hash_equals(trim($storedToken), $token) || strtotime($expiresAt) < time()) {
+                if (!hash_equals($user['reset_token'], $hashToken) || strtotime($user['reset_expires']) < time()) {
                     $alertHtml = '<div class="alert error">❌ This reset link has expired. Please request a new one.</div>';
                 } else {
-                    // ✅ Save new password and clear the token
+                    // ✅ Save new password and clear the reset token
                     $hash = password_hash($newPw, PASSWORD_BCRYPT);
                     $pdo->prepare("
                         UPDATE user_accounts
                         SET    password_hash  = ?,
-                               remember_token = NULL
+                               reset_token    = NULL,
+                               reset_expires  = NULL
                         WHERE  user_id = ?
                     ")->execute([$hash, $user['user_id']]);
 

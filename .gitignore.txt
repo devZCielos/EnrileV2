@@ -1,0 +1,41 @@
+# ============================================================
+#  LGU ENRILE HRMS — .gitignore
+# ============================================================
+
+# Environment / credentials — NEVER commit these
+.env
+.env.*
+!.env.example
+
+# Microsoft Office lock files (temp files created when a file is open)
+~$*
+
+# PHP / server temp files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Server logs
+*.log
+test_server.log
+
+# Uploaded files — tracked by the DB, not git
+uploads/documents/*
+uploads/profile_photos/*
+# Keep the directories themselves and their .htaccess files
+!uploads/documents/.htaccess
+!uploads/profile_photos/.htaccess
+!uploads/documents/.gitkeep
+!uploads/profile_photos/.gitkeep
+
+# Composer dependencies (if added later)
+vendor/
+
+# Node (if build tools added later)
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

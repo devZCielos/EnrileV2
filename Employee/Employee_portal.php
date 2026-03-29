@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 // ============================================================
 //  LGU ENRILE HRMS — Employee Portal
 //  File: Employee/Employee_portal.php
@@ -11,7 +11,7 @@ $_isAjax = !empty($_GET['action']) || !empty($_POST['action']);
 if (empty($_SESSION['user_id']) || empty($_SESSION['user_email'])) {
     if ($_isAjax) {
         header('Content-Type: application/json');
-        echo json_encode(['success'=>false,'message'=>'SESSION_MISSING: Not logged in. user_id='.($_SESSION['user_id']??'EMPTY').' role='.($_SESSION['user_role']??'EMPTY')]);
+        echo json_encode(['success'=>false,'message'=>'Not logged in. Please refresh the page.']);
         exit();
     }
     header('Location: ../Login/login.php'); exit();
@@ -19,7 +19,7 @@ if (empty($_SESSION['user_id']) || empty($_SESSION['user_email'])) {
 if ($_SESSION['user_role'] !== 'employee' && empty($_SESSION['switched_from_admin'])) {
     if ($_isAjax) {
         header('Content-Type: application/json');
-        echo json_encode(['success'=>false,'message'=>'WRONG_ROLE: Your role is "'.($_SESSION['user_role']??'EMPTY').'", expected "employee". Check user_accounts table.']);
+        echo json_encode(['success'=>false,'message'=>'Access denied.']);
         exit();
     }
     header('Location: ../Admin/dashboard.php'); exit();
@@ -71,7 +71,6 @@ $action = $_GET['action'] ?? $_POST['action'] ?? '';
 
 if ($action) {
     ob_start();
-    @ini_set('display_errors', 0);
     header('Content-Type: application/json');
     if ($_SERVER['REQUEST_METHOD'] === 'POST') { csrf_verify(true); }
     $userId = (int)$_SESSION['user_id'];
@@ -3067,6 +3066,8 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     </div>
   </div>
 
+<!-- ══ Shared Print Utilities (Official CS Form 212) ══ -->
+<script src="../../config/print-utilities.js"></script>
 
 <script>
 const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
@@ -5299,10 +5300,12 @@ function printPDS() {
   setTimeout(()=>w.print(), 600);
 }
 
-function buildPDSPrintHTML(d, empRow) {
-  const pi  = safeJson(d.personal_info)     || {};
-  const fb  = safeJson(d.family_background) || {};
-  const ed  = safeJson(d.education)         || [];
+// ═══════════════════════════════════════════════════════════════════════════════
+// NOTE: buildPDSPrintHTML() is now provided by ../../config/print-utilities.js
+// This implementation uses the official CS Form 212 (Revised 2025) format
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/*
   const cs  = safeJson(d.civil_service)     || [];
   const we  = safeJson(d.work_experience)   || [];
   const vw  = safeJson(d.voluntary_work)    || [];
@@ -6543,6 +6546,7 @@ function buildSALNPrintHTML(d, emp, openPrint) {
   }
   return html;
 }
+*/
 
 
 

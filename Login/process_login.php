@@ -31,6 +31,29 @@ if (strlen($password) < 6) {
     redirectBack('Password must be at least 6 characters.', $email, $role);
 }
 
+// ── Brute-force protection ────────────────────────────────────
+// Track failed attempts per email in session. After 5 failures,
+// lock the account for 15 minutes. The counter is reset on success.
+$attemptKey  = 'login_fail_'   . md5($email);
+$timeKey     = 'login_fail_ts_' . md5($email);
+$maxAttempts = 5;
+$lockSeconds = 15 * 60; // 15 minutes
+
+$attempts  = (int)($_SESSION[$attemptKey]  ?? 0);
+$firstFail = (int)($_SESSION[$timeKey]     ?? 0);
+
+// Reset counter if lockout window has expired
+if ($attempts >= $maxAttempts && $firstFail && (time() - $firstFail) >= $lockSeconds) {
+    unset($_SESSION[$attemptKey], $_SESSION[$timeKey]);
+    $attempts = 0;
+}
+
+if ($attempts >= $maxAttempts) {
+    $remaining = $lockSeconds - (time() - $firstFail);
+    $minutes   = (int)ceil($remaining / 60);
+    redirectBack("Too many failed login attempts. Please try again in {$minutes} minute(s).", $email, $role);
+}
+
 try {
     $stmt = $pdo->prepare("
         SELECT user_id, email, password_hash, role, is_active
@@ -46,7 +69,16 @@ try {
 }
 
 if (!$user || !password_verify($password, $user['password_hash'])) {
-    redirectBack('Incorrect email or password.', $email, $role);
+    // Increment attempt counter
+    if (!$firstFail) {
+        $_SESSION[$timeKey] = time();
+    }
+    $_SESSION[$attemptKey] = $attempts + 1;
+    $remaining = $maxAttempts - ($_SESSION[$attemptKey]);
+    $msg = $remaining > 0
+        ? "Incorrect email or password. {$remaining} attempt(s) remaining."
+        : "Too many failed login attempts. Please try again in 15 minutes.";
+    redirectBack($msg, $email, $role);
 }
 
 if (!(bool)$user['is_active']) {
@@ -71,6 +103,9 @@ session_unset();
 session_destroy();
 session_start();
 session_regenerate_id(true);
+
+// ── Clear brute-force counters on successful login ────────────
+unset($_SESSION[$attemptKey], $_SESSION[$timeKey]);
 
 // ── Store session variables ───────────────────────────────────
 $_SESSION['user_id']    = $user['user_id'];
