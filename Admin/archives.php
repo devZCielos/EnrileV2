@@ -443,8 +443,6 @@ $roleLabel  = $roleLabels[$_SESSION['user_role']] ?? 'Admin';
       <div class="user-avatar"><?= strtoupper(substr($_SESSION['user_name']??'A',0,2)) ?></div>
       <div><div class="user-name"><?= htmlspecialchars($_SESSION['user_name']??'Admin') ?></div><div class="user-role"><?= htmlspecialchars($_SESSION['user_role']??'') ?></div></div>
     </div>
-    <button class="logout-btn" onclick="location.href='switch_to_employee.php'" style="background:linear-gradient(135deg,rgba(234,179,8,.18),rgba(234,179,8,.08));border:1px solid rgba(234,179,8,.45);color:#fef08a;margin-bottom:6px;">🔄 Switch to Employee Account</button>
-    <button class="logout-btn" onclick="location.href='../Login/login.php'">🚪 Logout</button>
   </div>
 </aside>
 

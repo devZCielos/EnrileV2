@@ -62,10 +62,17 @@ if ($action) {
                 $params = [];
 
                 $tab = $_GET['tab'] ?? 'all';
-                if ($tab !== 'all') {
+                $status = $_GET['status'] ?? '';
+                
+                // If dropdown status is selected, use it; otherwise use tab
+                if (!empty($status)) {
+                    $where[]  = 'lr.status = ?';
+                    $params[] = $status;
+                } elseif ($tab !== 'all') {
                     $where[]  = 'lr.status = ?';
                     $params[] = ucfirst($tab);
                 }
+                
                 if (!empty($_GET['search'])) {
                     $s = '%' . $_GET['search'] . '%';
                     $where[]  = "(CONCAT(e.first_name,' ',e.last_name) LIKE ? OR lt.name LIKE ?)";
@@ -88,6 +95,11 @@ if ($action) {
                 ];
                 $sortCol = $sortMap[$_GET['sort'] ?? ''] ?? 'lr.filed_at';
                 $sortDir = strtoupper($_GET['dir'] ?? 'DESC') === 'ASC' ? 'ASC' : 'DESC';
+
+                // Pending requests always float to the top when no status filter is active
+                $pendingFirst = (empty($status) && $tab === 'all')
+                    ? "(lr.status = 'Pending') DESC, "
+                    : '';
 
                 $page     = max(1, (int)($_GET['page'] ?? 1));
                 $pageSize = 8;
@@ -117,7 +129,7 @@ if ($action) {
                     JOIN leave_types lt ON lr.leave_type_id = lt.leave_type_id
                     LEFT JOIN departments d ON e.department_id = d.department_id
                     $wSql
-                    ORDER BY $sortCol $sortDir
+                    ORDER BY {$pendingFirst}$sortCol $sortDir
                     LIMIT $pageSize OFFSET $offset
                 ");
                 $stmt->execute($params);
@@ -383,14 +395,14 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .tab-btn.active{background:linear-gradient(135deg,var(--primary),var(--primary-dark));color:white;}
     .tab-btn .count{background:rgba(255,255,255,0.25);padding:1px 6px;border-radius:10px;font-size:0.65rem;font-weight:800;}
     .tab-btn:not(.active) .count{background:var(--gray-100);color:var(--gray-600);}
-    .toolbar{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;}
-    .search-box{display:flex;align-items:center;gap:8px;background:var(--white);border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);padding:9px 14px;flex:1;min-width:200px;max-width:300px;box-shadow:var(--shadow-sm);transition:border-color 0.2s;}
+    .toolbar{display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:nowrap;overflow-x:auto;}
+    .search-box{display:flex;align-items:center;gap:8px;background:var(--white);border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);padding:9px 12px;flex:1;min-width:200px;box-shadow:var(--shadow-sm);transition:border-color 0.2s;}
     .search-box:focus-within{border-color:var(--primary);}
     .search-box input{border:none;outline:none;font-family:'Nunito',sans-serif;font-size:0.875rem;width:100%;background:transparent;color:var(--gray-800);}
     .search-box input::placeholder{color:var(--gray-400);}
-    .filter-select{padding:9px 12px;border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);font-family:'Nunito',sans-serif;font-size:0.84rem;color:var(--gray-600);background:var(--white);cursor:pointer;box-shadow:var(--shadow-sm);outline:none;transition:border-color 0.2s;}
+    .filter-select{padding:8px 10px;border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);font-family:'Nunito',sans-serif;font-size:0.80rem;color:var(--gray-600);background:var(--white);cursor:pointer;box-shadow:var(--shadow-sm);outline:none;transition:border-color 0.2s;white-space:nowrap;flex-shrink:0;}
     .filter-select:focus{border-color:var(--primary);}
-    .add-btn{margin-left:auto;display:flex;align-items:center;gap:7px;padding:9px 20px;background:linear-gradient(135deg,var(--primary),var(--primary-dark));color:white;border:none;border-radius:var(--radius-sm);font-family:'Nunito',sans-serif;font-size:0.875rem;font-weight:700;cursor:pointer;transition:all 0.2s;box-shadow:0 2px 8px rgba(37,99,235,0.30);white-space:nowrap;}
+    .add-btn{display:flex;align-items:center;gap:6px;padding:8px 16px;background:linear-gradient(135deg,var(--primary),var(--primary-dark));color:white;border:none;border-radius:var(--radius-sm);font-family:'Nunito',sans-serif;font-size:0.80rem;font-weight:700;cursor:pointer;transition:all 0.2s;box-shadow:0 2px 8px rgba(37,99,235,0.30);white-space:nowrap;flex-shrink:0;}
     .add-btn:hover{transform:translateY(-2px);box-shadow:0 4px 14px rgba(37,99,235,0.40);}
     .panel{background:var(--white);border-radius:var(--radius);border:1.5px solid var(--gray-200);box-shadow:var(--shadow-sm);overflow:hidden;animation:fadeIn 0.4s ease both;}
     .table-wrap{overflow-x:auto;}
@@ -669,19 +681,18 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         <div class="stat-card blue"><div class="stat-card-header"><div class="stat-icon">📅</div></div><div class="stat-value" id="sc-total">—</div><div class="stat-label">Total Requests</div><div class="stat-sub">All time</div></div>
       </div>
 
-      <div class="tabs">
-        <button class="tab-btn active" onclick="setTab('all')"       id="tab-all">All <span class="count" id="tc-all">0</span></button>
-        <button class="tab-btn"        onclick="setTab('pending')"   id="tab-pending">⏳ Pending <span class="count" id="tc-pending">0</span></button>
-        <button class="tab-btn"        onclick="setTab('approved')"  id="tab-approved">✅ Approved <span class="count" id="tc-approved">0</span></button>
-        <button class="tab-btn"        onclick="setTab('denied')"    id="tab-denied">✗ Denied <span class="count" id="tc-denied">0</span></button>
-        <button class="tab-btn"        onclick="setTab('cancelled')" id="tab-cancelled">— Cancelled <span class="count" id="tc-cancelled">0</span></button>
-      </div>
-
       <div class="toolbar">
         <div class="search-box">
           <span style="color:var(--gray-400);font-size:1rem;">🔍</span>
           <input type="text" id="searchInput" placeholder="Search employee or leave type…" oninput="debounceLoad()"/>
         </div>
+        <select class="filter-select" id="fStatus" onchange="loadRequests(1)">
+          <option value="">All Requests</option>
+          <option value="Pending">Pending</option>
+          <option value="Approved">Approved</option>
+          <option value="Denied">Denied</option>
+          <option value="Cancelled">Cancelled</option>
+        </select>
         <select class="filter-select" id="fDept"  onchange="loadRequests(1)"><option value="">All Departments</option></select>
         <select class="filter-select" id="fType"  onchange="loadRequests(1)"><option value="">All Leave Types</option></select>
         <select class="filter-select" id="fMonth" onchange="loadRequests(1)">
@@ -691,6 +702,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           <option value="7">July</option><option value="8">August</option><option value="9">September</option>
           <option value="10">October</option><option value="11">November</option><option value="12">December</option>
         </select>
+        <button class="add-btn" onclick="resetFilters()" style="background:linear-gradient(135deg,#f59e0b,#d97706);gap:6px;">🔄 Reset Filters</button>
        <!-- <button class="add-btn" onclick="openAdd()">➕ File Leave Request</button>-->
       </div>
 
@@ -1136,6 +1148,7 @@ if (!CSRF_TOKEN) {
     currentPage=page;
     const p=new URLSearchParams({action:'list',tab:currentTab,page:currentPage,sort:sortKey,dir:sortAsc?'ASC':'DESC',
       search:document.getElementById('searchInput').value.trim(),
+      status:document.getElementById('fStatus').value,
       dept:document.getElementById('fDept').value,
       type:document.getElementById('fType').value,
       month:document.getElementById('fMonth').value});
@@ -1166,6 +1179,15 @@ if (!CSRF_TOKEN) {
   }
 
   function debounceLoad(){clearTimeout(debounceTimer);debounceTimer=setTimeout(()=>loadRequests(1),320);}
+
+  function resetFilters(){
+    document.getElementById('searchInput').value='';
+    document.getElementById('fStatus').value='';
+    document.getElementById('fDept').value='';
+    document.getElementById('fType').value='';
+    document.getElementById('fMonth').value='';
+    loadRequests(1);
+  }
 
   function renderTable(rows){
     const tbody=document.getElementById('leaveBody');

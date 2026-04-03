@@ -81,7 +81,7 @@ if ($action) {
                 echo $row?json_encode(['success'=>true,'data'=>$row]):json_encode(['success'=>false,'message'=>'Contract not found.']);
                 break;
             case 'employees':
-                $stmt=$pdo->query("SELECT e.employee_id,e.employee_code,e.first_name,e.last_name,e.position_title,d.name AS department_name FROM employees e LEFT JOIN departments d ON e.department_id=d.department_id WHERE e.employment_status='Active' ORDER BY e.last_name,e.first_name");
+                $stmt=$pdo->query("SELECT e.employee_id,e.employee_code,e.first_name,e.last_name,e.position_title,e.employment_type,d.name AS department_name FROM employees e LEFT JOIN departments d ON e.department_id=d.department_id WHERE e.employment_status='Active' AND e.employment_type IN ('Contractual','Job Order','Casual') ORDER BY e.last_name,e.first_name");
                 echo json_encode(['success'=>true,'data'=>$stmt->fetchAll()]); break;
             case 'departments':
                 $stmt=$pdo->query("SELECT department_id,name FROM departments ORDER BY name");
@@ -1887,12 +1887,9 @@ async function exportContractsCSV() {
     const csv  = rows.map(function(row) {
       return row.map(function(v) {
         v = String(v == null ? '' : v).replace(/"/g, '""');
-        return /[",
-
-]/.test(v) ? '"' + v + '"' : v;
+        return /[",\n]/.test(v) ? '"' + v + '"' : v;
       }).join(',');
-    }).join('
-');
+    }).join('\n');
 
     const blob = new Blob(['﻿' + csv], { type:'text/csv;charset=utf-8;' });
     const url  = URL.createObjectURL(blob);

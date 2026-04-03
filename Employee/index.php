@@ -226,7 +226,7 @@ const PAGE_META = {
   file: ['File Leave Request', 'Submit a new leave application'],
   balances: ['Leave Balances', 'Your available credits for CY <?= date('Y') ?>'],
   documents: ['My Documents', 'View and manage your HR files'],
-  pds: ['Personal Data Sheet', 'CS Form No. 212 (Revised 2017)'],
+  pds: ['Personal Data Sheet', 'CS Form No. 212 (Revised 2025)'],
   saln: ['SALN', 'Statement of Assets, Liabilities and Net Worth'],
   service_record: ['Service Record', 'Your government service history'],
 };

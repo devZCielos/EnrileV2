@@ -150,10 +150,10 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .nav-item.active .nav-icon{background:rgba(255,255,255,.25);}
     .nav-icon{width:30px;height:30px;border-radius:8px;background:rgba(255,255,255,.10);display:flex;align-items:center;justify-content:center;font-size:.95rem;flex-shrink:0;}
     .sidebar-footer{padding:14px 16px;border-top:1px solid rgba(255,255,255,.12);}
-    .user-pill{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
-    .user-avatar{width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.20);display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;font-size:.85rem;flex-shrink:0;}
-    .user-name{font-size:.82rem;font-weight:700;color:#fff;}
-    .user-role{font-size:.65rem;color:rgba(255,255,255,.55);text-transform:capitalize;}
+    .user-pill{display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.10);border:1.5px solid rgba(255,255,255,.18);border-radius:14px;padding:8px 10px;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);}
+    .user-avatar{width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.18);border:2px solid rgba(255,255,255,.40);display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;font-size:.95rem;flex-shrink:0;}
+    .user-name{font-size:.90rem;font-weight:800;color:#fff;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .user-role{font-size:.72rem;color:rgba(255,255,255,.72);font-weight:700;text-transform:none;line-height:1.15;margin-top:2px;}
     .logout-btn{width:100%;padding:8px 12px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.25);border-radius:var(--radius-sm);color:#fca5a5;font-family:'Nunito',sans-serif;font-size:.82rem;font-weight:700;cursor:pointer;transition:all .2s;}
     .logout-btn:hover{background:rgba(239,68,68,.22);}
     .main{margin-left:var(--sidebar-w);flex:1;display:flex;flex-direction:column;min-height:100vh;}
@@ -294,11 +294,11 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     <a class="nav-item" href="settings.php"><div class="nav-icon">⚙️</div>Settings</a>
   </nav>
   <div class="sidebar-footer">
-    <div class="sidebar-user">
+    <div class="user-pill" style="margin-bottom:0;">
       <div class="user-avatar"><?= strtoupper(substr($_SESSION['user_name']??'A',0,2)) ?></div>
-      <div class="user-info">
-        <strong><?= htmlspecialchars($_SESSION['user_name']??'') ?></strong>
-        <span><?= htmlspecialchars($_SESSION['user_role']??'') ?></span>
+      <div>
+        <div class="user-name"><?= htmlspecialchars($_SESSION['user_name'] ?? 'Admin') ?></div>
+        <div class="user-role"><?= htmlspecialchars($roleLabel) ?></div>
       </div>
     </div>
   </div>

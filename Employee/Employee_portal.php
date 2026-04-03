@@ -145,20 +145,43 @@ if ($action) {
                 if ($empType !== 'Permanent') {
                     echo json_encode(['success' => false, 'message' => "Leave balances are only available to Permanent employees. You are employed as: {$empType}."]); break;
                 }
-                // ── AUTO-INITIALIZE LEAVE BALANCES FOR NEW EMPLOYEES OR NEW CALENDAR YEAR ──
+                // ── AUTO-INITIALIZE LEAVE BALANCES FOR NEW CALENDAR YEAR ONLY ──
+                // Only auto-create for the new year if the employee already had balances last year,
+                // preserving admin-assigned leave type selections.
                 $checkBal = $pdo->prepare("SELECT COUNT(*) FROM leave_balances WHERE employee_id = ? AND calendar_year = YEAR(NOW())");
                 $checkBal->execute([$employeeId]);
                 $hasBalance = (int)($checkBal->fetchColumn() ?: 0) > 0;
                 
                 if (!$hasBalance && $employeeId) {
-                    // Get all active leave types
-                    $ltypes = $pdo->query("SELECT leave_type_id, max_days FROM leave_types WHERE is_active = 1")->fetchAll();
-                    foreach ($ltypes as $lt) {
-                        $pdo->prepare("
-                            INSERT INTO leave_balances (employee_id, leave_type_id, calendar_year, total_credits, used_days)
-                            VALUES (?, ?, YEAR(NOW()), ?, 0)
-                            ON DUPLICATE KEY UPDATE total_credits = VALUES(total_credits)
-                        ")->execute([$employeeId, $lt['leave_type_id'], $lt['max_days']]);
+                    // Carry forward the leave types from the previous year (preserves admin selection)
+                    $prevYear = $pdo->prepare("
+                        SELECT lb.leave_type_id, lt.max_days
+                        FROM   leave_balances lb
+                        JOIN   leave_types lt ON lt.leave_type_id = lb.leave_type_id AND lt.is_active = 1
+                        WHERE  lb.employee_id = ? AND lb.calendar_year = YEAR(NOW()) - 1
+                    ");
+                    $prevYear->execute([$employeeId]);
+                    $prevTypes = $prevYear->fetchAll();
+                    
+                    if ($prevTypes) {
+                        // New year: carry forward only the previously-assigned leave types
+                        foreach ($prevTypes as $lt) {
+                            $pdo->prepare("
+                                INSERT INTO leave_balances (employee_id, leave_type_id, calendar_year, total_credits, used_days)
+                                VALUES (?, ?, YEAR(NOW()), ?, 0)
+                                ON DUPLICATE KEY UPDATE total_credits = VALUES(total_credits)
+                            ")->execute([$employeeId, $lt['leave_type_id'], $lt['max_days']]);
+                        }
+                    } else {
+                        // Truly new employee with no history — use all active types as fallback
+                        $ltypes = $pdo->query("SELECT leave_type_id, max_days FROM leave_types WHERE is_active = 1")->fetchAll();
+                        foreach ($ltypes as $lt) {
+                            $pdo->prepare("
+                                INSERT INTO leave_balances (employee_id, leave_type_id, calendar_year, total_credits, used_days)
+                                VALUES (?, ?, YEAR(NOW()), ?, 0)
+                                ON DUPLICATE KEY UPDATE total_credits = VALUES(total_credits)
+                            ")->execute([$employeeId, $lt['leave_type_id'], $lt['max_days']]);
+                        }
                     }
                 }
                 
@@ -517,20 +540,16 @@ if ($action) {
                 $empRow  = $empInfo->fetch();
                 $empGender     = $empRow['gender'] ?? 'Unknown';
 
-                // Get leave types with balances (avoiding duplicate rows from LEFT JOIN)
+                // Get leave types with balances — only types assigned to this employee
                 $stmt = $pdo->prepare("
                     SELECT lt.leave_type_id, lt.name, lt.max_days,
                            lt.applicable_gender, lt.require_married,
-                           COALESCE(lb.remaining_days, 0) AS remaining_days
+                           lb.remaining_days
                     FROM   leave_types lt
-                    LEFT JOIN (
-                        SELECT leave_type_id, employee_id, remaining_days
-                        FROM leave_balances
-                        WHERE calendar_year = YEAR(NOW())
-                    ) lb ON lb.leave_type_id = lt.leave_type_id
+                    JOIN   leave_balances lb ON lb.leave_type_id = lt.leave_type_id
                            AND lb.employee_id = ?
+                           AND lb.calendar_year = YEAR(NOW())
                     WHERE  lt.is_active = 1
-                    GROUP BY lt.leave_type_id, lt.name, lt.max_days, lt.applicable_gender, lt.require_married
                     ORDER BY lt.name ASC
                 ");
                 $stmt->execute([$employeeId]);
@@ -3067,7 +3086,8 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
   </div>
 
 <!-- ══ Shared Print Utilities (Official CS Form 212) ══ -->
-<script src="../config/print-utilities.js"></script>
+<script src="../config/print-utilities.js?v=<?= time(); ?>"></script>
+<script src="../config/service_record_print_template.js?v=1"></script>
 
 <script>
 const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
@@ -3129,7 +3149,7 @@ const PAGE_META = {
   file:     ['File Leave Request', 'Submit a new leave application'],
   balances: ["Leave Balances",     "Your available credits for CY <?= date('Y') ?>"],
   documents:['My Documents',       'View and manage your HR files'],
-  pds:      ['Personal Data Sheet', 'CS Form No. 212 (Revised 2017)'],
+  pds:      ['Personal Data Sheet', 'CS Form No. 212 (Revised 2025)'],
   saln:     ['SALN',                'Statement of Assets, Liabilities and Net Worth'],
   service_record: ['Service Record', 'Your government service history'],
 };
@@ -3290,26 +3310,37 @@ function renderSRPage(r) {
 
   // Build read-only table
   const emp = r.employee || {};
-  const rows = records.map(sr => `
-    <tr>
-      <td style="white-space:nowrap;font-size:.78rem;">${sr.date_from ? fmt(sr.date_from) : '—'}</td>
-      <td style="white-space:nowrap;font-size:.78rem;">${sr.date_to   ? fmt(sr.date_to)   : '—'}</td>
-      <td style="font-weight:600;">${sr.designation||'—'}</td>
-      <td><span style="padding:2px 8px;border-radius:12px;font-size:.70rem;font-weight:800;background:#eff6ff;color:#1e40af;">${sr.status||'—'}</span></td>
-      <td style="text-align:right;font-weight:700;">${sr.salary ? '₱'+parseFloat(sr.salary).toLocaleString('en-PH',{minimumFractionDigits:2}) : '—'}</td>
-      <td>${sr.branch||'—'}</td>
-      <td>${sr.station||'—'}</td>
-      <td style="font-size:.75rem;color:var(--g400);">${sr.lvbs_wo_pay||'—'}</td>
-      <td style="white-space:nowrap;font-size:.78rem;">${sr.separation_date ? fmt(sr.separation_date) : '—'}</td>
-      <td>${sr.separation_cause||'—'}</td>
-    </tr>`).join('');
+  const escSR = v => String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const rows = records.map((sr, idx) => {
+    const branchRaw = String(sr.branch || '').trim();
+    const branchNorm = branchRaw.toLowerCase().replace(/[^a-z]/g, '');
+    const branchDisp = branchNorm === 'localgovernmentunit' ? 'LGU' : (branchRaw || '—');
+    const rowBg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
+    const baseTd = 'border:1px solid var(--g200);padding:7px 8px;vertical-align:middle;line-height:1.3;';
+    return `
+    <tr style="background:${rowBg};">
+      <td style="${baseTd}white-space:nowrap;font-size:.78rem;text-align:center;">${sr.date_from ? fmt(sr.date_from) : '—'}</td>
+      <td style="${baseTd}white-space:nowrap;font-size:.78rem;text-align:center;">${sr.date_to   ? fmt(sr.date_to)   : '—'}</td>
+      <td style="${baseTd}font-weight:600;word-break:break-word;">${escSR(sr.designation||'—')}</td>
+      <td style="${baseTd}text-align:center;"><span style="display:inline-block;padding:3px 9px;border-radius:12px;font-size:.70rem;font-weight:800;background:#eff6ff;color:#1e40af;">${escSR(sr.status||'—')}</span></td>
+      <td style="${baseTd}text-align:right;font-weight:700;white-space:nowrap;">${sr.salary ? '₱'+parseFloat(sr.salary).toLocaleString('en-PH',{minimumFractionDigits:2}) : '—'}</td>
+      <td style="${baseTd}word-break:break-word;">${escSR(branchDisp)}</td>
+      <td style="${baseTd}word-break:break-word;">${escSR(sr.station||'—')}</td>
+      <td style="${baseTd}font-size:.75rem;color:var(--g500);text-align:center;">${escSR(sr.lvbs_wo_pay||'—')}</td>
+      <td style="${baseTd}white-space:nowrap;font-size:.78rem;text-align:center;">${sr.separation_date ? fmt(sr.separation_date) : '—'}</td>
+      <td style="${baseTd}word-break:break-word;">${escSR(sr.separation_cause||'—')}</td>
+    </tr>`;
+  }).join('');
 
   cont.innerHTML = `
-    <div style="overflow-x:auto;">
-      <table style="width:100%;border-collapse:collapse;font-size:.80rem;">
+    <div style="overflow-x:auto;border:1px solid var(--g200);border-top:none;border-radius:0 0 12px 12px;">
+      <table style="width:100%;min-width:1120px;border-collapse:collapse;table-layout:fixed;font-size:.80rem;background:#fff;">
+        <colgroup>
+          <col style="width:96px"><col style="width:96px"><col style="width:220px"><col style="width:120px"><col style="width:130px"><col style="width:170px"><col style="width:180px"><col style="width:110px"><col style="width:110px"><col style="width:180px">
+        </colgroup>
         <thead>
           <tr>
-            <th colspan="2" style="background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;padding:7px 8px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;">Service Period</th>
+            <th colspan="2" style="background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;padding:7px 8px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;">Service</th>
             <th colspan="3" style="background:#f3e8ff;color:#6b21a8;border:1px solid #d8b4fe;padding:7px 8px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;">Record of Appointment</th>
             <th colspan="2" style="background:#dcfce7;color:#166534;border:1px solid #86efac;padding:7px 8px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;">Office / Entity</th>
             <th rowspan="2" style="background:var(--g100);border:1px solid var(--g200);padding:7px 8px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;vertical-align:bottom;">LVBS<br>W/O Pay</th>
@@ -3364,8 +3395,11 @@ async function printMySR() {
   if (!_srData) return;
   const emp     = _srData.employee || {};
   const records = _srData.records  || [];
-  // Use the same buildAndPrintSR from admin — but we call a local version
-  buildAndPrintMySR(emp, records);
+  if (window.SRPrintTemplate && typeof window.SRPrintTemplate.print === 'function') {
+    window.SRPrintTemplate.print(emp, records);
+  } else {
+    buildAndPrintMySR(emp, records);
+  }
 }
 
 function buildAndPrintMySR(emp, records) {
@@ -3374,23 +3408,24 @@ function buildAndPrintMySR(emp, records) {
 
   const fmtD = d => { if(!d) return ''; try { return new Date(d+'T00:00:00').toLocaleDateString('en-PH',{year:'numeric',month:'short',day:'numeric'}); } catch(e){ return d; } };
   const escD = s => s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') : '';
+  const cellD = v => v ? v : '&nbsp;';
 
   let pages = '';
   for (let p = 0; p < totalPages; p++) {
     const pageRecs = records.slice(p*ROWS_PER_PAGE, (p+1)*ROWS_PER_PAGE);
     const rows = pageRecs.map(sr => `
       <tr>
-        <td>${fmtD(sr.date_from)}</td><td>${fmtD(sr.date_to)}</td>
-        <td>${escD(sr.designation)}</td>
-        <td style="text-align:center;">${escD(sr.status)}</td>
-        <td style="text-align:right;">${sr.salary ? parseFloat(sr.salary).toLocaleString('en-PH',{minimumFractionDigits:2}) : ''}</td>
-        <td>${escD(sr.branch)}</td><td>${escD(sr.station)}</td>
-        <td style="text-align:center;">${escD(sr.lvbs_wo_pay)}</td>
-        <td style="text-align:center;">${fmtD(sr.separation_date)}</td>
-        <td>${escD(sr.separation_cause)}</td>
+        <td>${cellD(fmtD(sr.date_from))}</td><td>${cellD(fmtD(sr.date_to))}</td>
+        <td>${cellD(escD(sr.designation))}</td>
+        <td style="text-align:center;">${cellD(escD(sr.status))}</td>
+        <td style="text-align:right;">${cellD(sr.salary ? parseFloat(sr.salary).toLocaleString('en-PH',{minimumFractionDigits:2}) : '')}</td>
+        <td>${cellD(escD(sr.branch))}</td><td>${cellD(escD(sr.station))}</td>
+        <td style="text-align:center;">${cellD(escD(sr.lvbs_wo_pay))}</td>
+        <td style="text-align:center;">${cellD(fmtD(sr.separation_date))}</td>
+        <td>${cellD(escD(sr.separation_cause))}</td>
       </tr>`).join('');
     let blanks = '';
-    for (let i = pageRecs.length; i < ROWS_PER_PAGE; i++) blanks += '<tr><td>&nbsp;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>';
+    for (let i = pageRecs.length; i < ROWS_PER_PAGE; i++) blanks += '<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>';
 
     pages += `<div class="sr-page">
       <table class="hdr-tbl"><tr>
@@ -3470,10 +3505,10 @@ function buildAndPrintMySR(emp, records) {
     .dob-row{font-family:'Century Gothic',sans-serif;font-size:10pt;margin-bottom:3pt;}
     .dob-val{border-bottom:1pt solid #000;min-width:80pt;display:inline-block;padding:0 8pt;}
     .cert-text{font-family:'Century Gothic',sans-serif;font-weight:700;font-size:9.5pt;text-align:justify;margin-bottom:5pt;line-height:1.4;}
-    .sr-tbl{width:100%;border-collapse:collapse;font-size:8pt;}
+    .sr-tbl{width:100%;border-collapse:collapse;table-layout:fixed;empty-cells:show;font-size:8pt;}
     .grp-hd{background:#d0d0d0;border:1pt solid #000;padding:3pt 4pt;text-align:center;font-family:'Century Gothic',sans-serif;font-weight:700;font-size:8.5pt;}
     .col-hd{background:#e8e8e8;border:1pt solid #000;padding:3pt 4pt;text-align:center;font-family:'Century Gothic',sans-serif;font-weight:700;font-size:8pt;}
-    .sr-tbl td{border:1pt solid #000;padding:3pt 4pt;font-family:'Century Gothic',sans-serif;font-size:8pt;min-height:15pt;vertical-align:middle;}
+    .sr-tbl td{border:1pt solid #000;padding:3pt 4pt;font-family:'Century Gothic',sans-serif;font-size:8pt;height:15pt;vertical-align:middle;}
     .footer-cert{font-family:Calibri,sans-serif;font-weight:700;font-size:8.5pt;margin:8pt 0 6pt;line-height:1.4;}
     .sig-tbl{width:100%;border-collapse:collapse;margin-top:4pt;}
     .sig-left{width:55%;vertical-align:top;padding-right:10pt;}
@@ -3928,19 +3963,25 @@ function renderBalancesPage() {
   const pillColors = ['#2563eb','#f59e0b','#ef4444','#22c55e','#a855f7','#06b6d4'];
   const grid = document.getElementById('balancesGrid');
   if (!balanceData.length) { grid.innerHTML='<p style="color:var(--g400);">No leave balances found.</p>'; return; }
-  grid.innerHTML = balanceData.map((b,i)=>{
+  
+  const cardsHtml = balanceData.map((b,i)=>{
     const c=pillColors[i%pillColors.length];
     const pct=b.total_credits>0?Math.round((b.used_days/b.total_credits)*100):0;
     const icon=TYPE_ICONS[b.type_name]||'📅';
     const isLocked = !!b.disabled_reason;
+    const hasNoLeaves = parseFloat(b.remaining_days) <= 0;
     const pending = parseFloat(b.pending_days) || 0;
     const available = parseFloat(b.available_after_pending) || 0;
-    const pendingBanner = pending > 0 ? `<div style="background:#dbeafe;border:1px solid #bfdbfe;border-radius:8px;padding:7px 12px;font-size:.73rem;font-weight:700;color:#1e40af;margin-bottom:8px;">⏳ ${pending} pending • ✓ ${available} available</div>` : '';
+    const pendingAvailBanner = (pending > 0 || available > 0) ? `<div style="background:#dbeafe;border:1px solid #bfdbfe;border-radius:6px;padding:6px 10px;font-size:.73rem;font-weight:700;color:#1e40af;margin-top:12px;margin-bottom:8px;text-align:center;">⏳ ${pending} pending • ✓ ${available} available</div>` : '';
     const histHtml=b.history&&b.history.length?b.history.map(h=>`<div class="hist-row"><span style="font-weight:700;">${b.type_name} (${h.days_requested} day${h.days_requested!=1?'s':''})</span><span class="hist-date">${fmt(h.date_from)}${h.date_from!==h.date_to?' – '+fmt(h.date_to):''}</span></div>`).join(''):`<div class="hist-none">No ${b.type_name.toLowerCase()} leaves used this year.</div>`;
     const lockBanner = isLocked ? `<div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:7px 12px;font-size:.73rem;font-weight:700;color:#92400e;margin-bottom:8px;">🔒 ${b.disabled_reason}</div>` : '';
-    const cardStyle = isLocked ? 'opacity:.6;filter:grayscale(.6);' : '';
-    return `<div class="bal-card" style="animation-delay:${i*.05}s;${cardStyle}">${lockBanner}${pendingBanner}<div class="bc-top"><div><div class="bc-title">${isLocked?'🔒':icon} ${b.type_name}</div><div class="bc-sub">CY <?= date('Y') ?> Credits</div></div><div class="bc-icon" style="background:${c}22;">${icon}</div></div><div class="bc-nums"><div class="bc-nb"><div class="bc-n" style="color:var(--primary);">${b.total_credits}</div><div class="bc-nl">Total</div></div><div class="bc-nb"><div class="bc-n" style="color:var(--warn);">${b.used_days}</div><div class="bc-nl">Used</div></div><div class="bc-nb"><div class="bc-n" style="color:var(--accent);">${b.remaining_days}</div><div class="bc-nl">Left</div></div></div><div class="bc-bar"><div class="bc-fill" style="width:${pct}%;background:${c};"></div></div><div class="hist"><div class="hist-label">Recent Usage</div>${histHtml}</div></div>`;
+    const cardStyle = (isLocked || hasNoLeaves) ? 'opacity:.6;filter:grayscale(.6);' : '';
+    const fileButton = (!isLocked && !hasNoLeaves) ? `<button class="file-btn" onclick="fileLeaveForType('${b.type_name}',${b.leave_type_id})" title="File ${b.type_name} request" style="background:none;border:none;cursor:pointer;font-size:2rem;padding:0;color:${c};transition:all .2s;hover:opacity:.8;">➕</button>` : hasNoLeaves ? `<button class="file-btn" disabled title="No remaining leaves for ${b.type_name}" style="background:none;border:none;cursor:not-allowed;font-size:2rem;padding:0;color:${c};opacity:.4;transition:all .2s;">➕</button>` : '';
+    return `<div class="bal-card" style="animation-delay:${i*.05}s;${cardStyle}">${lockBanner}<div class="bc-top"><div><div class="bc-title">${isLocked?'🔒':icon} ${b.type_name}</div><div class="bc-sub">CY <?= date('Y') ?> Credits</div></div><div class="bc-icon" style="background:${c}22;display:flex;align-items:center;justify-content:center;">${fileButton || icon}</div></div><div class="bc-nums"><div class="bc-nb"><div class="bc-n" style="color:var(--primary);">${b.total_credits}</div><div class="bc-nl">Total</div></div><div class="bc-nb"><div class="bc-n" style="color:var(--warn);">${b.used_days}</div><div class="bc-nl">Used</div></div><div class="bc-nb"><div class="bc-n" style="color:var(--accent);">${b.remaining_days}</div><div class="bc-nl">Left</div></div></div><div class="bc-bar"><div class="bc-fill" style="width:${pct}%;background:${c};"></div></div>${pendingAvailBanner}<div class="hist"><div class="hist-label">Recent Usage</div>${histHtml}</div></div>`;
   }).join('');
+  
+  grid.innerHTML = cardsHtml;
+  
   const stMap={ok:'<span class="badge b-approved">✅ OK</span>',low:'<span class="badge b-pending">⚠️ Low</span>',empty:'<span class="badge b-denied">❌ Empty</span>',locked:'<span class="badge" style="background:#fef3c7;color:#92400e;">🔒 Locked</span>'};
   document.getElementById('balSummary').innerHTML=balanceData.map(b=>{
     const pending = parseFloat(b.pending_days) || 0;
@@ -3975,6 +4016,31 @@ async function loadFileLeavePanel() {
 
   // Reset calendar preview
   renderCalPreview(null, null, 0);
+}
+
+// ── Navigate to file leave and pre-select a leave type ────
+function fileLeaveForType(typeName, typeId) {
+  // Navigate to file leave page
+  const btn = document.querySelector('.sb-item[onclick*="\'file\'"]');
+  goPage('file', btn);
+  
+  // Find and click the corresponding leave type card
+  setTimeout(() => {
+    const cards = document.querySelectorAll('.lt-opt');
+    for (let card of cards) {
+      if (parseInt(card.dataset.id) === typeId) {
+        // Remove previous selection
+        document.querySelectorAll('.lt-opt').forEach(c => c.classList.remove('sel'));
+        // Add selection to this card
+        card.classList.add('sel');
+        // Update global state
+        pickLT(card);
+        // Scroll to the selected card
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        break;
+      }
+    }
+  }, 200);
 }
 
 async function loadLeaveTypes() {
@@ -4081,7 +4147,7 @@ async function loadRecentRequests() {
     const tbody=document.getElementById('recentReqTbody');
     if (!tbody) return; // Element doesn't exist on this page
     
-    const recent=json.data.slice(0,3);
+    const recent=json.data.slice(0,8);
     if(!recent.length){tbody.innerHTML='<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--g400);">No requests yet.</td></tr>';return;}
     tbody.innerHTML=recent.map(r=>`<tr onclick="goPage('requests',document.querySelectorAll('.sb-item')[2])"><td><span class="badge" style="background:${(TYPE_COLORS[r.type_name]||'#2563eb')}22;color:${TYPE_COLORS[r.type_name]||'#2563eb'};">${r.type_name}</span></td><td style="font-size:.77rem;color:var(--g600);">${fmt(r.date_from)}${r.date_from!==r.date_to?' – '+fmt(r.date_to):''}</td><td style="font-weight:800;">${r.days_requested}</td><td><span class="badge ${ST_CLS[r.status]||'b-pending'}">${ST_ICO[r.status]||''} ${r.status}</span></td></tr>`).join('');
   } catch(e) {
@@ -4154,7 +4220,7 @@ function filterReqs(tab,btn){curReqTab=tab;document.querySelectorAll('.req-tab')
 
 async function cancelReq(id) {
   if(!confirm('Cancel this leave request?')) return;
-  const body=new FormData(); body.append('action','cancel_leave'); body.append('request_id',id);
+  const body=new FormData(); body.append('action','cancel_leave'); body.append('request_id',id); body.append('csrf_token',CSRF_TOKEN);
   const res=await fetch('Employee_portal.php',{method:'POST',body});
   const json=await res.json();
   if(json.success){showToast('Leave request cancelled.','info');loadRequests();loadRecentRequests();}
@@ -4516,6 +4582,7 @@ async function submitDocUpload() {
   body.append('action',        'upload_document');
   body.append('document_type', docType);
   body.append('file',          docFile);
+  body.append('csrf_token',    CSRF_TOKEN);
 
   try {
     const res  = await fetch('Employee_portal.php',{method:'POST',body});
@@ -4540,7 +4607,7 @@ function openDocDelete(id, fname) {
 async function confirmDocDelete() {
   const btn = document.getElementById('docDeleteBtn');
   btn.disabled=true; btn.textContent='⏳ Deleting…';
-  const body=new FormData(); body.append('action','delete_document'); body.append('document_id',docDeleteTarget);
+  const body=new FormData(); body.append('action','delete_document'); body.append('document_id',docDeleteTarget); body.append('csrf_token',CSRF_TOKEN);
   try {
     const res=await fetch('Employee_portal.php',{method:'POST',body});
     const json=await res.json();
@@ -4884,10 +4951,19 @@ async function loadPDS() {
 
 
 async function printPDSFromPortal() {
-  const r = await fetch('Employee_portal.php?action=get_pds');
-  const j = await r.json();
-  if (!j.data) { showToast('❌ No saved PDS found. Please save your PDS first.', 'error'); return; }
-  buildAndPrintPDS(j.data, null);
+  try {
+    const r = await fetch('Employee_portal.php?action=get_pds');
+    const j = await r.json();
+    if (!j.success || !j.data) { 
+      showToast('❌ No saved PDS found. Please save your PDS first.', 'error'); 
+      return; 
+    }
+    // Pass employee data if available
+    const emp = j.employee || null;
+    buildAndPrintPDS(j.data, emp);
+  } catch(e) {
+    showToast('❌ Error loading PDS: ' + e.message, 'error');
+  }
 }
 async function savePDS() {
   const payload = {
@@ -5235,674 +5311,151 @@ function addTR(v, isDefault) {
 //  PDS PRINT — 4-Page Official CS Form 212 (Revised 2025)
 // ════════════════════════════════════════════════════════
 function printPDS() {
-  // Collect all form fields and pass to the official print builder
-  const d = {
-    personal_info: JSON.stringify({
-      last_name:pdsGet('pds_last_name'), first_name:pdsGet('pds_first_name'),
-      middle_name:pdsGet('pds_middle_name'), suffix:pdsGet('pds_suffix'),
-      dob:pdsGet('pds_dob'), pob:pdsGet('pds_pob'),
-      sex:pdsGet('pds_sex'), civil_status:pdsGet('pds_civil_status'),
-      height:pdsGet('pds_height'), weight:pdsGet('pds_weight'), blood_type:pdsGet('pds_blood_type'),
-      umid:pdsGet('pds_umid'), pagibig:pdsGet('pds_pagibig'), philhealth:pdsGet('pds_philhealth'),
-      psn:pdsGet('pds_psn'), tin:pdsGet('pds_tin'), agency_no:pdsGet('pds_agency_no'),
-      citizenship: document.getElementById('pds_cit_dual').checked ? 'Dual Citizenship' : 'Filipino',
-      dual_by:pdsGet('pds_dual_by'), dual_country:pdsGet('pds_dual_country'),
-      res_housenum:pdsGet('pds_res_housenum'), res_street:pdsGet('pds_res_street'),
-      res_subdivision:pdsGet('pds_res_subdivision'), res_barangay:pdsGet('pds_res_barangay'),
-      res_city:pdsGet('pds_res_city'), res_province:pdsGet('pds_res_province'), res_zip:pdsGet('pds_res_zip'),
-      perm_same: document.getElementById('pds_perm_same')?.checked || false,
-      perm_housenum:pdsGet('pds_perm_housenum'), perm_street:pdsGet('pds_perm_street'),
-      perm_subdivision:pdsGet('pds_perm_subdivision'), perm_barangay:pdsGet('pds_perm_barangay'),
-      perm_city:pdsGet('pds_perm_city'), perm_province:pdsGet('pds_perm_province'), perm_zip:pdsGet('pds_perm_zip'),
-      tel:pdsGet('pds_tel'), mobile:pdsGet('pds_mobile'), email:pdsGet('pds_email'),
-      gov_id_type:pdsGet('pds_gov_id_type'), gov_id_no:pdsGet('pds_gov_id_no'),
-      gov_id_issuance:pdsGet('pds_gov_id_issuance'), date_accomplished:pdsGet('pds_date_accomplished'),
-    }),
-    family_background: JSON.stringify({
-      sp_surname:pdsGet('pds_sp_surname'), sp_firstname:pdsGet('pds_sp_firstname'),
-      sp_ext:pdsGet('pds_sp_ext'), sp_middle:pdsGet('pds_sp_middle'),
-      sp_occupation:pdsGet('pds_sp_occupation'), sp_employer:pdsGet('pds_sp_employer'),
-      sp_biz_addr:pdsGet('pds_sp_biz_addr'), sp_tel:pdsGet('pds_sp_tel'),
-      fa_surname:pdsGet('pds_fa_surname'), fa_firstname:pdsGet('pds_fa_firstname'),
-      fa_ext:pdsGet('pds_fa_ext'), fa_middle:pdsGet('pds_fa_middle'),
-      mo_surname:pdsGet('pds_mo_surname'), mo_firstname:pdsGet('pds_mo_firstname'),
-      mo_middle:pdsGet('pds_mo_middle'),
-      children: collectRows('pds_children_list',['name','dob']),
-    }),
-    education:      JSON.stringify(collectRows('pds_edu_list',['level','school','degree','from','to','units','year_grad','honors'])),
-    civil_service:  JSON.stringify(collectRows('pds_cs_list', ['eligibility','rating','exam_date','exam_place','license_no','license_validity'])),
-    work_experience:JSON.stringify(collectRows('pds_we_list', ['date_from','date_to','position','dept_agency','monthly_salary','salary_grade','status','govt_service'])),
-    voluntary_work: JSON.stringify(collectRows('pds_vw_list', ['org_name','date_from','date_to','no_hours','position'])),
-    trainings:      JSON.stringify(collectRows('pds_tr_list', ['title','date_from','date_to','no_hours','ld_type','conducted_by'])),
-    other_info:     JSON.stringify({ skills:pdsGet('pds_skills'), distinctions:pdsGet('pds_distinctions'), memberships:pdsGet('pds_memberships'), skills_arr:oiGetList('pds_skills_list'), distinctions_arr:oiGetList('pds_distinctions_list'), memberships_arr:oiGetList('pds_memberships_list') }),
-    q4_questions:   JSON.stringify({
-      q34a:pdsRadioGet('q34a'), q34b:pdsRadioGet('q34b'), q34_details:pdsGet('pds_q34_details'),
-      q35a:pdsRadioGet('q35a'), q35a_details:pdsGet('pds_q35a_details'),
-      q35b:pdsRadioGet('q35b'), q35b_details:pdsGet('pds_q35b_details'),
-      q35b_date:pdsGet('pds_q35b_date'), q35b_status:pdsGet('pds_q35b_status'),
-      q36:pdsRadioGet('q36'), q36_details:pdsGet('pds_q36_details'),
-      q37:pdsRadioGet('q37'), q37_details:pdsGet('pds_q37_details'),
-      q38a:pdsRadioGet('q38a'), q38a_details:pdsGet('pds_q38a_details'),
-      q38b:pdsRadioGet('q38b'), q38b_details:pdsGet('pds_q38b_details'),
-      q39:pdsRadioGet('q39'), q39_details:pdsGet('pds_q39_details'),
-      q40a:pdsGet('pds_q40a_yes'), q40a_detail:pdsGet('pds_q40a_detail'),
-      q40b:pdsGet('pds_q40b_yes'), q40b_detail:pdsGet('pds_q40b_detail'),
-      q40c:pdsGet('pds_q40c_yes'), q40c_detail:pdsGet('pds_q40c_detail'),
-    }),
-    pds_references: JSON.stringify(collectRows('pds_ref_list',['name','address','tel'])),
-    pds_character_references: JSON.stringify(collectRows('pds_character_ref_list',['name','address','tel'])),
-  };
-  const html = buildPDSPrintHTML(d, null);
-  const w = window.open('','_blank','width=960,height=1100');
-  w.document.write(html);
-  w.document.close();
-  w.focus();
-  setTimeout(()=>w.print(), 600);
+  // Print from currently displayed form data (for unsaved changes)
+  fetchAndPrintPDS('form');
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// NOTE: buildPDSPrintHTML() is now provided by ../../config/print-utilities.js
-// This implementation uses the official CS Form 212 (Revised 2025) format
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/*
-  const cs  = safeJson(d.civil_service)     || [];
-  const we  = safeJson(d.work_experience)   || [];
-  const vw  = safeJson(d.voluntary_work)    || [];
-  const tr  = safeJson(d.trainings)         || [];
-  const oi  = safeJson(d.other_info)        || {};
-  const q4  = safeJson(d.q4_questions)      || {};
-  const refs = safeJson(d.pds_references || d['references']) || [];
-  const charRefs = safeJson(d.pds_character_references) || [];
-
-  const v    = x => (x===null||x===undefined||x===''||x==='null'||x==='undefined') ? '' : String(x);
-  const fmtD = dt => { if(!dt||dt==='0000-00-00') return ''; try{ const x=new Date(dt); return isNaN(x)?dt:(x.getMonth()+1).toString().padStart(2,'0')+'/'+x.getDate().toString().padStart(2,'0')+'/'+x.getFullYear(); }catch(e){return dt||'';} };
-  const cb   = val => (val===true||val==='1'||val===1||val==='Yes'||val==='true') ? '☑' : '☐';
-  const pad  = (arr,n) => { const a=[...(arr||[])]; while(a.length<n) a.push({}); return a; };
-
-  const resAddr  = [pi.res_housenum,pi.res_street,pi.res_subdivision,pi.res_barangay,pi.res_city,pi.res_province].filter(Boolean).join(', ');
-  const permAddr = pi.perm_same ? resAddr : [pi.perm_housenum,pi.perm_street,pi.perm_subdivision,pi.perm_barangay,pi.perm_city,pi.perm_province].filter(Boolean).join(', ');
-
-  const edPad  = pad(ed,5);
-  const csPad  = pad(cs,7);
-  const wePad  = pad(we,28);
-  const vwPad  = pad(vw,7);
-  const trPad  = pad(tr,22);
-  const charRefPad = pad(charRefs,3);
-  const skillsPad = pad((oi.skills_arr&&oi.skills_arr.length?oi.skills_arr:oi.skills?oi.skills.split('\n').filter(Boolean):[]),7);
-  const distinctPad = pad((oi.distinctions_arr&&oi.distinctions_arr.length?oi.distinctions_arr:oi.distinctions?oi.distinctions.split('\n').filter(Boolean):[]),7);
-  const membershipPad = pad((oi.memberships_arr&&oi.memberships_arr.length?oi.memberships_arr:oi.memberships?oi.memberships.split('\n').filter(Boolean):[]),7);
-
-  // ── Shared CSS ─────────────────────────────────────────────────
-  const css = `
-    *{box-sizing:border-box;margin:0;padding:0;}
-    body{font-family:'Arial Narrow',Arial,sans-serif;font-size:6.5pt;color:#000;background:#fff;}
-    @page{size:A4 portrait;margin:5mm 6mm;}
-    @media print{body{margin:0;}}
-    table{border-collapse:collapse;width:100%;}
-    td,th{border:0.5pt solid #000;padding:1.5pt 2.5pt;vertical-align:top;font-size:6.5pt;}
-    .lbl{font-size:5pt;font-weight:700;text-transform:uppercase;color:#444;display:block;line-height:1.1;margin-bottom:0.5pt;}
-    .val{font-size:7pt;font-weight:700;min-height:9pt;display:block;padding:0.5pt 0;word-break:break-word;}
-    .sec{background:#000;color:#fff;font-size:6pt;font-weight:700;text-transform:uppercase;letter-spacing:.08em;padding:2pt 4pt;}
-    .hdr{background:#e0e0e0;font-size:6pt;font-weight:700;text-align:center;padding:1.5pt 2pt;}
-    .page{padding:0;page-break-after:always;}
-    .page:last-child{page-break-after:auto;}
-    .sig-box{height:20pt;border-top:0.5pt solid #000;margin-top:2pt;}
-    .pg-num{font-size:5.5pt;font-style:italic;text-align:right;margin-top:2pt;}
-    .yn{display:inline-block;border:0.5pt solid #000;width:7pt;height:7pt;text-align:center;font-size:6pt;line-height:7pt;margin-right:1pt;}
-    .indent{padding-left:6pt;}
-    .photo{border:0.5pt solid #000;width:100%;height:50pt;display:flex;align-items:center;justify-content:center;font-size:5.5pt;color:#666;text-align:center;}
-    .thumb{border:0.5pt solid #000;width:100%;height:50pt;display:flex;align-items:center;justify-content:center;font-size:5pt;color:#666;text-align:center;}
-  `;
-
-  // ── Page header (used on each page) ─────────────────────────────
-  const pageHdr = `
-  <table style="margin-bottom:1pt;border-collapse:collapse;width:100%;">
-    <tr>
-      <!-- Top-left: CS Form No. + Revised label -->
-      <td style="border:0.5pt solid #000;padding:2pt 5pt;width:18%;vertical-align:top;">
-        <div style="font-size:6.5pt;font-weight:700;font-style:italic;">CS Form No. 212</div>
-        <div style="font-size:6pt;font-style:italic;">Revised 2025</div>
-      </td>
-      <!-- Center: PERSONAL DATA SHEET title -->
-      <td style="border:0.5pt solid #000;border-left:none;padding:3pt 5pt;text-align:center;vertical-align:middle;">
-        <div style="font-size:14pt;font-weight:900;text-transform:uppercase;letter-spacing:.04em;font-family:Arial,sans-serif;">Personal Data Sheet</div>
-      </td>
-    </tr>
-  </table>
-  <table style="margin-bottom:1pt;border-collapse:collapse;width:100%;">
-    <tr>
-      <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:5.5pt;line-height:1.5;" colspan="12">
-        <strong><em>WARNING: Any misrepresentation made in the Personal Data Sheet and the Work Experience Sheet shall cause the filing of administrative/criminal case/s against the person concerned.</em></strong><br>
-        <strong><em>READ THE ATTACHED GUIDE TO FILLING OUT THE PERSONAL DATA SHEET (PDS) BEFORE ACCOMPLISHING THE PDS FORM.</em></strong><br>
-        Print legibly if accomplished through own handwriting. Tick appropriate boxes <span style="border:0.5pt solid #000;display:inline-block;width:7pt;height:7pt;vertical-align:middle;font-size:6pt;text-align:center;">✓</span> and use separate sheet if necessary. Indicate N/A if not applicable. &nbsp;<strong>DO NOT ABBREVIATE.</strong>
-      </td>
-    </tr>
-  </table>`;
-
-  // ── PAGE 1 ──────────────────────────────────────────────────────
-  const page1 = `<div class="page">
-  ${pageHdr}
-  <!-- I. Personal Information -->
-  <table><tr><td colspan="12" class="sec">I. Personal Information</td></tr></table>
-
-  <!-- Row 1: Surname / First Name / Name Ext -->
-  <table>
-    <tr>
-      <td style="width:4%;"><span class="lbl">1.</span></td>
-      <td style="width:28%;"><span class="lbl">Surname</span><span class="val">${v(pi.last_name)}</span></td>
-      <td style="width:4%;"><span class="lbl">2.</span></td>
-      <td style="width:28%;"><span class="lbl">First Name</span><span class="val">${v(pi.first_name)}</span></td>
-      <td style="width:18%;"><span class="lbl">Name Extension (Jr., Sr.)</span><span class="val">${v(pi.suffix)}</span></td>
-      <td rowspan="6" style="width:18%;padding:2pt;">
-        <span class="lbl" style="margin-bottom:2pt;display:block;">16. Citizenship</span>
-        <div style="margin:1pt 0;"><span class="yn">${pi.citizenship==='Filipino'||!pi.citizenship?'✓':''}</span><span style="font-size:6pt;"> Filipino</span></div>
-        <div style="margin:1pt 0;"><span class="yn">${pi.citizenship==='Dual Citizenship'?'✓':''}</span><span style="font-size:6pt;"> Dual Citizenship</span></div>
-        <div style="font-size:5pt;margin-top:3pt;">If dual citizenship, indicate details:</div>
-        <div style="font-size:5pt;margin-top:1pt;">By:</div>
-        <div style="font-size:6.5pt;font-weight:700;border-bottom:0.4pt solid #000;min-height:8pt;">${v(pi.dual_by)}</div>
-        <div style="font-size:5pt;margin-top:2pt;">Country:</div>
-        <div style="font-size:6.5pt;font-weight:700;border-bottom:0.4pt solid #000;min-height:8pt;">${v(pi.dual_country)}</div>
-      </td>
-    </tr>
-    <tr>
-      <td></td>
-      <td><span class="lbl">Middle Name</span><span class="val">${v(pi.middle_name)}</span></td>
-      <td></td><td colspan="2"></td>
-    </tr>
-    <tr>
-      <td><span class="lbl">3.</span></td>
-      <td><span class="lbl">Date of Birth (mm/dd/yyyy)</span><span class="val">${fmtD(pi.dob)}</span></td>
-      <td><span class="lbl">5.</span></td>
-      <td colspan="2">
-        <span class="lbl">Sex at Birth</span>
-        <span style="font-size:6pt;"><span class="yn">${pi.sex==='Male'?'✓':''}</span> Male &nbsp; <span class="yn">${pi.sex==='Female'?'✓':''}</span> Female</span>
-      </td>
-    </tr>
-    <tr>
-      <td><span class="lbl">4.</span></td>
-      <td><span class="lbl">Place of Birth</span><span class="val">${v(pi.pob)}</span></td>
-      <td><span class="lbl">6.</span></td>
-      <td colspan="2">
-        <span class="lbl">Civil Status</span>
-        <div style="font-size:5.5pt;line-height:1.7;">
-          <span class="yn">${pi.civil_status==='Single'?'✓':''}</span> Single &nbsp;
-          <span class="yn">${pi.civil_status==='Married'?'✓':''}</span> Married &nbsp;
-          <span class="yn">${pi.civil_status==='Widow/er'?'✓':''}</span> Widow/er<br>
-          <span class="yn">${pi.civil_status==='Separated'?'✓':''}</span> Separated &nbsp;
-          <span class="yn">${pi.civil_status==='Solo Parent'?'✓':''}</span> Solo Parent &nbsp;
-          <span class="yn">${pi.civil_status==='Others'?'✓':''}</span> Others
-        </div>
-      </td>
-    </tr>
-    <tr>
-      <td><span class="lbl">7.</span></td>
-      <td><span class="lbl">Height (m)</span><span class="val">${v(pi.height)}</span></td>
-      <td><span class="lbl">10.</span></td>
-      <td colspan="2"><span class="lbl">UMID ID No.</span><span class="val">${v(pi.umid)}</span></td>
-    </tr>
-    <tr>
-      <td><span class="lbl">8.</span></td>
-      <td><span class="lbl">Weight (kg)</span><span class="val">${v(pi.weight)}</span></td>
-      <td><span class="lbl">11.</span></td>
-      <td colspan="2"><span class="lbl">PAG-IBIG ID No.</span><span class="val">${v(pi.pagibig)}</span></td>
-    </tr>
-  </table>
-
-  <!-- Row: Blood type, IDs, Residential Address -->
-  <table>
-    <tr>
-      <td style="width:4%;"><span class="lbl">9.</span></td>
-      <td style="width:22%;"><span class="lbl">Blood Type</span><span class="val">${v(pi.blood_type)}</span></td>
-      <td style="width:4%;"><span class="lbl">12.</span></td>
-      <td style="width:22%;"><span class="lbl">PhilHealth No.</span><span class="val">${v(pi.philhealth)}</span></td>
-      <td style="width:48%;" rowspan="5" valign="top">
-        <span class="lbl">17. Residential Address</span>
-        <table style="border:none;margin-top:1pt;"><tr>
-          <td style="border:none;padding:0 2pt 0 0;width:50%;"><span class="lbl">House/Block/Lot No.</span><span class="val" style="font-size:6.5pt;">${v(pi.res_housenum)}</span></td>
-          <td style="border:none;padding:0;width:50%;"><span class="lbl">Street</span><span class="val" style="font-size:6.5pt;">${v(pi.res_street)}</span></td>
-        </tr><tr>
-          <td style="border:none;padding:0 2pt 0 0;"><span class="lbl">Subdivision/Village</span><span class="val" style="font-size:6.5pt;">${v(pi.res_subdivision)}</span></td>
-          <td style="border:none;padding:0;"><span class="lbl">Barangay</span><span class="val" style="font-size:6.5pt;">${v(pi.res_barangay)}</span></td>
-        </tr><tr>
-          <td style="border:none;padding:0 2pt 0 0;"><span class="lbl">City/Municipality</span><span class="val" style="font-size:6.5pt;">${v(pi.res_city)}</span></td>
-          <td style="border:none;padding:0;"><span class="lbl">Province</span><span class="val" style="font-size:6.5pt;">${v(pi.res_province)}</span></td>
-        </tr><tr>
-          <td colspan="2" style="border:none;padding:0;"><span class="lbl">ZIP Code</span><span class="val" style="font-size:6.5pt;">${v(pi.res_zip)}</span></td>
-        </tr></table>
-      </td>
-    </tr>
-    <tr>
-      <td><span class="lbl">13.</span></td>
-      <td><span class="lbl">PhilSys No. (PSN)</span><span class="val">${v(pi.psn)}</span></td>
-      <td><span class="lbl">19.</span></td>
-      <td><span class="lbl">Telephone No.</span><span class="val">${v(pi.tel)}</span></td>
-    </tr>
-    <tr>
-      <td><span class="lbl">14.</span></td>
-      <td><span class="lbl">TIN No.</span><span class="val">${v(pi.tin)}</span></td>
-      <td><span class="lbl">20.</span></td>
-      <td><span class="lbl">Mobile No.</span><span class="val">${v(pi.mobile)}</span></td>
-    </tr>
-    <tr>
-      <td colspan="4"><span class="lbl">15. Agency Employee No.</span><span class="val">${v(pi.agency_no)}</span></td>
-    </tr>
-    <tr>
-      <td colspan="4"><span class="lbl">21. E-Mail Address (if any)</span><span class="val">${v(pi.email)}</span></td>
-    </tr>
-  </table>
-
-  <!-- Permanent Address -->
-  <table style="margin-top:0;">
-    <tr>
-      <td style="width:4%;font-size:6pt;font-weight:700;">18.</td>
-      <td colspan="3">
-        <span class="lbl">Permanent Address ${pi.perm_same?'(Same as Residential)':''}</span>
-        <table style="border:none;"><tr>
-          <td style="border:none;padding:0 2pt 0 0;width:25%;"><span class="lbl">House/Block/Lot No.</span><span class="val" style="font-size:6.5pt;">${v(pi.perm_same?pi.res_housenum:pi.perm_housenum)}</span></td>
-          <td style="border:none;padding:0 2pt 0 0;width:25%;"><span class="lbl">Street</span><span class="val" style="font-size:6.5pt;">${v(pi.perm_same?pi.res_street:pi.perm_street)}</span></td>
-          <td style="border:none;padding:0 2pt 0 0;width:25%;"><span class="lbl">Subdivision/Village</span><span class="val" style="font-size:6.5pt;">${v(pi.perm_same?pi.res_subdivision:pi.perm_subdivision)}</span></td>
-          <td style="border:none;padding:0;width:25%;"><span class="lbl">Barangay</span><span class="val" style="font-size:6.5pt;">${v(pi.perm_same?pi.res_barangay:pi.perm_barangay)}</span></td>
-        </tr><tr>
-          <td style="border:none;padding:0 2pt 0 0;"><span class="lbl">City/Municipality</span><span class="val" style="font-size:6.5pt;">${v(pi.perm_same?pi.res_city:pi.perm_city)}</span></td>
-          <td style="border:none;padding:0 2pt 0 0;"><span class="lbl">Province</span><span class="val" style="font-size:6.5pt;">${v(pi.perm_same?pi.res_province:pi.perm_province)}</span></td>
-          <td colspan="2" style="border:none;padding:0;"><span class="lbl">ZIP Code</span><span class="val" style="font-size:6.5pt;">${v(pi.perm_same?pi.res_zip:pi.perm_zip)}</span></td>
-        </tr></table>
-      </td>
-    </tr>
-  </table>
-
-  <!-- II. Family Background -->
-  <table style="margin-top:1pt;"><tr><td colspan="12" class="sec">II. Family Background</td></tr></table>
-  <table>
-    <tr>
-      <td style="width:4%;font-size:6pt;font-weight:700;">22.</td>
-      <td style="width:46%;" valign="top">
-        <table style="border:none;">
-          <tr><td style="border:none;padding:0;"><span class="lbl">Spouse's Surname</span><span class="val">${v(fb.sp_surname)}</span></td></tr>
-          <tr><td style="border:none;padding:0;"><span class="lbl">First Name</span><span class="val">${v(fb.sp_firstname)}</span></td></tr>
-          <tr><td style="border:none;padding:0;"><span class="lbl">Name Extension (Jr., Sr.)</span><span class="val">${v(fb.sp_ext)}</span></td></tr>
-          <tr><td style="border:none;padding:0;"><span class="lbl">Middle Name</span><span class="val">${v(fb.sp_middle)}</span></td></tr>
-          <tr><td style="border:none;padding:0;"><span class="lbl">Occupation</span><span class="val">${v(fb.sp_occupation)}</span></td></tr>
-          <tr><td style="border:none;padding:0;"><span class="lbl">Employer/Business Name</span><span class="val">${v(fb.sp_employer)}</span></td></tr>
-          <tr><td style="border:none;padding:0;"><span class="lbl">Business Address</span><span class="val">${v(fb.sp_biz_addr)}</span></td></tr>
-          <tr><td style="border:none;padding:0;"><span class="lbl">Telephone No.</span><span class="val">${v(fb.sp_tel)}</span></td></tr>
-        </table>
-      </td>
-      <td style="width:4%;font-size:6pt;font-weight:700;">23.</td>
-      <td style="width:46%;" valign="top">
-        <span class="lbl">Name of Children (Write full name and list all)</span>
-        <table style="margin-top:1pt;">
-          <tr>
-            <th class="hdr" style="width:70%;font-size:5.5pt;text-align:left;padding:1pt 2pt;">NAME OF CHILD</th>
-            <th class="hdr" style="width:30%;font-size:5.5pt;text-align:center;padding:1pt 2pt;">DATE OF BIRTH<br><span style="font-size:4.5pt;">(mm/dd/yyyy)</span></th>
-          </tr>
-          ${pad(fb.children||[],8).map(c=>`<tr>
-            <td style="font-size:6.5pt;font-weight:600;height:9pt;">${v(c.name)}</td>
-            <td style="font-size:6.5pt;font-weight:600;text-align:center;">${fmtD(c.dob)}</td>
-          </tr>`).join('')}
-        </table>
-      </td>
-    </tr>
-  </table>
-
-  <!-- Father / Mother -->
-  <table style="margin-top:0;">
-    <tr>
-      <td style="width:4%;font-size:6pt;font-weight:700;">24.</td>
-      <td style="width:46%;">
-        <span class="lbl">Father's Surname</span><span class="val">${v(fb.fa_surname)}</span>
-        <span class="lbl" style="margin-top:1pt;display:block;">First Name</span><span class="val">${v(fb.fa_firstname)}</span>
-        <span class="lbl" style="margin-top:1pt;display:block;">Name Extension</span><span class="val">${v(fb.fa_ext)}</span>
-        <span class="lbl" style="margin-top:1pt;display:block;">Middle Name</span><span class="val">${v(fb.fa_middle)}</span>
-      </td>
-      <td style="width:4%;font-size:6pt;font-weight:700;">25.</td>
-      <td style="width:46%;">
-        <span class="lbl">Mother's Maiden Name — Surname</span><span class="val">${v(fb.mo_surname)}</span>
-        <span class="lbl" style="margin-top:1pt;display:block;">First Name</span><span class="val">${v(fb.mo_firstname)}</span>
-        <span class="lbl" style="margin-top:1pt;display:block;">Middle Name</span><span class="val">${v(fb.mo_middle)}</span>
-      </td>
-    </tr>
-  </table>
-
-  <!-- III. Educational Background -->
-  <table style="margin-top:1pt;"><tr><td colspan="9" class="sec">III. Educational Background</td></tr></table>
-  <table>
-    <thead>
-      <tr>
-        <th class="hdr" style="width:3%;">26.</th>
-        <th class="hdr" style="width:12%;">LEVEL</th>
-        <th class="hdr" style="width:22%;">NAME OF SCHOOL<br><span style="font-size:4.5pt;font-weight:400;">(Write in full)</span></th>
-        <th class="hdr" style="width:20%;">BASIC EDUCATION/DEGREE/COURSE<br><span style="font-size:4.5pt;font-weight:400;">(Write in full)</span></th>
-        <th class="hdr" style="width:8%;">PERIOD<br>From</th>
-        <th class="hdr" style="width:8%;">PERIOD<br>To</th>
-        <th class="hdr" style="width:10%;">HIGHEST LEVEL/UNITS EARNED<br><span style="font-size:4.5pt;font-weight:400;">(if not graduated)</span></th>
-        <th class="hdr" style="width:8%;">YEAR GRADUATED</th>
-        <th class="hdr" style="width:9%;">SCHOLARSHIP/ACADEMIC HONORS</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${ed.map(e=>`<tr>
-        <td></td>
-        <td style="font-size:6pt;font-weight:700;">${v(e.level)}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${v(e.school)}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${v(e.degree)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v(e.from)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v(e.to)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v(e.units)}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${v(e.year_grad)}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${v(e.honors)}</td>
-      </tr>`).join('')}
-    </tbody>
-  </table>
-  <table style="margin-top:1pt;"><tr>
-    <td style="width:50%;border:none;"><div class="sig-box"></div><div style="font-size:5.5pt;text-align:center;">SIGNATURE &nbsp; (wet signature/e-signature/digital certificate)</div></td>
-    <td style="width:50%;border:none;padding-left:10pt;"><div class="sig-box"></div><div style="font-size:5.5pt;text-align:center;">DATE</div></td>
-  </tr></table>
-  <div class="pg-num">CS FORM 212 (Revised 2025), Page 1 of 4</div>
-  </div>`;
-
-  // ── PAGE 2 ──────────────────────────────────────────────────────
-  const page2 = `<div class="page">
-  ${pageHdr}
-  <!-- IV. Civil Service Eligibility -->
-  <table><tr><td colspan="7" class="sec">IV. Civil Service Eligibility</td></tr></table>
-  <table>
-    <thead>
-      <tr>
-        <th class="hdr" style="width:3%;">27.</th>
-        <th class="hdr" style="width:35%;">CAREER SERVICE / RA 1080 (BOARD/BAR) / UNDER SPECIAL LAWS / CES / CSEE / ELIGIBILITY</th>
-        <th class="hdr" style="width:10%;">RATING<br><span style="font-weight:400;font-size:4.5pt;">(If Applicable)</span></th>
-        <th class="hdr" style="width:14%;">DATE OF EXAMINATION / CONFERMENT</th>
-        <th class="hdr" style="width:20%;">PLACE OF EXAMINATION / CONFERMENT</th>
-        <th class="hdr" style="width:10%;">LICENSE NO.<br><span style="font-weight:400;font-size:4.5pt;">(if applicable)</span></th>
-        <th class="hdr" style="width:8%;">LICENSE VALID UNTIL</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${csPad.map(e=>`<tr>
-        <td></td>
-        <td style="font-size:6.5pt;font-weight:600;">${(e.eligibility ? v(e.eligibility) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.rating ? v(e.rating) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.exam_date ? fmtD(e.exam_date) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${(e.exam_place ? v(e.exam_place) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.license_no ? v(e.license_no) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.license_validity ? fmtD(e.license_validity) : '')}</td>
-      </tr>`).join('')}
-    </tbody>
-  </table>
-  <div style="font-size:5.5pt;font-style:italic;text-align:right;padding:1pt 2pt;">(Continue on separate sheet if necessary)</div>
-
-  <!-- V. Work Experience -->
-  <table style="margin-top:1pt;"><tr><td colspan="9" class="sec">V. Work Experience</td></tr></table>
-  <table><tr><td colspan="9" style="font-size:5.5pt;font-style:italic;padding:1.5pt 3pt;border-top:none;">
-    (Include private employment. Start from your most recent work.) Description of duties should be indicated in the attached Work Experience Sheet.
-  </td></tr></table>
-  <table>
-    <thead>
-      <tr>
-        <th class="hdr" style="width:3%;">28.</th>
-        <th class="hdr" style="width:9%;">INCLUSIVE DATES<br>From</th>
-        <th class="hdr" style="width:9%;">INCLUSIVE DATES<br>To</th>
-        <th class="hdr" style="width:22%;">POSITION TITLE<br><span style="font-size:4.5pt;font-weight:400;">(Write in full/Do not abbreviate)</span></th>
-        <th class="hdr" style="width:24%;">DEPT/AGENCY/OFFICE/COMPANY<br><span style="font-size:4.5pt;font-weight:400;">(Write in full/Do not abbreviate)</span></th>
-        <th class="hdr" style="width:9%;">MONTHLY SALARY</th>
-        <th class="hdr" style="width:10%;">SALARY/JOB/PAY GRADE<br><span style="font-size:4.5pt;font-weight:400;">(Format: SG/Step)</span></th>
-        <th class="hdr" style="width:8%;">STATUS OF APPOINTMENT</th>
-        <th class="hdr" style="width:6%;">GOV'T SERVICE (Y/N)</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${wePad.map(e=>`<tr>
-        <td></td>
-        <td style="font-size:6pt;text-align:center;">${(e.date_from ? fmtD(e.date_from) : '')}</td>
-        <td style="font-size:6pt;text-align:center;">${(e.date_to ? fmtD(e.date_to) : '')}</td>
-        <td style="font-size:6pt;">${(e.position ? v(e.position) : '')}</td>
-        <td style="font-size:6pt;">${(e.dept_agency ? v(e.dept_agency) : '')}</td>
-        <td style="font-size:6pt;text-align:right;">${(e.monthly_salary ? '₱'+parseFloat(e.monthly_salary).toLocaleString() : '')}</td>
-        <td style="font-size:6pt;text-align:center;">${(e.salary_grade ? v(e.salary_grade) : '')}</td>
-        <td style="font-size:6pt;">${(e.status ? v(e.status) : '')}</td>
-        <td style="font-size:6pt;text-align:center;">${(e.govt_service ? v(e.govt_service) : '')}</td>
-      </tr>`).join('')}
-    </tbody>
-  </table>
-  <div style="font-size:5.5pt;font-style:italic;text-align:right;padding:1pt 2pt;">(Continue on separate sheet if necessary)</div>
-  <table style="margin-top:1pt;"><tr>
-    <td style="width:50%;border:none;"><div class="sig-box"></div><div style="font-size:5.5pt;text-align:center;">SIGNATURE &nbsp; (wet signature/e-signature/digital certificate)</div></td>
-    <td style="width:50%;border:none;padding-left:10pt;"><div class="sig-box"></div><div style="font-size:5.5pt;text-align:center;">DATE</div></td>
-  </tr></table>
-  <div class="pg-num">CS FORM 212 (Revised 2025), Page 2 of 4</div>
-  </div>`;
-
-  // ── PAGE 3 ──────────────────────────────────────────────────────
-  const page3 = `<div class="page">
-  ${pageHdr}
-  <!-- VI. Voluntary Work -->
-  <table><tr><td colspan="6" class="sec">VI. Voluntary Work or Involvement in Civic / Non-Government / People / Voluntary Organization/s</td></tr></table>
-  <table>
-    <thead>
-      <tr>
-        <th class="hdr" style="width:3%;">29.</th>
-        <th class="hdr" style="width:35%;">NAME &amp; ADDRESS OF ORGANIZATION<br><span style="font-size:4.5pt;font-weight:400;">(Write in full)</span></th>
-        <th class="hdr" style="width:12%;">INCLUSIVE DATES<br>From</th>
-        <th class="hdr" style="width:12%;">INCLUSIVE DATES<br>To</th>
-        <th class="hdr" style="width:10%;">NUMBER OF HOURS</th>
-        <th class="hdr" style="width:28%;">POSITION / NATURE OF WORK</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${vwPad.map(e=>`<tr>
-        <td></td>
-        <td style="font-size:6.5pt;font-weight:600;">${(e.org_name ? v(e.org_name) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.date_from ? fmtD(e.date_from) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.date_to ? fmtD(e.date_to) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.no_hours ? v(e.no_hours) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${(e.position ? v(e.position) : '')}</td>
-      </tr>`).join('')}
-    </tbody>
-  </table>
-  <div style="font-size:5.5pt;font-style:italic;text-align:right;padding:1pt 2pt;">(Continue on separate sheet if necessary)</div>
-
-  <!-- VII. L&D / Trainings -->
-  <table style="margin-top:1pt;"><tr><td colspan="7" class="sec">VII. Learning and Development (L&amp;D) Interventions / Training Programs Attended</td></tr></table>
-  <table>
-    <thead>
-      <tr>
-        <th class="hdr" style="width:3%;">30.</th>
-        <th class="hdr" style="width:32%;">TITLE OF L&amp;D INTERVENTIONS / TRAINING PROGRAMS<br><span style="font-size:4.5pt;font-weight:400;">(Write in full)</span></th>
-        <th class="hdr" style="width:11%;">INCLUSIVE DATES<br>From</th>
-        <th class="hdr" style="width:11%;">INCLUSIVE DATES<br>To</th>
-        <th class="hdr" style="width:8%;">NUMBER OF HOURS</th>
-        <th class="hdr" style="width:14%;">TYPE OF L&amp;D<br><span style="font-size:4.5pt;font-weight:400;">(Managerial/Supervisory/Technical/etc.)</span></th>
-        <th class="hdr" style="width:21%;">CONDUCTED / SPONSORED BY<br><span style="font-size:4.5pt;font-weight:400;">(Write in full)</span></th>
-      </tr>
-    </thead>
-    <tbody>
-      ${trPad.map(e=>`<tr>
-        <td></td>
-        <td style="font-size:6.5pt;font-weight:600;">${(e.title ? v(e.title) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.date_from ? fmtD(e.date_from) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.date_to ? fmtD(e.date_to) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;text-align:center;">${(e.no_hours ? v(e.no_hours) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${(e.ld_type ? v(e.ld_type) : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${(e.conducted_by ? v(e.conducted_by) : '')}</td>
-      </tr>`).join('')}
-    </tbody>
-  </table>
-  <div style="font-size:5.5pt;font-style:italic;text-align:right;padding:1pt 2pt;">(Continue on separate sheet if necessary)</div>
-
-  <!-- VIII. Other Information -->
-  <table style="margin-top:1pt;"><tr><td colspan="3" class="sec">VIII. Other Information</td></tr></table>
-  <table>
-    <thead>
-      <tr>
-        <th class="hdr" style="width:33%;">31. SPECIAL SKILLS and HOBBIES</th>
-        <th class="hdr" style="width:33%;">32. NON-ACADEMIC DISTINCTIONS / RECOGNITION<br><span style="font-size:4.5pt;font-weight:400;">(Write in full)</span></th>
-        <th class="hdr" style="width:34%;">33. MEMBERSHIP IN ASSOCIATION/ORGANIZATION<br><span style="font-size:4.5pt;font-weight:400;">(Write in full)</span></th>
-      </tr>
-    </thead>
-    <tbody>
-      ${Array.from({length:7}).map((_, i)=>`<tr>
-        <td style="font-size:6.5pt;font-weight:600;min-height:14pt;height:14pt;vertical-align:top;padding:2pt 2.5pt;">${(typeof skillsPad[i] === 'string' ? skillsPad[i] : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;min-height:14pt;height:14pt;vertical-align:top;padding:2pt 2.5pt;">${(typeof distinctPad[i] === 'string' ? distinctPad[i] : '')}</td>
-        <td style="font-size:6.5pt;font-weight:600;min-height:14pt;height:14pt;vertical-align:top;padding:2pt 2.5pt;">${(typeof membershipPad[i] === 'string' ? membershipPad[i] : '')}</td>
-      </tr>`).join('')}
-    </tbody>
-  </table>
-  <div style="font-size:5.5pt;font-style:italic;text-align:right;padding:1pt 2pt;">(Continue on separate sheet if necessary)</div>
-  <table style="margin-top:1pt;"><tr>
-    <td style="width:50%;border:none;"><div class="sig-box"></div><div style="font-size:5.5pt;text-align:center;">SIGNATURE &nbsp; (wet signature/e-signature/digital certificate)</div></td>
-    <td style="width:50%;border:none;padding-left:10pt;"><div class="sig-box"></div><div style="font-size:5.5pt;text-align:center;">DATE</div></td>
-  </tr></table>
-  <div class="pg-num">CS FORM 212 (Revised 2025), Page 3 of 4</div>
-  </div>`;
-
-  // ── PAGE 4 ──────────────────────────────────────────────────────
-  const ynRow = (num, label, yesKey, detKey, extraHtml) => `
-    <tr>
-      <td style="width:3%;font-size:6pt;font-weight:700;text-align:center;vertical-align:top;padding-top:3pt;">${num}</td>
-      <td style="font-size:6pt;line-height:1.4;padding:2pt 3pt;">${label}</td>
-      <td style="width:9%;text-align:center;padding:3pt 2pt;vertical-align:top;">
-        <span class="yn">${cb(q4[yesKey])}</span><span style="font-size:5.5pt;">YES</span>
-      </td>
-      <td style="width:9%;text-align:center;padding:3pt 2pt;vertical-align:top;">
-        <span class="yn">${cb(q4[yesKey]==='No'||(q4[yesKey]!=='Yes'&&q4[yesKey]!==true&&q4[yesKey]!=='1'&&q4[yesKey]!==1))}</span><span style="font-size:5.5pt;">NO</span>
-      </td>
-    </tr>
-    ${detKey?`<tr><td></td><td colspan="3" style="font-size:5.5pt;padding:1pt 3pt;border-top:none;">
-      If YES, give details: <span style="font-size:6.5pt;font-weight:700;border-bottom:0.4pt solid #000;display:inline-block;min-width:200pt;">${v(q4[detKey])}</span>
-    </td></tr>`:''}
-    ${extraHtml||''}`;
-
-  const page4 = `<div class="page">
-  ${pageHdr}
-  <table>
-    <thead>
-      <tr>
-        <th class="hdr" style="width:3%;">#</th>
-        <th class="hdr">QUESTION</th>
-        <th class="hdr" style="width:9%;text-align:center;">YES</th>
-        <th class="hdr" style="width:9%;text-align:center;">NO</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${ynRow('34a','Are you related by consanguinity or affinity to the appointing or recommending authority, or to the chief of bureau or office or to the person who has immediate supervision over you in the Office, Bureau or Department where you will be apppointed, <strong>within the third degree</strong>?','q34a','q34_details')}
-      ${ynRow('34b','Are you related by consanguinity or affinity to the appointing or recommending authority within the <strong>fourth degree</strong> (for Local Government Unit — Career Employees)?','q34b','')}
-      ${ynRow('35a','Have you ever been found guilty of any <strong>administrative offense</strong>?','q35a','q35a_details')}
-      ${ynRow('35b','Have you been <strong>criminally charged</strong> before any court?','q35b','',`<tr><td></td><td colspan="3" style="font-size:5.5pt;padding:1pt 3pt;border-top:none;">
-        If YES — Charges: <span style="font-size:6.5pt;font-weight:700;border-bottom:0.4pt solid #000;display:inline-block;min-width:100pt;">${v(q4.q35b_details)}</span>
-        &nbsp; Date Filed: <span style="font-size:6.5pt;font-weight:700;border-bottom:0.4pt solid #000;display:inline-block;min-width:60pt;">${fmtD(q4.q35b_date)}</span>
-        &nbsp; Status: <span style="font-size:6.5pt;font-weight:700;border-bottom:0.4pt solid #000;display:inline-block;min-width:70pt;">${v(q4.q35b_status)}</span>
-      </td></tr>`)}
-      ${ynRow('36','Have you ever been <strong>convicted of any crime</strong> or violation of any law, decree, ordinance or regulation by any court or tribunal?','q36','q36_details')}
-      ${ynRow('37','Have you ever been <strong>separated from the service</strong> in any of the following modes: resignation, retirement, dropped from the rolls, dismissal, termination, end of term, finished contract or phased out (abolition) in the public or private sector?','q37','q37_details')}
-      ${ynRow('38a','Have you ever been a <strong>candidate in a national or local election</strong> held within the last year (except Barangay election)?','q38a','q38a_details')}
-      ${ynRow('38b','Have you <strong>resigned from the government service</strong> during the three (3)-month period before the last election to promote/actively campaign for a national or local candidate?','q38b','q38b_details')}
-      ${ynRow('39','Have you acquired the status of an <strong>immigrant or permanent resident of another country</strong>?','q39','q39_details')}
-      <tr>
-        <td style="font-size:6pt;font-weight:700;text-align:center;vertical-align:top;padding-top:3pt;">40</td>
-        <td colspan="3" style="font-size:6pt;padding:2pt 3pt;">
-          Pursuant to: (a) Indigenous People's Act (RA 8371); (b) Magna Carta for Disabled Persons (RA 7277, as amended); and (c) Expanded Solo Parents Welfare Act (RA 11861):
-          <table style="border:none;margin-top:2pt;">
-            <tr>
-              <td style="border:none;font-size:5.5pt;width:55%;">a. Are you a member of any <strong>indigenous group</strong>?</td>
-              <td style="border:none;"><span class="yn">${cb(q4.q40a)}</span><span style="font-size:5.5pt;">YES</span></td>
-              <td style="border:none;"><span class="yn">${cb(!q4.q40a)}</span><span style="font-size:5.5pt;">NO</span></td>
-              <td style="border:none;font-size:5.5pt;">If YES: <span style="font-size:6.5pt;font-weight:700;border-bottom:0.4pt solid #000;display:inline-block;min-width:60pt;">${v(q4.q40a_detail)}</span></td>
-            </tr>
-            <tr>
-              <td style="border:none;font-size:5.5pt;">b. Are you a <strong>person with disability</strong>?</td>
-              <td style="border:none;"><span class="yn">${cb(q4.q40b)}</span><span style="font-size:5.5pt;">YES</span></td>
-              <td style="border:none;"><span class="yn">${cb(!q4.q40b)}</span><span style="font-size:5.5pt;">NO</span></td>
-              <td style="border:none;font-size:5.5pt;">If YES, ID No.: <span style="font-size:6.5pt;font-weight:700;border-bottom:0.4pt solid #000;display:inline-block;min-width:60pt;">${v(q4.q40b_detail)}</span></td>
-            </tr>
-            <tr>
-              <td style="border:none;font-size:5.5pt;">c. Are you a <strong>solo parent</strong>?</td>
-              <td style="border:none;"><span class="yn">${cb(q4.q40c)}</span><span style="font-size:5.5pt;">YES</span></td>
-              <td style="border:none;"><span class="yn">${cb(!q4.q40c)}</span><span style="font-size:5.5pt;">NO</span></td>
-              <td style="border:none;font-size:5.5pt;">If YES, ID No.: <span style="font-size:6.5pt;font-weight:700;border-bottom:0.4pt solid #000;display:inline-block;min-width:60pt;">${v(q4.q40c_detail)}</span></td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </tbody>
-  </table>
-
-  <!-- 41. References -->
-  <table style="margin-top:1pt;"><tr><td colspan="4" class="sec">41. References</td></tr></table>
-  <table>
-    <thead>
-      <tr>
-        <th class="hdr" style="width:3%;"></th>
-        <th class="hdr" style="width:32%;">NAME</th>
-        <th class="hdr" style="width:42%;">OFFICE / RESIDENTIAL ADDRESS</th>
-        <th class="hdr" style="width:23%;">CONTACT NO. AND/OR EMAIL</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${charRefPad.map(r=>`<tr>
-        <td></td>
-        <td style="font-size:6.5pt;font-weight:600;min-height:11pt;">${v(r.name)}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${v(r.address)}</td>
-        <td style="font-size:6.5pt;font-weight:600;">${v(r.tel)}</td>
-      </tr>`).join('')}
-    </tbody>
-  </table>
-
-  <!-- 42. Declaration + Signature -->
-  <table style="margin-top:1pt;">
-    <tr>
-      <td style="width:3%;font-size:6pt;font-weight:700;">42.</td>
-      <td style="font-size:5.5pt;line-height:1.5;">
-        I declare under oath that I have personally accomplished this Personal Data Sheet which is a true, correct and complete statement pursuant to the provisions of pertinent laws, rules and regulations of the Republic of the Philippines. I authorize the agency head/authorized representative to verify/validate the contents stated herein. I agree that any misrepresentation made in this document and its attachments shall cause the filing of administrative/criminal case/s against me.
-      </td>
-    </tr>
-  </table>
-
-  <!-- Signature / Photo / Thumbmark -->
-  <table style="margin-top:1pt;">
-    <tr>
-      <td style="width:55%;padding:3pt;" valign="top">
-        <div style="font-size:5.5pt;margin-bottom:2pt;">Government Issued ID (i.e. Passport, GSIS, SSS, PRC, Driver's License, etc.)</div>
-        <div style="font-size:5.5pt;">ID Type: <span style="font-size:6.5pt;font-weight:700;border-bottom:0.4pt solid #000;display:inline-block;min-width:120pt;">${v(pi.gov_id_type)}</span></div>
-        <div style="font-size:5.5pt;margin-top:2pt;">ID/License No.: <span style="font-size:6.5pt;font-weight:700;border-bottom:0.4pt solid #000;display:inline-block;min-width:100pt;">${v(pi.gov_id_no)}</span></div>
-        <div style="font-size:5.5pt;margin-top:2pt;">Date/Place of Issuance: <span style="font-size:6.5pt;font-weight:700;border-bottom:0.4pt solid #000;display:inline-block;min-width:100pt;">${v(pi.gov_id_issuance)}</span></div>
-        <div style="margin-top:10pt;height:22pt;border-top:0.5pt solid #000;"></div>
-        <div style="font-size:5.5pt;text-align:center;">SIGNATURE &nbsp; (wet signature/e-signature/digital certificate)</div>
-        <div style="font-size:5.5pt;margin-top:2pt;">Date Accomplished: <span style="border-bottom:0.4pt solid #000;display:inline-block;min-width:80pt;">${v(pi.date_accomplished)}</span></div>
-      </td>
-      <td style="width:27%;padding:3pt;text-align:center;vertical-align:top;">
-        <div class="photo">PHOTO<br><span style="font-size:5pt;">(passport size)</span></div>
-        <div style="font-size:5pt;margin-top:2pt;">Signature (Sign inside the box)</div>
-        <div style="height:16pt;border:0.5pt solid #000;margin-top:2pt;"></div>
-      </td>
-      <td style="width:18%;padding:3pt;text-align:center;vertical-align:top;">
-        <div class="thumb">RIGHT<br>THUMBMARK</div>
-      </td>
-    </tr>
-  </table>
-
-  <!-- Oath -->
-  <table style="margin-top:1pt;">
-    <tr>
-      <td style="font-size:5.5pt;line-height:1.5;padding:3pt;">
-        SUBSCRIBED AND SWORN to before me this _________ day of ___________________, affiant exhibiting his/her validly issued government ID as indicated above.
-        <div style="margin-top:8pt;border-top:0.5pt solid #000;width:45%;padding-top:1pt;text-align:center;font-size:5.5pt;">(wet signature/e-signature/digital certificate)</div>
-        <div style="font-size:5.5pt;text-align:left;margin-top:1pt;padding-left:0;">Person Administering Oath</div>
-      </td>
-    </tr>
-  </table>
-  <div class="pg-num">CS FORM 212 (Revised 2025), Page 4 of 4</div>
-  </div>`;
-
-  return `<!DOCTYPE html><html><head>
-    <meta charset="UTF-8"/>
-    <title>PDS — CS Form 212 (Revised 2025)</title>
-    <style>${css}</style>
-  </head><body>
-    ${page1}${page2}${page3}${page4}
-  </body></html>`;
+// Helper to print either from form data or saved database data
+async function fetchAndPrintPDS(source = 'saved') {
+  try {
+    let html;
+    if (source === 'form') {
+      // Collect from current form
+      const d = collectPDSFormData();
+      html = buildPDSPrintHTML(d, null);
+      if (!html || html.length < 100) {
+        showToast('❌ Error generating PDS: No HTML output', 'error');
+        return;
+      }
+    } else {
+      // Fetch from database
+      const r = await fetch('Employee_portal.php?action=get_pds');
+      const j = await r.json();
+      if (!j.success || !j.data) { 
+        showToast('❌ No saved PDS found.', 'error'); 
+        return; 
+      }
+      html = buildPDSPrintHTML(j.data, j.employee || null);
+      if (!html || html.length < 100) {
+        showToast('❌ Error generating PDS from saved data', 'error');
+        return;
+      }
+    }
+    const w = window.open('', '_blank', 'width=960,height=1100');
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 600);
+  } catch(e) {
+    showToast('❌ Print error: ' + e.message, 'error');
+    console.error('PDS Print Error:', e);
+  }
 }
+
+// Collect all PDS form data into structured object for printing
+function collectPDSFormData() {
+  try {
+    // Collect education, civil service, work experience, voluntary work, trainings
+    const edu = collectRows('pds_edu_list', ['level','school','degree','honors']) || [];
+    const civ = collectRows('pds_cs_list', ['eligibility','rating','exam_date','exam_place','license_no','license_validity']) || [];
+    const we  = collectRows('pds_we_list', ['date_from','date_to','position','dept_agency','salary_grade','status','govt_service','monthly_salary']) || [];
+    const vw  = collectRows('pds_vw_list', ['org_name','date_from','date_to','no_hours','position']) || [];
+    const tr  = collectRows('pds_tr_list', ['title','date_from','date_to','no_hours','ld_type','conducted_by']) || [];
+    
+    // Collect other information lists
+    const skills = oiGetList('pds_skills_list') || [];
+    const disting = oiGetList('pds_distinctions_list') || [];
+    const membr = oiGetList('pds_memberships_list') || [];
+    
+    // Collect Q34-Q40 (integrity questions)
+    const q4 = collectRows('pds_q_list', ['question','answer','details']) || [];
+    
+    // Collect references
+    const refs = collectRows('pds_ref_list', ['name','address','tel']) || [];
+    
+    // Build data object for print
+    const d = {
+      personal_info: JSON.stringify({
+        last_name:pdsGet('pds_last_name'), 
+        first_name:pdsGet('pds_first_name'),
+        middle_name:pdsGet('pds_middle_name'), 
+        suffix:pdsGet('pds_suffix'),
+        dob:pdsGet('pds_dob'), 
+        pob:pdsGet('pds_pob'),
+        sex:pdsGet('pds_sex'), 
+        civil_status:pdsGet('pds_civil_status'),
+        height:pdsGet('pds_height'), 
+        weight:pdsGet('pds_weight'), 
+        blood_type:pdsGet('pds_blood_type'),
+        umid:pdsGet('pds_umid'), 
+        pagibig:pdsGet('pds_pagibig'), 
+        philhealth:pdsGet('pds_philhealth'),
+        psn:pdsGet('pds_psn'), 
+        tin:pdsGet('pds_tin'), 
+        agency_no:pdsGet('pds_agency_no'),
+        citizenship: pdsRadioGet('pds_citizenship') === 'Dual' ? 'Dual Citizenship' : 'Filipino',
+        dual_by:pdsGet('pds_dual_by'), 
+        dual_country:pdsGet('pds_dual_country'),
+        res_housenum:pdsGet('pds_res_housenum'), 
+        res_street:pdsGet('pds_res_street'),
+        res_subdivision:pdsGet('pds_res_subdivision'), 
+        res_barangay:pdsGet('pds_res_barangay'),
+        res_city:pdsGet('pds_res_city'), 
+        res_province:pdsGet('pds_res_province'), 
+        res_zip:pdsGet('pds_res_zip'),
+        perm_same: document.getElementById('pds_perm_same')?.checked || false,
+        perm_housenum:pdsGet('pds_perm_housenum'), 
+        perm_street:pdsGet('pds_perm_street'),
+        perm_subdivision:pdsGet('pds_perm_subdivision'), 
+        perm_barangay:pdsGet('pds_perm_barangay'),
+        perm_city:pdsGet('pds_perm_city'), 
+        perm_province:pdsGet('pds_perm_province'), 
+        perm_zip:pdsGet('pds_perm_zip'),
+        tel:pdsGet('pds_tel'), 
+        mobile:pdsGet('pds_mobile'), 
+        email:pdsGet('pds_email'),
+        gov_id_type:pdsGet('pds_gov_id_type'), 
+        gov_id_no:pdsGet('pds_gov_id_no'),
+      }),
+      family_background: JSON.stringify({
+        sp_surname:pdsGet('pds_sp_surname'), 
+        sp_firstname:pdsGet('pds_sp_firstname'),
+        sp_ext:pdsGet('pds_sp_ext'), 
+        sp_middle:pdsGet('pds_sp_middle'),
+        sp_occupation:pdsGet('pds_sp_occupation'), 
+        sp_employer:pdsGet('pds_sp_employer'),
+        sp_biz_addr:pdsGet('pds_sp_biz_addr'), 
+        sp_tel:pdsGet('pds_sp_tel'),
+        fa_surname:pdsGet('pds_fa_surname'), 
+        fa_firstname:pdsGet('pds_fa_firstname'),
+        fa_ext:pdsGet('pds_fa_ext'), 
+        fa_middle:pdsGet('pds_fa_middle'),
+        mo_surname:pdsGet('pds_mo_surname'), 
+        mo_firstname:pdsGet('pds_mo_firstname'),
+        mo_middle:pdsGet('pds_mo_middle'),
+      }),
+      education: JSON.stringify(edu),
+      civil_service: JSON.stringify(civ),
+      work_experience: JSON.stringify(we),
+      voluntary_work: JSON.stringify(vw),
+      trainings: JSON.stringify(tr),
+      other_info: JSON.stringify({ 
+        skills_arr: skills, 
+        distinctions_arr: disting, 
+        memberships_arr: membr 
+      }),
+      q4_questions: JSON.stringify(q4),
+      pds_references: JSON.stringify(refs),
+    };
+    
+    return d;
+  } catch(e) {
+    console.error('Error collecting PDS form data:', e);
+    showToast('❌ Error collecting form data: ' + e.message, 'error');
+    return {};
+  }
+}
+
 
 function buildAndPrintPDS(d, empRow) {
   const html = buildPDSPrintHTML(d, empRow);
@@ -6546,7 +6099,6 @@ function buildSALNPrintHTML(d, emp, openPrint) {
   }
   return html;
 }
-*/
 
 
 

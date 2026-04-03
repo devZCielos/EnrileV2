@@ -27,7 +27,7 @@ if (!in_array($_SESSION['user_role'] ?? '', $allowedRoles)) {
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
 
-$action = $_GET['action'] ?? '';
+$action = $_GET['action'] ?? ($_POST['action'] ?? '');
 if ($action) {
     header('Content-Type: application/json');
     if ($_SERVER['REQUEST_METHOD'] === 'POST') { csrf_verify(true); }
@@ -114,7 +114,7 @@ if ($action) {
                     updated_at       DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     INDEX idx_sr_emp (employee_id)
                 ) ENGINE=InnoDB");
-                $stmt = $pdo->prepare("SELECT * FROM service_records WHERE employee_id=? ORDER BY record_date ASC, sr_id ASC");
+                $stmt = $pdo->prepare("SELECT * FROM service_records WHERE employee_id=? ORDER BY date_from ASC, sr_id ASC");
                 $stmt->execute([$empId]);
                 $rows = $stmt->fetchAll();
                 $emp  = $pdo->prepare("SELECT e.*,d.name AS dept_name FROM employees e LEFT JOIN departments d ON e.department_id=d.department_id WHERE e.employee_id=?");
@@ -143,6 +143,18 @@ if ($action) {
                 foreach (['date_from','date_to','separation_date'] as $dk) {
                     if (empty($fields[$dk])) $fields[$dk] = null;
                 }
+
+                // Apply defaults for newly added entries.
+                if (!$srId) {
+                  if (empty($fields['date_from'])) {
+                    $dh = $pdo->prepare("SELECT date_hired FROM employees WHERE employee_id=? LIMIT 1");
+                    $dh->execute([$empId]);
+                    $fields['date_from'] = $dh->fetchColumn() ?: null;
+                  }
+                  if ($fields['branch'] === '')  $fields['branch']  = 'Local Government Unit';
+                  if ($fields['station'] === '') $fields['station'] = 'Enrile, Cagayan';
+                }
+
                 if ($srId) {
                     // Update
                     $set = implode(', ', array_map(fn($k)=>"`$k`=?", array_keys($fields)));
@@ -206,8 +218,11 @@ if ($action) {
                 break;
         }
     } catch (PDOException $e) {
-        error_log('[HRMS] service_records.php: '.$e->getMessage());
-        echo json_encode(['success'=>false,'message'=>'A database error occurred.']);
+      error_log('[HRMS] service_records.php PDO: '.$e->getMessage());
+      echo json_encode(['success'=>false,'message'=>'A database error occurred.']);
+    } catch (Throwable $e) {
+      error_log('[HRMS] service_records.php Throwable: '.$e->getMessage());
+      echo json_encode(['success'=>false,'message'=>'A server error occurred.']);
     }
     exit();
 }
@@ -270,10 +285,10 @@ $roleLabel  = $roleLabels[$_SESSION['user_role']] ?? 'Admin';
     .nav-icon{width:30px;height:30px;border-radius:8px;background:rgba(255,255,255,.10);display:flex;align-items:center;justify-content:center;font-size:.95rem;flex-shrink:0;}
     .nav-badge{margin-left:auto;background:#ef4444;color:#fff;font-size:.60rem;font-weight:800;padding:2px 6px;border-radius:20px;}
     .sidebar-footer{padding:14px 16px;border-top:1px solid rgba(255,255,255,.12);}
-    .user-pill{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
-    .user-avatar{width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.20);display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;font-size:.85rem;flex-shrink:0;}
-    .user-name{font-size:.82rem;font-weight:700;color:#fff;}
-    .user-role{font-size:.65rem;color:rgba(255,255,255,.55);text-transform:capitalize;}
+    .user-pill{display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.10);border:1.5px solid rgba(255,255,255,.18);border-radius:14px;padding:8px 10px;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);}
+    .user-avatar{width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.18);border:2px solid rgba(255,255,255,.40);display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;font-size:.95rem;flex-shrink:0;}
+    .user-name{font-size:.90rem;font-weight:800;color:#fff;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .user-role{font-size:.72rem;color:rgba(255,255,255,.72);font-weight:700;text-transform:none;line-height:1.15;margin-top:2px;}
     .logout-btn{width:100%;padding:8px 12px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.25);border-radius:var(--radius-sm);color:#fca5a5;font-family:'Nunito',sans-serif;font-size:.82rem;font-weight:700;cursor:pointer;transition:all .2s;margin-top:4px;}
     .logout-btn:hover{background:rgba(239,68,68,.22);}
     /* ── Main ── */
@@ -367,8 +382,8 @@ $roleLabel  = $roleLabels[$_SESSION['user_role']] ?? 'Admin';
     .empty-state p{font-size:.90rem;font-weight:600;}
     .empty-state small{font-size:.78rem;}
     /* ── Summary chips ── */
-    .summary-chips{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;}
-    .s-chip{padding:8px 16px;border-radius:var(--radius-sm);font-size:.80rem;font-weight:700;display:flex;align-items:center;gap:6px;}
+      .summary-chips{display:grid;grid-template-columns:max-content max-content minmax(0,1fr) max-content;gap:10px;margin-bottom:18px;align-items:stretch;}
+      .s-chip{padding:8px 12px;border-radius:var(--radius-sm);font-size:.76rem;font-weight:700;display:flex;align-items:center;gap:6px;white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis;}
     .s-chip.blue{background:#eff6ff;color:#1e40af;}
     .s-chip.green{background:#f0fdf4;color:#166534;}
     .s-chip.amber{background:#fffbeb;color:#d97706;}
@@ -420,9 +435,12 @@ $roleLabel  = $roleLabels[$_SESSION['user_role']] ?? 'Admin';
     <a class="nav-item" href="settings.php"><div class="nav-icon">⚙️</div>Settings</a>
   </nav>
   <div class="sidebar-footer">
-    <div class="user-pill">
+    <div class="user-pill" style="margin-bottom:0;">
       <div class="user-avatar"><?= strtoupper(substr($_SESSION['user_name']??'A',0,2)) ?></div>
-      <div><div class="user-name"><?= htmlspecialchars($_SESSION['user_name']??'') ?></div><div class="user-role"><?= htmlspecialchars($_SESSION['user_role']??'') ?></div></div>
+      <div>
+        <div class="user-name"><?= htmlspecialchars($_SESSION['user_name'] ?? 'Admin') ?></div>
+        <div class="user-role"><?= htmlspecialchars($roleLabel) ?></div>
+      </div>
     </div>
   </div>
 </aside>
@@ -508,7 +526,7 @@ $roleLabel  = $roleLabels[$_SESSION['user_role']] ?? 'Admin';
           <div style="font-size:.75rem;color:var(--gray-400);margin-top:2px;" id="vpSub">Select an employee from the list to view their service records.</div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;" id="vpActions">
-          <button class="btn btn-outline" onclick="loadSRRequests()" id="btnRequests" style="display:none;">📨 <span id="reqBadgeTxt">Pending Requests</span></button>
+          <button class="btn btn-outline" onclick="loadSRRequests()" id="btnRequests">📨 <span id="reqBadgeTxt">Pending Requests</span></button>
           <button class="btn btn-primary" onclick="openAddModal()" id="btnAdd" style="display:none;">➕ Add Entry</button>
           <button class="btn btn-green" onclick="printServiceRecord()" id="btnPrint" style="display:none;">🖨️ Print</button>
         </div>
@@ -621,6 +639,8 @@ $roleLabel  = $roleLabels[$_SESSION['user_role']] ?? 'Admin';
 <!-- ══ TOAST ══ -->
 <div class="toast-wrap" id="toastWrap"></div>
 
+<script src="../config/service_record_print_template.js?v=1"></script>
+
 <script>
 const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
 const API = 'service_records.php';
@@ -629,12 +649,18 @@ let currentEmpName = '';
 let empPage = 1;
 let empSearchTimer = null;
 let deleteTarget = null;
+let currentEmpData = null;
+let currentView = 'requests';
+let lastPendingReqCount = 0;
+let srReqPollHandle = null;
 
 // ── Init ───────────────────────────────────────────────────────────────────
 (async function init() {
   document.getElementById('tbDate').textContent = new Date().toLocaleDateString('en-PH',{weekday:'short',year:'numeric',month:'short',day:'numeric'});
   await loadDepts();
   await loadEmployees(1);
+  await loadSRRequests();
+  startSRRequestAutoRefresh();
 })();
 
 // ── Departments ────────────────────────────────────────────────────────────
@@ -699,6 +725,7 @@ async function loadEmployees(page) {
 async function selectEmployee(id, name, position, dept) {
   currentEmpId   = id;
   currentEmpName = name;
+  currentView = 'records';
   // Highlight row
   document.querySelectorAll('.emp-row').forEach(r => r.classList.remove('active'));
   event.currentTarget.classList.add('active');
@@ -707,7 +734,6 @@ async function selectEmployee(id, name, position, dept) {
   document.getElementById('vpSub').textContent   = `${position} · ${dept}`;
   document.getElementById('btnAdd').style.display      = 'inline-flex';
   document.getElementById('btnPrint').style.display    = 'inline-flex';
-  document.getElementById('btnRequests').style.display = 'inline-flex';
   // Load records
   await loadRecords();
 }
@@ -715,6 +741,7 @@ async function selectEmployee(id, name, position, dept) {
 // ── Load Service Records ───────────────────────────────────────────────────
 async function loadRecords() {
   if (!currentEmpId) return;
+  currentView = 'records';
   const vb = document.getElementById('viewBody');
   vb.innerHTML = '<div class="empty-state"><div class="e-icon">⏳</div><p>Loading records…</p></div>';
 
@@ -724,6 +751,7 @@ async function loadRecords() {
 
   const emp = r.employee || {};
   const records = r.records || [];
+  currentEmpData = emp;
 
   // Summary
   const hired    = emp.date_hired ? fmt(emp.date_hired) : '—';
@@ -742,8 +770,7 @@ async function loadRecords() {
       <table class="sr-table">
         <thead>
           <tr>
-            <th rowspan="2">From</th>
-            <th rowspan="2">To</th>
+            <th colspan="2" style="text-align:center;background:#dbeafe;color:#1e40af;">Service</th>
             <th colspan="3" style="text-align:center;background:#dbeafe;color:#1e40af;">Record of Appointment</th>
             <th colspan="2" style="text-align:center;background:#dcfce7;color:#166534;">Office / Entity</th>
             <th rowspan="2">LVBS W/O Pay</th>
@@ -751,6 +778,8 @@ async function loadRecords() {
             <th rowspan="2" style="text-align:center;">Actions</th>
           </tr>
           <tr>
+            <th>From</th>
+            <th>To</th>
             <th>Designation</th>
             <th>Status</th>
             <th>Salary per Annum (₱)</th>
@@ -763,21 +792,20 @@ async function loadRecords() {
         <tbody>`;
 
   if (!records.length) {
-    html += `<tr class="no-records"><td colspan="12">No service record entries yet. Click <strong>➕ Add Entry</strong> to begin.</td></tr>`;
+    html += `<tr class="no-records"><td colspan="11">No service record entries yet. Click <strong>➕ Add Entry</strong> to begin.</td></tr>`;
   } else {
     records.forEach(sr => {
       html += `<tr>
-        <td style="white-space:nowrap;">${sr.record_date ? fmt(sr.record_date) : '—'}</td>
+        <td style="white-space:nowrap;">${sr.date_from ? fmt(sr.date_from) : '—'}</td>
+        <td style="white-space:nowrap;">${sr.date_to ? fmt(sr.date_to) : '—'}</td>
         <td style="font-weight:600;">${esc(sr.designation)||'—'}</td>
-        <td>${esc(sr.department)||'—'}</td>
-        <td>${esc(sr.branch)||'—'}</td>
         <td><span style="padding:2px 8px;border-radius:12px;font-size:.70rem;font-weight:800;background:#eff6ff;color:#1e40af;">${esc(sr.status)||'—'}</span></td>
         <td style="text-align:right;font-weight:700;">${sr.salary ? '₱'+parseFloat(sr.salary).toLocaleString('en-PH',{minimumFractionDigits:2}) : '—'}</td>
+        <td>${esc(shortBranch(sr.branch))||'—'}</td>
         <td>${esc(sr.station)||'—'}</td>
-        <td>${esc(sr.gov_service)||'—'}</td>
+        <td>${esc(sr.lvbs_wo_pay)||'—'}</td>
         <td style="white-space:nowrap;">${sr.separation_date ? fmt(sr.separation_date) : '—'}</td>
         <td>${esc(sr.separation_cause)||'—'}</td>
-        <td style="font-size:.75rem;color:var(--gray-600);">${esc(sr.remarks)||'—'}</td>
         <td style="white-space:nowrap;text-align:center;">
           <button class="btn btn-outline btn-sm" onclick="openEditModal(${sr.sr_id})" title="Edit">✏️</button>
           <button class="btn btn-danger btn-sm" onclick="openDeleteModal(${sr.sr_id},'${(sr.designation||'this entry').replace(/'/g,"\\'")}')" title="Delete">🗑️</button>
@@ -793,12 +821,39 @@ async function loadRecords() {
 // ── Helpers ────────────────────────────────────────────────────────────────
 function fmt(d) {
   if (!d) return '—';
-  try { return new Date(d+'T00:00:00').toLocaleDateString('en-PH',{year:'numeric',month:'short',day:'numeric'}); }
-  catch(e) { return d; }
+  try {
+    const raw = String(d).trim();
+    const hasTime = raw.includes(':');
+    const normalized = hasTime
+      ? raw.replace(' ', 'T')
+      : raw + 'T00:00:00';
+    const dt = new Date(normalized);
+    if (Number.isNaN(dt.getTime())) return raw;
+    return hasTime
+      ? dt.toLocaleString('en-PH', {
+          year:'numeric',
+          month:'short',
+          day:'numeric',
+          hour:'numeric',
+          minute:'2-digit'
+        })
+      : dt.toLocaleDateString('en-PH', {
+          year:'numeric',
+          month:'short',
+          day:'numeric'
+        });
+  } catch(e) { return d; }
 }
 function esc(s) {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function shortBranch(v) {
+  const src = String(v || '').trim();
+  if (!src) return '';
+  const norm = src.toLowerCase().replace(/[^a-z]/g, '');
+  if (norm === 'localgovernmentunit') return 'LGU';
+  return src;
 }
 function computeYears(dateHired) {
   if (!dateHired) return '—';
@@ -815,13 +870,13 @@ function openAddModal() {
   document.getElementById('modalTitle').textContent = 'Add Service Record Entry';
   document.getElementById('modalSub').textContent   = currentEmpName;
   document.getElementById('fSrId').value       = '';
-  document.getElementById('fDateFrom').value   = '';
+  document.getElementById('fDateFrom').value   = (currentEmpData && currentEmpData.date_hired) ? currentEmpData.date_hired : '';
   document.getElementById('fDateTo').value     = '';
-  document.getElementById('fDesignation').value= '';
-  document.getElementById('fStatus').value     = '';
+  document.getElementById('fDesignation').value= (currentEmpData && currentEmpData.position_title) ? currentEmpData.position_title : '';
+  document.getElementById('fStatus').value     = (currentEmpData && currentEmpData.employment_type) ? currentEmpData.employment_type : '';
   document.getElementById('fSalary').value     = '';
-  document.getElementById('fBranch').value     = '';
-  document.getElementById('fStation').value    = '';
+  document.getElementById('fBranch').value     = 'Local Government Unit';
+  document.getElementById('fStation').value    = 'Enrile, Cagayan';
   document.getElementById('fLvbs').value       = '';
   document.getElementById('fSepDate').value    = '';
   document.getElementById('fSepCause').value   = '';
@@ -876,17 +931,32 @@ async function saveRecord() {
 
   try {
     fd.append('csrf_token', CSRF_TOKEN);
-    const r = await fetch(API, {method:'POST', body:fd}).then(r=>r.json());
+    const res = await fetch(API, {method:'POST', body:fd});
+    const raw = await res.text();
+    let r = null;
+    try {
+      r = JSON.parse(raw);
+    } catch (parseErr) {
+      throw new Error('Invalid server response');
+    }
+
     if (r.success) {
       showToast('✅ ' + r.message, 'success');
       closeModal();
-      await loadRecords();
-      await loadEmployees(empPage);
+
+      // Refresh UI, but do not treat refresh hiccups as save failure.
+      try {
+        await loadRecords();
+        await loadEmployees(empPage);
+      } catch (refreshErr) {
+        console.warn('Saved record but refresh failed:', refreshErr);
+      }
     } else {
       showToast('❌ ' + (r.message||'Save failed.'), 'error');
     }
   } catch(e) {
-    showToast('❌ Network error.', 'error');
+    console.error('saveRecord error:', e);
+    showToast('❌ Failed to save record. Please try again.', 'error');
   } finally {
     btn.disabled = false; btn.textContent = '💾 Save Record';
   }
@@ -937,7 +1007,11 @@ async function printServiceRecord() {
 
   const emp     = r.employee || {};
   const records = r.records  || [];
-  buildAndPrintSR(emp, records);
+  if (window.SRPrintTemplate && typeof window.SRPrintTemplate.print === 'function') {
+    window.SRPrintTemplate.print(emp, records);
+  } else {
+    buildAndPrintSR(emp, records);
+  }
 }
 
 function buildSRPageHTML(emp, records, pageNum, totalPages, sliceStart, sliceEnd) {
@@ -952,47 +1026,47 @@ function buildSRPageHTML(emp, records, pageNum, totalPages, sliceStart, sliceEnd
 
   const rows = pageRecs.map(sr => `
     <tr>
-      <td>${sr.date_from ? fmtPrint(sr.date_from) : ''}</td>
-      <td>${sr.date_to   ? fmtPrint(sr.date_to)   : ''}</td>
-      <td>${esc(sr.designation)||''}</td>
-      <td style="text-align:center;">${esc(sr.status)||''}</td>
-      <td style="text-align:right;">${sr.salary ? parseFloat(sr.salary).toLocaleString('en-PH',{minimumFractionDigits:2}) : ''}</td>
-      <td>${esc(sr.branch)||''}</td>
-      <td>${esc(sr.station)||''}</td>
-      <td style="text-align:center;">${esc(sr.lvbs_wo_pay)||''}</td>
-      <td style="text-align:center;">${sr.separation_date ? fmtPrint(sr.separation_date) : ''}</td>
-      <td>${esc(sr.separation_cause)||''}</td>
+      <td>${cellValue(sr.date_from ? fmtPrint(sr.date_from) : '')}</td>
+      <td>${cellValue(sr.date_to   ? fmtPrint(sr.date_to)   : '')}</td>
+      <td>${cellValue(esc(sr.designation)||'')}</td>
+      <td style="text-align:center;">${cellValue(esc(sr.status)||'')}</td>
+      <td style="text-align:right;">${cellValue(sr.salary ? parseFloat(sr.salary).toLocaleString('en-PH',{minimumFractionDigits:2}) : '')}</td>
+      <td>${cellValue(esc(shortBranch(sr.branch))||'')}</td>
+      <td>${cellValue(esc(sr.station)||'')}</td>
+      <td style="text-align:center;">${cellValue(esc(sr.lvbs_wo_pay)||'')}</td>
+      <td style="text-align:center;">${cellValue(sr.separation_date ? fmtPrint(sr.separation_date) : '')}</td>
+      <td>${cellValue(esc(sr.separation_cause)||'')}</td>
     </tr>`).join('');
 
   // Fill blank rows to ensure proper table height (min 15 data rows per page)
-  const minRows = 15;
+  const minRows = 26;
   let blankRows = '';
   for (let i = pageRecs.length; i < minRows; i++) {
-    blankRows += '<tr><td>&nbsp;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>';
+    blankRows += '<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>';
   }
 
   return `
   <div class="sr-page">
     <!-- HEADER -->
-    <table class="hdr-tbl">
-      <tr>
-        <td rowspan="6" class="logo-cell">
-          <img src="../images/Enrile.png" alt="LGU" class="logo-img" onerror="this.style.display='none'"/>
-        </td>
-        <td class="hdr-main">
-          <div class="hdr-republic">Republic of the Philippines</div>
-          <div class="hdr-province">Province of Cagayan</div>
-          <div class="hdr-muni">Municipality of Enrile</div>
-          <div class="hdr-brand">ONE ENRILE</div>
-          <div class="hdr-office">Office of the Municipal Mayor</div>
-        </td>
-      </tr>
-    </table>
+    <div class="hdr-flex">
+      <img src="../images/Enrile.png" alt="LGU Enrile" class="hdr-logo" onerror="this.style.display='none'"/>
+      <div class="hdr-main">
+        <div class="hdr-republic">Republic of the Philippines</div>
+        <div class="hdr-province">Province of Cagayan</div>
+        <div class="hdr-muni">Municipality of Enrile</div>
+        <div class="hdr-brand">ONE ENRILE</div>
+      </div>
+      <img src="../images/Peanut.png" alt="Peanut Capital" class="hdr-logo" onerror="this.style.display='none'"/>
+    </div>
+    <div class="hdr-line-wrap">
+      <img src="../images/line.png" alt="Header line" class="hdr-line" onerror="this.style.display='none'"/>
+    </div>
+    <div class="hdr-office">Office of the Municipal Mayor</div>
 
     <!-- GSIS / TIN -->
     <div class="meta-row">
       <div class="meta-item"><em>GSIS BP No: ${gsisBp}</em></div>
-      <div class="meta-item"><em>Tax Identification No. ${tin}</em></div>
+      <div class="meta-item"><em>Tax Identification No.: ${tin}</em></div>
     </div>
 
     <!-- TITLE -->
@@ -1070,6 +1144,15 @@ function buildSRPageHTML(emp, records, pageNum, totalPages, sliceStart, sliceEnd
         </td>
       </tr>
     </table>
+    <!-- BOTTOM BAR -->
+    <div class="btm-bar">
+      <img src="../images/Bagong_Pilipinas.png" alt="Bagong Pilipinas" class="btm-logo" onerror="this.style.display='none'"/>
+      <div class="btm-motto">&ldquo;OHANA: Awan Na Matalan, Awan Nga Kalippanan&rdquo;</div>
+      <img src="../images/Enrile@175.png" alt="Enrile @175" class="btm-logo btm-logo-right" onerror="this.style.display='none'"/>
+    </div>
+    <div class="btm-line-wrap">
+      <img src="../images/line.png" alt="" class="btm-line" onerror="this.style.display='none'"/>
+    </div>
     <div class="page-num">Page ${pageNum} of ${totalPages}</div>
   </div>`;
 }
@@ -1082,8 +1165,12 @@ function fmtPrint(d) {
   } catch(e) { return d; }
 }
 
+function cellValue(value) {
+  return value ? value : '&nbsp;';
+}
+
 function buildAndPrintSR(emp, records) {
-  const ROWS_PER_PAGE = 15;
+  const ROWS_PER_PAGE = 26;
   const totalPages = Math.max(1, Math.ceil(records.length / ROWS_PER_PAGE));
 
   let pages = '';
@@ -1093,65 +1180,78 @@ function buildAndPrintSR(emp, records) {
 
   const css = `
     * { box-sizing:border-box; margin:0; padding:0; }
-    body { font-family:'Century Gothic','Calibri',sans-serif; font-size:9pt; color:#000; background:#fff; }
-    @page { size:legal portrait; margin:12mm 14mm; }
-    @media print { .sr-page { page-break-after:always; } .sr-page:last-child { page-break-after:avoid; } }
+    body { font-family:'Century Gothic','Calibri',sans-serif; font-size:10.5pt; color:#000; background:#fff; margin:0; }
+    @page { size:legal portrait; margin:2mm; }
+    @media print {
+      html, body { width:100%; height:100%; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+      .sr-page { page-break-after:always; width:100%; }
+      .sr-page:last-child { page-break-after:avoid; }
+    }
 
     /* ── Header ── */
-    .hdr-tbl { width:100%; border-collapse:collapse; margin-bottom:3pt; }
-    .logo-cell { width:60pt; text-align:center; vertical-align:middle; padding-right:8pt; }
-    .logo-img  { width:50pt; height:50pt; object-fit:contain; }
-    .hdr-main  { text-align:center; vertical-align:middle; }
+    .hdr-flex { display:flex; align-items:center; justify-content:center; gap:10pt; margin-bottom:2pt; }
+    .hdr-logo { width:82pt; height:82pt; object-fit:contain; flex-shrink:0; }
+    .hdr-main  { text-align:center; flex-shrink:0; }
     .hdr-republic { font-family:Tahoma,sans-serif; font-weight:700; font-size:10pt; }
     .hdr-province { font-family:Tahoma,sans-serif; font-weight:700; font-size:9.5pt; }
     .hdr-muni     { font-family:Tahoma,sans-serif; font-weight:700; font-size:10pt; }
-    .hdr-brand    { font-family:Arial,sans-serif; font-weight:900; font-size:18pt; letter-spacing:2pt; margin:2pt 0; }
-    .hdr-office   { font-family:Georgia,serif; font-weight:700; font-size:14pt; }
+    .hdr-brand    { font-family:Arial,sans-serif; font-weight:900; font-size:24pt; letter-spacing:3pt; color:#cc0000; margin:3pt 0; }
+    .hdr-office   { font-family:'Old English Text MT','UnifrakturMaguntia','Blackletter','MedievalSharp','Lucida Calligraphy',cursive; font-size:17pt; text-align:center; display:block; margin:3pt 0 2pt; }
+    .hdr-line-wrap { width:100%; margin:2pt 0 4pt; line-height:0; }
+    .hdr-line { width:100%; height:auto; display:block; }
 
     /* ── Meta ── */
-    .meta-row { display:flex; gap:20pt; margin:4pt 0; font-family:'Comic Sans MS',cursive; font-size:8pt; font-style:italic; }
+    .meta-row { display:flex; flex-direction:column; align-items:flex-start; gap:1pt; margin:4pt 0; font-family:'Comic Sans MS',cursive; font-size:9pt; font-style:italic; }
 
     /* ── Title ── */
-    .sr-title { font-family:'Bookman Old Style','Georgia',serif; font-weight:700; font-size:14pt;
+    .sr-title { font-family:'Bookman Old Style','Georgia',serif; font-weight:700; font-size:18pt;
                 text-align:center; margin:6pt 0 5pt; letter-spacing:2pt; }
 
     /* ── Name ── */
     .name-tbl  { width:100%; border-collapse:collapse; margin-bottom:4pt; }
-    .name-label { font-family:'Century Gothic',sans-serif; font-weight:700; font-size:11pt; width:55pt; padding-right:4pt; white-space:nowrap; }
-    .name-cell  { font-family:'Century Gothic',sans-serif; font-size:11pt; padding:0 6pt; text-align:center; }
+    .name-label { font-family:'Century Gothic',sans-serif; font-weight:700; font-size:12pt; width:62pt; padding-right:4pt; white-space:nowrap; }
+    .name-cell  { font-family:'Century Gothic',sans-serif; font-size:12pt; padding:0 6pt; text-align:center; }
     .name-underline { border-bottom:1pt solid #000; min-width:80pt; }
     .mi-cell { max-width:40pt; }
-    .name-sub   { font-family:Calibri,sans-serif; font-size:10pt; text-align:center; color:#333; padding-top:1pt; }
-    .married-note { font-family:'Century Gothic',sans-serif; font-size:10pt; padding-left:6pt; color:#333; white-space:nowrap; }
+    .name-sub   { font-family:Calibri,sans-serif; font-size:10.5pt; text-align:center; color:#333; padding-top:1pt; }
+    .married-note { font-family:'Century Gothic',sans-serif; font-size:10.5pt; padding-left:6pt; color:#333; white-space:nowrap; }
 
     /* ── DOB ── */
-    .dob-row  { font-family:'Century Gothic',sans-serif; font-size:10pt; margin-bottom:3pt; }
+    .dob-row  { font-family:'Century Gothic',sans-serif; font-size:11pt; margin-bottom:10pt; }
     .dob-val  { border-bottom:1pt solid #000; min-width:80pt; display:inline-block; padding:0 8pt; }
-    .dob-note { font-size:8.5pt; color:#444; }
+    .dob-note { font-size:9.5pt; color:#444; }
 
     /* ── Cert ── */
-    .cert-text { font-family:'Century Gothic',sans-serif; font-weight:700; font-size:9.5pt;
+    .cert-text { font-family:'Century Gothic',sans-serif; font-weight:700; font-size:10.5pt;
                  text-align:justify; margin-bottom:5pt; line-height:1.4; }
 
     /* ── Table ── */
-    .sr-tbl { width:100%; border-collapse:collapse; font-size:8pt; }
-    .grp-hd { background:#d0d0d0; border:1pt solid #000; padding:3pt 4pt;
-              text-align:center; font-family:'Century Gothic',sans-serif; font-weight:700; font-size:8.5pt; }
-    .col-hd { background:#e8e8e8; border:1pt solid #000; padding:3pt 4pt;
-              text-align:center; font-family:'Century Gothic',sans-serif; font-weight:700; font-size:8pt; }
-    .sr-tbl td { border:1pt solid #000; padding:3pt 4pt; font-family:'Century Gothic',sans-serif;
-                 font-size:8pt; min-height:15pt; vertical-align:middle; }
+    .sr-tbl { width:100%; border-collapse:collapse; table-layout:fixed; empty-cells:show; font-size:9pt; }
+    .grp-hd { background:#d0d0d0; border:1pt solid #000; padding:4pt 4pt;
+          text-align:center; font-family:'Century Gothic',sans-serif; font-weight:700; font-size:9.5pt; }
+    .col-hd { background:#e8e8e8; border:1pt solid #000; padding:4pt 4pt;
+          text-align:center; font-family:'Century Gothic',sans-serif; font-weight:700; font-size:9pt; }
+    .sr-tbl td { border:1pt solid #000; padding:4pt 4pt; font-family:'Century Gothic',sans-serif;
+           font-size:9pt; vertical-align:middle; height:24pt; }
+    .sr-tbl tbody tr { height:24pt; }
 
     /* ── Footer ── */
-    .footer-cert { font-family:Calibri,sans-serif; font-weight:700; font-size:8.5pt; margin:8pt 0 6pt; line-height:1.4; }
+    .footer-cert { font-family:Calibri,sans-serif; font-weight:700; font-size:9.5pt; margin:8pt 0 6pt; line-height:1.4; }
     .sig-tbl { width:100%; border-collapse:collapse; margin-top:4pt; }
     .sig-left  { width:55%; vertical-align:top; padding-right:10pt; }
     .sig-right { vertical-align:top; padding-left:10pt; }
-    .sig-prep  { font-family:'Century Gothic',sans-serif; font-size:10pt; margin-bottom:24pt; }
-    .sig-name  { font-family:'Century Gothic',sans-serif; font-weight:700; font-size:11pt; border-top:1pt solid #000; padding-top:3pt; }
-    .sig-pos   { font-family:'Century Gothic',sans-serif; font-size:11pt; }
-    .page-num  { font-family:'Century Gothic',sans-serif; font-size:10pt; text-align:right; margin-top:6pt; }
-    .sr-page   { margin-bottom:10pt; }
+    .sig-prep  { font-family:'Century Gothic',sans-serif; font-size:11pt; margin-bottom:36pt; }
+    .sig-name  { font-family:'Century Gothic',sans-serif; font-weight:700; font-size:12pt; border-top:1pt solid #000; padding-top:3pt; }
+    .sig-pos   { font-family:'Century Gothic',sans-serif; font-size:12pt; }
+    .page-num  { font-family:'Century Gothic',sans-serif; font-size:11pt; text-align:right; margin-top:4pt; }
+    .sr-page   { margin-bottom:0; }
+    /* ── Bottom bar ── */
+    .btm-line-wrap { width:100%; margin:6pt 0 0; line-height:0; }
+    .btm-line { width:100%; height:auto; display:block; }
+    .btm-bar { display:flex; align-items:center; justify-content:space-between; padding:4pt 0 2pt; }
+    .btm-logo { height:42pt; width:auto; object-fit:contain; flex-shrink:0; }
+    .btm-logo-right { height:36pt; }
+    .btm-motto { flex:1; text-align:center; font-family:'Century Gothic',sans-serif; font-weight:700; font-size:14pt; font-style:italic; padding:0 10pt; color:#166534; white-space:nowrap; }
   `;
 
   const w = window.open('','_blank','width=900,height=1100');
@@ -1164,15 +1264,20 @@ function buildAndPrintSR(emp, records) {
   setTimeout(() => w.print(), 600);
 }
 
+function setSRRequestBadge(count) {
+  const txt = document.getElementById('reqBadgeTxt');
+  const btn = document.getElementById('btnRequests');
+  if (txt) txt.textContent = count > 0 ? `Pending Requests (${count})` : 'Pending Requests';
+  if (btn) {
+    btn.style.borderColor = count > 0 ? '#f59e0b' : '';
+    btn.style.color = count > 0 ? '#92400e' : '';
+    btn.style.background = count > 0 ? '#fffbeb' : '';
+  }
+}
 
-// ── SR Requests management ────────────────────────────────────────────────────
-async function loadSRRequests() {
+function renderSRRequests(reqData) {
   const vb = document.getElementById('viewBody');
-  vb.innerHTML = '<div class="empty-state"><div class="e-icon">⏳</div><p>Loading requests…</p></div>';
-  const r = await fetch(`${API}?action=get_sr_requests`).then(r=>r.json()).catch(()=>({success:false}));
-  if (!r.success) { showToast('Failed to load requests.','error'); return; }
-
-  if (!r.data.length) {
+  if (!reqData.length) {
     vb.innerHTML = '<div class="empty-state"><div class="e-icon">📭</div><p>No service record requests yet.</p></div>';
     return;
   }
@@ -1189,7 +1294,7 @@ async function loadSRRequests() {
           <th>Requested</th><th>Status</th><th style="text-align:center;">Action</th>
         </tr></thead>
         <tbody>
-          ${r.data.map(req => `<tr>
+          ${reqData.map(req => `<tr>
             <td><strong>${req.emp_name}</strong><br><span style="font-size:.70rem;color:var(--gray-400);">${req.employee_code||''}</span></td>
             <td>${esc(req.department||'—')}</td>
             <td style="font-size:.78rem;">${esc(req.purpose||'—')}</td>
@@ -1205,6 +1310,55 @@ async function loadSRRequests() {
         </tbody>
       </table>
     </div>`;
+}
+
+
+// ── SR Requests management ────────────────────────────────────────────────────
+async function loadSRRequests(prefetchedData = null) {
+  currentView = 'requests';
+  document.getElementById('vpTitle').textContent = '📨 Service Record Requests';
+  document.getElementById('vpSub').textContent   = 'Incoming requests from employees are shown automatically.';
+  document.getElementById('btnAdd').style.display   = 'none';
+  document.getElementById('btnPrint').style.display = 'none';
+
+  const vb = document.getElementById('viewBody');
+  vb.innerHTML = '<div class="empty-state"><div class="e-icon">⏳</div><p>Loading requests…</p></div>';
+
+  const r = prefetchedData
+    ? { success: true, data: prefetchedData }
+    : await fetch(`${API}?action=get_sr_requests`).then(r=>r.json()).catch(()=>({success:false}));
+
+  if (!r.success) { showToast('Failed to load requests.','error'); return; }
+
+  const pendingCount = (r.data || []).filter(req => req.status === 'Pending').length;
+  setSRRequestBadge(pendingCount);
+  lastPendingReqCount = pendingCount;
+  renderSRRequests(r.data || []);
+}
+
+function startSRRequestAutoRefresh() {
+  if (srReqPollHandle) clearInterval(srReqPollHandle);
+  srReqPollHandle = setInterval(async function() {
+    const r = await fetch(`${API}?action=get_sr_requests`).then(r=>r.json()).catch(()=>({success:false}));
+    if (!r.success) return;
+
+    const data = r.data || [];
+    const pendingCount = data.filter(req => req.status === 'Pending').length;
+    setSRRequestBadge(pendingCount);
+
+    // Keep request list live when viewing requests.
+    if (currentView === 'requests') {
+      renderSRRequests(data);
+    }
+
+    // Auto-display incoming requests when a new one arrives.
+    if (pendingCount > lastPendingReqCount && currentView !== 'requests') {
+      showToast('📨 New service record request received.', 'info');
+      await loadSRRequests(data);
+    }
+
+    lastPendingReqCount = pendingCount;
+  }, 15000);
 }
 
 async function resolveSRReq(reqId, status, empName) {

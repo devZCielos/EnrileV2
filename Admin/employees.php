@@ -122,7 +122,7 @@ if ($action) {
                 $row = $stmt->fetch();
                 if ($row) {
                     $lb = $pdo->prepare("
-                        SELECT lt.name, lt.code, lt.applicable_gender,
+                    SELECT lt.leave_type_id, lt.name, lt.code, lt.applicable_gender,
                                lb.total_credits, lb.used_days, lb.remaining_days
                         FROM   leave_balances lb
                         JOIN   leave_types lt ON lb.leave_type_id = lt.leave_type_id
@@ -172,10 +172,56 @@ if ($action) {
                     break;
                 }
 
+                $leaveSelection = isset($_POST['leave_selection'])
+                  ? json_decode($_POST['leave_selection'], true)
+                  : null;
+
                 if ($id) {
                     $setCols = implode(', ', array_map(fn($k) => "$k = ?", array_keys($fields)));
                     $stmt    = $pdo->prepare("UPDATE employees SET $setCols WHERE employee_id = ?");
                     $stmt->execute([...array_values($fields), $id]);
+                    
+                    // ── Auto-create contract if employment_type is Contractual/JO/Casual ──
+                    if (in_array($fields['employment_type'], ['Contractual', 'Job Order', 'Casual'])) {
+                        $chk = $pdo->prepare("SELECT contract_id FROM contracts WHERE employee_id = ? LIMIT 1");
+                        $chk->execute([$id]);
+                        if (!$chk->fetchColumn()) {
+                            $cIns = $pdo->prepare("
+                                INSERT INTO contracts (employee_id, contract_type, position_title, department_id, start_date, status, created_by)
+                                VALUES (?, ?, ?, ?, ?, 'Active', ?)
+                            ");
+                            $cIns->execute([$id, $fields['employment_type'], $fields['position_title'], $deptId, $fields['date_hired'], (int)$_SESSION['user_id']]);
+                        }
+                    }
+
+                        // Update current-year leave entitlements when admin edits leave selection
+                        if (is_array($leaveSelection)) {
+                          $year = (int)date('Y');
+                          $upsert = $pdo->prepare("
+                            INSERT INTO leave_balances (employee_id, leave_type_id, calendar_year, total_credits, used_days)
+                            VALUES (?, ?, ?, ?, 0)
+                            ON DUPLICATE KEY UPDATE total_credits = VALUES(total_credits)
+                          ");
+
+                          $selectedIds = [];
+                          foreach ($leaveSelection as $ltId => $days) {
+                            $ltId = (int)$ltId;
+                            $days = max(0, (int)$days);
+                            if (!$ltId) continue;
+                            $selectedIds[] = $ltId;
+                            $upsert->execute([$id, $ltId, $year, $days]);
+                          }
+
+                          if ($selectedIds) {
+                            $marks = implode(',', array_fill(0, count($selectedIds), '?'));
+                            $del = $pdo->prepare("DELETE FROM leave_balances WHERE employee_id = ? AND calendar_year = ? AND leave_type_id NOT IN ($marks)");
+                            $del->execute(array_merge([$id, $year], $selectedIds));
+                          } else {
+                            $del = $pdo->prepare("DELETE FROM leave_balances WHERE employee_id = ? AND calendar_year = ?");
+                            $del->execute([$id, $year]);
+                          }
+                        }
+                    
                     echo json_encode(['success' => true, 'message' => 'Employee updated successfully.', 'id' => $id]);
                 } else {
                     $cols   = implode(', ', array_keys($fields));
@@ -184,13 +230,32 @@ if ($action) {
                     $stmt->execute(array_values($fields));
                     $newId  = (int)$pdo->lastInsertId();
 
+                    // ── Auto-create contract for Contractual/JO/Casual employees ──
+                    if (in_array($fields['employment_type'], ['Contractual', 'Job Order', 'Casual'])) {
+                        $cIns = $pdo->prepare("
+                            INSERT INTO contracts (employee_id, contract_type, position_title, department_id, start_date, status, created_by)
+                            VALUES (?, ?, ?, ?, ?, 'Active', ?)
+                        ");
+                        $cIns->execute([$newId, $fields['employment_type'], $fields['position_title'], $deptId, $fields['date_hired'], (int)$_SESSION['user_id']]);
+                    }
+
                     $ltStmt = $pdo->query("SELECT leave_type_id, max_days FROM leave_types");
                     $lbIns  = $pdo->prepare("
                         INSERT IGNORE INTO leave_balances (employee_id, leave_type_id, calendar_year, total_credits, used_days)
                         VALUES (?, ?, YEAR(NOW()), ?, 0)
                     ");
-                    foreach ($ltStmt->fetchAll() as $lt) {
-                        $lbIns->execute([$newId, $lt['leave_type_id'], $lt['max_days']]);
+
+                    if (is_array($leaveSelection)) {
+                        foreach ($leaveSelection as $ltId => $days) {
+                            $ltId = (int)$ltId;
+                            $days = max(0, (int)$days);
+                            if (!$ltId) continue;
+                            $lbIns->execute([$newId, $ltId, $days]);
+                        }
+                    } else {
+                        foreach ($ltStmt->fetchAll() as $lt) {
+                            $lbIns->execute([$newId, $lt['leave_type_id'], $lt['max_days']]);
+                        }
                     }
 
                     echo json_encode(['success' => true, 'message' => 'Employee added successfully.', 'id' => $newId]);
@@ -214,12 +279,48 @@ if ($action) {
                 $depts = $pdo->query("SELECT name FROM departments WHERE is_active = 1 ORDER BY name")->fetchAll(PDO::FETCH_COLUMN);
                 echo json_encode(['success' => true, 'data' => $depts]);
                 break;
+
+            // ── GENERATE NEXT EMPLOYEE CODE ───────────────────
+            case 'next_employee_code':
+                // Order by the numeric part so we always get the highest existing code
+                $stmt = $pdo->query("
+                    SELECT employee_code FROM employees
+                    WHERE employee_code REGEXP '^EMP-[0-9]+$'
+                    ORDER BY CAST(SUBSTRING(employee_code, 5) AS UNSIGNED) DESC
+                    LIMIT 1
+                ");
+                $lastCode = $stmt->fetchColumn();
+
+                if ($lastCode && preg_match('/EMP-(\d+)/', $lastCode, $m)) {
+                    $nextCode = 'EMP-' . str_pad((int)$m[1] + 1, 3, '0', STR_PAD_LEFT);
+                } else {
+                    $nextCode = 'EMP-001';
+                }
+
+                echo json_encode(['success' => true, 'code' => $nextCode]);
+                break;
+
+            // ── LEAVE TYPES LIST (for add employee form) ──────
+            case 'leave_types':
+                $lts = $pdo->query("
+                    SELECT leave_type_id, name, code, max_days, applicable_gender
+                    FROM   leave_types
+                    ORDER  BY name ASC
+                ")->fetchAll();
+                echo json_encode(['success' => true, 'data' => $lts]);
+                break;
+
             default:
                 echo json_encode(['success' => false, 'message' => 'Unknown action.']);
         }
     } catch (PDOException $e) {
         error_log('[HRMS] employees.php error: ' . $e->getMessage());
-        echo json_encode(['success' => false, 'message' => 'A database error occurred.']);
+        // Return a specific message for common constraint violations
+        if (strpos($e->getMessage(), 'employee_code') !== false && strpos($e->getMessage(), '1062') !== false) {
+            echo json_encode(['success' => false, 'message' => 'Employee code already exists. Please use a different code.']);
+        } else {
+            echo json_encode(['success' => false, 'message' => 'A database error occurred.']);
+        }
     }
     exit();
 }
@@ -551,6 +652,17 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
             <input type="text" id="fGsis" placeholder="Government ID No."/>
           </div>
         </div>
+
+        <div id="fLeaveSection" style="display:none;">
+          <div class="form-section">📅 Leave Entitlements</div>
+          <p style="font-size:.78rem;color:var(--gray-400);margin:0 0 10px;">Select the leave types this employee can avail and set the number of days for each.</p>
+          <div style="display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-bottom:8px;">
+            <button type="button" onclick="setAllLeaves(true)"  style="font-size:.72rem;color:#2563eb;background:none;border:none;cursor:pointer;font-weight:700;padding:2px 0;">✔ Select All</button>
+            <button type="button" onclick="setAllLeaves(false)" style="font-size:.72rem;color:#64748b;background:none;border:none;cursor:pointer;font-weight:700;padding:2px 0;">✖ Deselect All</button>
+          </div>
+          <div id="fLeaveTypes" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px;"></div>
+        </div>
+
       </div>
       <div class="modal-footer">
         <button class="btn btn-cancel" onclick="closeModal('modalForm')">Cancel</button>
@@ -755,19 +867,34 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     });
   }
 
-  document.querySelectorAll('.stat-chip').forEach(chip => {
-    chip.onclick = () => {
+  // Use event delegation to avoid duplicate handlers
+  const statsRow = document.getElementById('statsRow');
+  if (statsRow) {
+    statsRow.onclick = (e) => {
+      const chip = e.target.closest('.stat-chip');
+      if (!chip) return;
+
       if (chip.hasAttribute('data-filter-all')) {
         document.getElementById('fStatusFilter').value = '';
         document.getElementById('fTypeFilter').value   = '';
       } else if (chip.dataset.status) {
-        document.getElementById('fStatusFilter').value = chip.dataset.status;
+        // Toggle status, but clear type filter (mutual exclusivity)
+        const statusFilterEl = document.getElementById('fStatusFilter');
+        const newVal = (statusFilterEl.value === chip.dataset.status) ? '' : chip.dataset.status;
+        statusFilterEl.value = newVal;
+        document.getElementById('fTypeFilter').value = ''; // Clear type filter
       } else if (chip.dataset.type) {
-        document.getElementById('fTypeFilter').value = chip.dataset.type;
+        // Toggle type, but clear status filter (mutual exclusivity)
+        const typeFilterEl = document.getElementById('fTypeFilter');
+        const newVal = (typeFilterEl.value === chip.dataset.type) ? '' : chip.dataset.type;
+        typeFilterEl.value = newVal;
+        document.getElementById('fStatusFilter').value = ''; // Clear status filter
       }
+      
+      updateChipHighlights();
       loadEmployees(1);
     };
-  });
+  }
 
   async function viewEmp(id) {
     viewTargetId = id;
@@ -894,6 +1021,57 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
 
   function editFromView() { closeModal('modalView'); editEmp(viewTargetId); }
 
+  async function loadLeaveTypes(selectedLeaves = null) {
+    const container = document.getElementById('fLeaveTypes');
+    container.innerHTML = '<p style="color:var(--gray-400);font-size:.78rem;grid-column:1/-1;">Loading leave types…</p>';
+    try {
+      const res  = await fetch('employees.php?action=leave_types');
+      const json = await res.json();
+      if (!json.success || !json.data.length) {
+        container.innerHTML = '<p style="color:var(--gray-400);font-size:.78rem;grid-column:1/-1;">No leave types configured.</p>';
+        return;
+      }
+      const hasCustomSelection = !!(selectedLeaves && Object.keys(selectedLeaves).length);
+      container.innerHTML = json.data.map(lt => {
+        const leaveId = String(lt.leave_type_id);
+        const hasExisting = selectedLeaves && Object.prototype.hasOwnProperty.call(selectedLeaves, leaveId);
+        const existingDays = hasExisting ? (parseInt(selectedLeaves[leaveId], 10) || 0) : null;
+        const checked = hasCustomSelection ? hasExisting : true;
+        const dayValue = existingDays !== null ? existingDays : lt.max_days;
+        const gBadge = (lt.applicable_gender && lt.applicable_gender !== 'All')
+          ? `<span style="font-size:.56rem;font-weight:800;padding:1px 6px;border-radius:20px;background:${lt.applicable_gender==='Female'?'#fce7f3':'#dbeafe'};color:${lt.applicable_gender==='Female'?'#9d174d':'#1e40af'};">${lt.applicable_gender==='Female'?'♀ Female':'♂ Male'}</span>`
+          : '';
+        return `
+          <label class="leave-card" style="display:flex;flex-direction:column;gap:8px;background:${checked?'#eff6ff':'#f8fafc'};border:1.5px solid ${checked?'#2563eb':'#e2e8f0'};border-radius:10px;padding:12px 14px;cursor:pointer;transition:border-color .18s,background .18s;">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <input type="checkbox" data-id="${lt.leave_type_id}" ${checked ? 'checked' : ''}
+                onchange="const c=this.closest('.leave-card');c.style.borderColor=this.checked?'#2563eb':'#e2e8f0';c.style.background=this.checked?'#eff6ff':'#f8fafc';"
+                style="width:15px;height:15px;accent-color:#2563eb;cursor:pointer;flex-shrink:0;">
+              <span style="font-size:.78rem;font-weight:700;color:#1e293b;flex:1;line-height:1.3;">${lt.name}</span>
+              ${gBadge}
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;padding-left:23px;">
+              <input type="number" id="leave_days_${lt.leave_type_id}" value="${dayValue}" min="0" max="999"
+                style="width:68px;padding:4px 8px;border:1.5px solid #e2e8f0;border-radius:7px;font-size:.80rem;font-family:'Nunito',sans-serif;font-weight:700;color:#1e293b;outline:none;"
+                onfocus="this.style.borderColor='#2563eb'" onblur="this.style.borderColor='#e2e8f0'">
+              <span style="font-size:.74rem;color:#64748b;font-weight:600;">days / year</span>
+            </div>
+          </label>`;
+      }).join('');
+    } catch(e) {
+      container.innerHTML = '<p style="color:#ef4444;font-size:.78rem;grid-column:1/-1;">Failed to load leave types.</p>';
+    }
+  }
+
+  function setAllLeaves(checked) {
+    document.querySelectorAll('#fLeaveTypes .leave-card input[type=checkbox]').forEach(cb => {
+      cb.checked = checked;
+      const card = cb.closest('.leave-card');
+      card.style.borderColor = checked ? '#2563eb' : '#e2e8f0';
+      card.style.background  = checked ? '#eff6ff' : '#f8fafc';
+    });
+  }
+
   function clearForm() {
     ['fId','fFirstName','fLastName','fMiddleName','fContact','fEmail','fAddress',
      'fEmpCode','fPosition','fSalaryGrade','fGsis','fDob','fDateHired'].forEach(id => {
@@ -905,12 +1083,32 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
       if (el) el.selectedIndex = 0;
     });
     document.getElementById('fStatus').value = 'Active';
+    document.getElementById('fLeaveSection').style.display = 'none';
+    document.getElementById('fLeaveTypes').innerHTML = '';
   }
 
   function openAdd() {
     clearForm();
     document.getElementById('formTitle').textContent = 'Add New Employee';
     document.getElementById('formSub').textContent   = 'Fill in the details below';
+    
+    // Auto-generate next employee code
+    (async function() {
+      try {
+        const res = await fetch('employees.php?action=next_employee_code');
+        const json = await res.json();
+        if (json.success) {
+          document.getElementById('fEmpCode').value = json.code;
+        }
+      } catch(e) {
+        // Silently fail - user can enter code manually if needed
+      }
+    })();
+
+    // Show and populate leave entitlements
+    document.getElementById('fLeaveSection').style.display = 'block';
+    loadLeaveTypes();
+
     openModal('modalForm');
   }
 
@@ -921,8 +1119,9 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     const e = json.data;
 
     clearForm();
+    document.getElementById('fLeaveSection').style.display = 'block';
     document.getElementById('formTitle').textContent = 'Edit Employee';
-    document.getElementById('formSub').textContent   = `Editing: ${e.first_name} ${e.last_name}`;
+    document.getElementById('formSub').textContent   = `Editing: ${e.first_name} ${e.last_name} (including leave entitlements)`;
 
     document.getElementById('fId').value          = e.employee_id;
     document.getElementById('fFirstName').value   = e.first_name    || '';
@@ -942,6 +1141,14 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     document.getElementById('fDateHired').value   = e.date_hired    || '';
     document.getElementById('fSalaryGrade').value = e.salary_grade  || '';
     document.getElementById('fGsis').value        = e.gsis_number   || '';
+
+    const leaveSelection = {};
+    (e.leave_balances || []).forEach(lb => {
+      if (lb.leave_type_id !== undefined && lb.leave_type_id !== null) {
+        leaveSelection[String(lb.leave_type_id)] = parseInt(lb.total_credits, 10) || 0;
+      }
+    });
+    loadLeaveTypes(leaveSelection);
 
     openModal('modalForm');
   }
@@ -980,6 +1187,19 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     body.append('date_hired',   document.getElementById('fDateHired').value);
     body.append('salary_grade', document.getElementById('fSalaryGrade').value.trim());
     body.append('gsis',         document.getElementById('fGsis').value.trim());
+
+    // Collect leave entitlements when leave cards are loaded in the modal
+    const leaveSectionEl = document.getElementById('fLeaveSection');
+    const leaveCardEls = document.querySelectorAll('#fLeaveTypes .leave-card input[type=checkbox]');
+    if (leaveSectionEl && leaveSectionEl.style.display !== 'none' && leaveCardEls.length) {
+      const leaveSelection = {};
+      document.querySelectorAll('#fLeaveTypes .leave-card input[type=checkbox]:checked').forEach(cb => {
+        const tid = cb.dataset.id;
+        const dEl = document.getElementById('leave_days_' + tid);
+        leaveSelection[tid] = dEl ? (parseInt(dEl.value) || 0) : 0;
+      });
+      body.append('leave_selection', JSON.stringify(leaveSelection));
+    }
 
     try {
       body.append('csrf_token', CSRF_TOKEN);
@@ -1226,6 +1446,7 @@ function toggleSidebar() {
     } catch(e) { /* badge is optional */ }
 
     loadEmployees(1);
+    updateChipHighlights();
   }
 
   init();

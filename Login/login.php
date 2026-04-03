@@ -610,9 +610,9 @@ if (!empty($_COOKIE['remember_token'])) {
     </div>
   </div>
 
-  <footer>
+ <!-- <footer>
     <p>&copy; 2026 LGU Enrile HRMS. All rights reserved.</p>
-  </footer>
+  </footer> -->
 
   <script>
     /* ══════════════════════════════════

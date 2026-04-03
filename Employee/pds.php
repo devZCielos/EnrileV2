@@ -549,33 +549,8 @@ async function savePDS(e) {
 }
 
 function printPDS() {
-  const pi = {};
-  ['last_name','first_name','middle_name','suffix','dob','pob','sex','civil_status','height','weight','blood_type','umid','pagibig','philhealth','psn','tin','agency_no','dual_by','dual_country','res_housenum','res_street','res_subdivision','res_barangay','res_city','res_province','res_zip','perm_housenum','perm_street','perm_subdivision','perm_barangay','perm_city','perm_province','perm_zip','tel','mobile','email'].forEach(k => pi[k] = pdsGet(`pds_${k}`));
-  
-  const d = {
-    personal_info: JSON.stringify(pi),
-    family_background: JSON.stringify(collectRows('pds_we_list', ['family'])),
-   education: JSON.stringify(collectRows('pds_edu_list', ['level','school','degree','honors'])),
-    work_experience: JSON.stringify(collectRows('pds_we_list', ['date_from','date_to','position','dept_agency','status'])),
-    pds_references: JSON.stringify([])
-  };
-  
-  fetch('pds.php?action=get_pds').then(r => r.json()).then(res => {
-    if (res.success && res.data) {
-      buildAndPrintPDS(res.data, null);
-    } else {
-      showToast('Unable to load PDS data for printing', 'error');
-    }
-  });
-}
-
-function buildAndPrintPDS(d, empRow) {
-  const html = buildPDSPrintHTML(d, empRow);
-  const w = window.open('', '_blank', 'width=960,height=1100');
-  w.document.write(html);
-  w.document.close();
-  w.focus();
-  setTimeout(() => w.print(), 600);
+  // Open the dedicated print page which uses the exact CS Form 212 government layout
+  window.open('pds_print.php', '_blank', 'width=1050,height=1200');
 }
 
 function buildPDSPrintHTML(d, empRow) {
