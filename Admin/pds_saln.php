@@ -770,13 +770,7 @@ async function loadSALNView(year){
     <div style="font-size:.82rem;font-weight:700;margin-top:4px;">Filing Year: ${v(d.saln_year)}</div>
   </div>`;
 
-  html += `<div style="padding:12px 12px 4px;">
-    <div class="saln-annex-tabs">
-      <button type="button" class="saln-annex-tab active" data-annex="a" onclick="adminSalnShowAnnex('a')">Annex A - Main SALN</button>
-      <button type="button" class="saln-annex-tab" data-annex="as1" onclick="adminSalnShowAnnex('as1')">Annex B - AS-1 Declarant</button>
-      <button type="button" class="saln-annex-tab" data-annex="as2" onclick="adminSalnShowAnnex('as2')">Annex C - AS-2 Spouse & Children</button>
-    </div>
-  </div>`;
+  // Removed SALN annex tab bar for admin side
 
   html += `<div class="saln-annex-pane active" id="admin_saln_annex_a" style="padding:0 12px 10px;">`;
 
