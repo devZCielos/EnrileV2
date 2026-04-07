@@ -143,6 +143,26 @@ try {
             echo json_encode(['success'=>true]);
             break;
 
+        case 'delete_conversation':
+            $with = (int)($_POST['with'] ?? 0);
+            $isAdmin = in_array($role, ['admin','hr_staff','dept_head']);
+            if(!$isAdmin){echo json_encode(['success'=>false,'message'=>'Only admin users can delete whole conversations.']);break;}
+            if(!$with){echo json_encode(['success'=>false,'message'=>'Missing contact.']);break;}
+
+            $chk = $pdo->prepare("SELECT user_id, role FROM user_accounts WHERE user_id=?");
+            $chk->execute([$with]);
+            $target = $chk->fetch(PDO::FETCH_ASSOC);
+            if(!$target){echo json_encode(['success'=>false,'message'=>'Contact not found.']);break;}
+            if(($target['role'] ?? '') !== 'employee'){
+                echo json_encode(['success'=>false,'message'=>'Conversation can only be deleted for employee chats.']);
+                break;
+            }
+
+            $del = $pdo->prepare("DELETE FROM chat_messages WHERE (sender_id=? AND receiver_id=?) OR (sender_id=? AND receiver_id=?)");
+            $del->execute([$me, $with, $with, $me]);
+            echo json_encode(['success'=>true,'deleted'=>(int)$del->rowCount()]);
+            break;
+
         default:
             echo json_encode(['success'=>false,'message'=>"Unknown action: $action"]);
     }

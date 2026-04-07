@@ -204,6 +204,78 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 ) ENGINE=InnoDB;
 
 -- ============================================================
+--  TABLE 12: pds_records
+--  Stores employee Personal Data Sheets (CS Form 212, Revised 2025)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS pds_records (
+  pds_id             INT UNSIGNED  AUTO_INCREMENT PRIMARY KEY,
+  employee_id        INT UNSIGNED  NOT NULL,
+  personal_info      LONGTEXT      NULL COMMENT 'JSON: all personal info fields',
+  family_background  LONGTEXT      NULL COMMENT 'JSON: spouse + parents + children',
+  education          LONGTEXT      NULL COMMENT 'JSON array: education levels',
+  civil_service      LONGTEXT      NULL COMMENT 'JSON array: eligibilities',
+  work_experience    LONGTEXT      NULL COMMENT 'JSON array',
+  voluntary_work     LONGTEXT      NULL COMMENT 'JSON array',
+  trainings          LONGTEXT      NULL COMMENT 'JSON array',
+  other_info         LONGTEXT      NULL COMMENT 'JSON: skills, distinctions, memberships',
+  q4_questions       LONGTEXT      NULL COMMENT 'JSON array: Q34-Q40 integrity questions',
+  pds_references     LONGTEXT      NULL COMMENT 'JSON array: character references',
+  created_at         TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+  updated_at         TIMESTAMP     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_pds_employee FOREIGN KEY (employee_id) REFERENCES employees(employee_id) ON DELETE CASCADE,
+  UNIQUE KEY uk_pds_employee (employee_id)
+) ENGINE=InnoDB;
+
+-- ============================================================
+--  TABLE 13: saln_records
+--  Stores employee SALN (2025 form, per CSC Resolution No. 2500632)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS saln_records (
+  saln_id            INT UNSIGNED  AUTO_INCREMENT PRIMARY KEY,
+  employee_id        INT UNSIGNED  NOT NULL,
+  saln_year          SMALLINT      NOT NULL,
+  as_of_date         DATE          NULL,
+  filing_type        VARCHAR(20)   NULL COMMENT 'Annual, Assumption, Exit',
+  filing_mode        VARCHAR(15)   NULL COMMENT 'Joint, Separate, NA',
+  multi_spouse       VARCHAR(255)  NULL,
+  declarant_info     LONGTEXT      NULL COMMENT 'JSON: lastname, firstname, mi, position, agency, office_addr',
+  spouse_info        LONGTEXT      NULL COMMENT 'JSON: lastname, firstname, mi, position, agency, office_addr',
+  children_info      LONGTEXT      NULL COMMENT 'JSON array: name, age',
+  real_properties    LONGTEXT      NULL COMMENT 'JSON array: description, kind, location, assessed_value, market_value, acq_year, acq_mode, acq_cost',
+  personal_properties LONGTEXT     NULL COMMENT 'JSON array: description, acq_year, acq_cost',
+  liabilities        LONGTEXT      NULL COMMENT 'JSON array: nature, creditor, balance',
+  biz_interests      LONGTEXT      NULL COMMENT 'JSON array: entity_name, biz_address, nature, date_acquired',
+  relatives_govt     LONGTEXT      NULL COMMENT 'JSON array: name, relationship, position, agency_address',
+  no_biz             TINYINT(1)    DEFAULT 0,
+  no_rel             TINYINT(1)    DEFAULT 0,
+  real_subtotal      DECIMAL(18,2) NULL,
+  personal_subtotal  DECIMAL(18,2) NULL,
+  total_assets       DECIMAL(18,2) NULL,
+  total_liabilities  DECIMAL(18,2) NULL,
+  net_worth          DECIMAL(18,2) NULL,
+  as1_real_properties     LONGTEXT      NULL COMMENT 'JSON array: AS-1 additional declarant real properties',
+  as1_personal_properties LONGTEXT      NULL COMMENT 'JSON array: AS-1 additional declarant personal properties',
+  as1_liabilities         LONGTEXT      NULL COMMENT 'JSON array: AS-1 additional declarant liabilities',
+  as1_biz_interests       LONGTEXT      NULL COMMENT 'JSON array: AS-1 additional declarant business interests',
+  as1_real_subtotal       DECIMAL(18,2) NULL,
+  as1_personal_subtotal   DECIMAL(18,2) NULL,
+  as1_total_assets        DECIMAL(18,2) NULL,
+  as1_total_liabilities   DECIMAL(18,2) NULL,
+  as2_name_info           LONGTEXT      NULL COMMENT 'JSON: AS-2 name, position, agency/office',
+  as2_real_properties     LONGTEXT      NULL COMMENT 'JSON array: AS-2 spouse/children real properties',
+  as2_personal_properties LONGTEXT      NULL COMMENT 'JSON array: AS-2 spouse/children personal properties',
+  as2_liabilities         LONGTEXT      NULL COMMENT 'JSON array: AS-2 spouse/children liabilities',
+  as2_biz_interests       LONGTEXT      NULL COMMENT 'JSON array: AS-2 spouse/children business interests',
+  gov_id             VARCHAR(100)  NULL,
+  gov_id_no          VARCHAR(100)  NULL,
+  gov_id_issued      DATE          NULL,
+  created_at         TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+  updated_at         TIMESTAMP     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_saln_employee FOREIGN KEY (employee_id) REFERENCES employees(employee_id) ON DELETE CASCADE,
+  UNIQUE KEY uk_saln_emp_year (employee_id, saln_year)
+) ENGINE=InnoDB;
+
+-- ============================================================
 --  INDEXES  (for common query patterns)
 -- ============================================================
 CREATE INDEX idx_emp_dept       ON employees (department_id);

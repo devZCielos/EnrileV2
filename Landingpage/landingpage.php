@@ -30,7 +30,11 @@
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; font-family: Arial, sans-serif; }
-body { background: var(--light); color: var(--secondary); line-height: 1.6; }
+body {
+  background: linear-gradient(135deg, #1d4ed8 0%, #0ea5e9 45%, #22c55e 100%);
+  color: var(--secondary);
+  line-height: 1.6;
+}
 
 header {
   background: white;
@@ -139,7 +143,7 @@ footer {
   
 
   <section class="hero">
-    <h1>Welcome to My Web System</h1>
+    <h1>Welcome to Enrile</h1>
     <p>A modern solution designed to simplify management and improve efficiency.</p>
     <a href="../Login/login.php" class="btn">Get Started</a>
   </section>
