@@ -1,4 +1,6 @@
-﻿<?php
+﻿
+
+<?php
 // DEBUG: Show all errors for troubleshooting
 ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1);
@@ -557,7 +559,7 @@ if ($action) {
                 $stmt = $pdo->prepare("
                   INSERT INTO leave_requests
                     (employee_id, leave_type_id, date_from, date_to, days_requested, with_pay, reason, status, filed_at, updated_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending', NOW(), NOW())
+                  VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending Dept Head', NOW(), NOW())
                 ");
                 $stmt->execute([$employeeId, $leaveTypeId, $dateFrom, $dateTo, $daysReq, $withPay, $reason]);
                 $requestId = (int)$pdo->lastInsertId();
@@ -1259,7 +1261,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     .tb-btn .notif{position:absolute;top:-2px;right:-2px;width:14px;height:14px;background:#ef4444;border-radius:50%;font-size:.52rem;color:#fff;font-weight:800;display:none;align-items:center;justify-content:center;border:2px solid rgba(255,255,255,.3);}
 
     /* PAGE SYSTEM */
-    .page{display:none;padding:22px 26px;animation:fadeUp .35s ease both;}
+    .page{display:none;padding:22px 26px;animation:fadeUp .35s ease both;width:100%;box-sizing:border-box;}
     .page.active{display:block;}
     @keyframes fadeUp{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:translateY(0);}}
 
@@ -2072,6 +2074,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     </div>
     <div class="sb-status" title="Online"></div>
   </div>
+
   <nav class="sb-nav">
     <div class="sb-section">Navigation</div>
     <button class="sb-item active" onclick="goPage('dashboard',this)"><div class="sb-icon">🏠</div>Dashboard</button>
@@ -2079,6 +2082,9 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     <button class="sb-item" onclick="goPage('requests',this)"><div class="sb-icon">📋</div>My Leave Requests<span class="sb-badge" id="pendBadge"></span></button>
     <button class="sb-item" onclick="goPage('file',this)"><div class="sb-icon">📝</div>File Leave Request</button>
     <button class="sb-item" onclick="goPage('balances',this)"><div class="sb-icon">⚖️</div>Leave Balances</button>
+    <?php if ($_SESSION['user_role'] === 'dept_head'): ?>
+      <button class="sb-item" onclick="goPage('dept_head_leaves',this)"><div class="sb-icon">🗂️</div>Dept Head Leave Approval</button>
+    <?php endif; ?>
     <div class="sb-label">Documents</div>
     <button class="sb-item" onclick="goPage('documents',this)"><div class="sb-icon">📁</div>All Documents</button>
     <button class="sb-item sb-sub" onclick="goPage('pds',this)"><div class="sb-icon">📋</div>PDS</button>
@@ -2087,6 +2093,8 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     <button class="sb-item sb-sub annex-link" onclick="goPage('annex_c',this)"><div class="sb-icon">🇨</div>Annex C</button>
     <button class="sb-item sb-sub" onclick="goPage('service_record',this)"><div class="sb-icon">📜</div>Service Record</button>
   </nav>
+    
+    <!-- Main content area only; sidebar card removed -->
   <div class="sb-foot">
     <a href="../Landingpage/logout.php" class="sb-logout"><div class="sb-icon">🚪</div>Logout</a>
   </div>
@@ -2394,7 +2402,17 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
 
   <!-- ══ LEAVE BALANCES ══ -->
   <div class="page" id="page-balances">
-    <div class="balances-grid" id="balancesGrid"><div style="color:var(--g400);padding:20px;">Loading…</div></div>
+    <div class="form-header">
+      <h3>⚖️ Leave Balances</h3>
+      <p>View your available leave credits and usage history</p>
+    </div>
+    <div id="balancesGrid" class="balances-grid"></div>
+    <div style="margin-top:24px;">
+      <table class="mini-tbl" style="width:100%;max-width:700px;margin:0 auto;">
+        <thead><tr><th>Type</th><th>Total</th><th>Used</th><th>Available</th><th>Status</th></tr></thead>
+        <tbody id="balSummary"></tbody>
+      </table>
+    </div>
   </div>
 
   <!-- ══ MY DOCUMENTS ══ -->
@@ -3402,38 +3420,36 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
         <button class="save-form-btn" onclick="saveAnnex('annex_c')">💾 Save Annex C</button>
       </div>
     </div>
+
+  <!-- ══ Dept Head Leave Approval ══ -->
+  <div class="page" id="page-dept_head_leaves">
+      <div style="max-width: 1115px; margin: 18px auto 0 auto;">
+      <div class="card" style="padding:36px 40px 40px 40px; border-radius:0 0 16px 16px;">
+        <div id="deptHeadLeavesList"></div>
+      </div>
+    </div>
   </div>
 
-  <!-- ══ SERVICE RECORD PAGE ══ -->
-
-  <!-- ══ SERVICE RECORD PAGE ══ -->
+  <!-- ══ Service Record ══ -->
   <div class="page" id="page-service_record">
-    <div class="form-page">
-
-      <!-- Request status banner -->
-      <div id="srRequestBanner" style="display:none;padding:12px 16px;border-radius:10px;margin-bottom:14px;font-size:.84rem;font-weight:700;border:1.5px solid #fde68a;background:#fffbeb;color:#92400e;"></div>
-
-      <!-- Records section — white card matching form-section style -->
-      <div class="form-section-card" style="background:#fff;border-radius:16px;box-shadow:0 2px 16px rgba(37,99,235,0.07);border:1.5px solid #e2e8f0;max-width:1000px;margin:0 auto 0 auto;">
-        <div style="background:linear-gradient(90deg,#2563eb 70%,#1e40af 100%);color:#fff;font-weight:800;font-size:1.08rem;padding:18px 28px;border-radius:16px 16px 0 0;letter-spacing:.02em;display:flex;align-items:center;gap:10px;">
-          🗂️ <span style="margin-left:6px;">Service Record Entries</span>
-        </div>
+    <div id="srRequestBanner" style="display:none;padding:12px 16px;border-radius:10px;margin-bottom:14px;font-size:.84rem;font-weight:700;border:1.5px solid #fde68a;background:#fffbeb;color:#92400e;"></div>
+    <div style="max-width: 860px; margin: 18px auto 0 auto;">
+      <div class="card" style="padding:0 0 32px 0; border-radius:0 0 16px 16px;">
         <div class="form-section-body" style="padding:0;min-height:320px;border-radius:0 0 16px 16px;">
           <div id="srContent" style="overflow-x:auto;padding:0 12px 18px 12px;box-sizing:border-box;width:100%;">
             <!-- The table will be injected here by JS if entries exist -->
           </div>
         </div>
       </div>
-
-      <!-- Buttons at bottom — same as SALN/PDS -->
       <div style="margin-top:20px;padding-bottom:30px;display:flex;gap:8px;justify-content:flex-end;">
         <button class="save-form-btn" onclick="requestServiceRecord()" id="btnRequestSR" style="background:linear-gradient(135deg,#2563eb,#1e40af);">📨 Request Service Record</button>
-        <button class="save-form-btn" onclick="printMySR()" id="btnPrintSR" style="background:linear-gradient(135deg,#16a34a,#15803d);display:none;">🖨️ Print Service Record</button>
+        <button class="print-form-btn" onclick="printMySR()" id="btnPrintSR" style="background:linear-gradient(135deg,#16a34a,#15803d);display:none;">🖨️ Print Service Record</button>
       </div>
+    </div>
+  </div>
+</div>
+<!-- .main -->
 
-    </div><!-- /form-page -->
-  </div><!-- /page-service_record -->
-</div><!-- .main -->
   <!-- Request modal -->
   <div id="srReqModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:800;align-items:center;justify-content:center;backdrop-filter:blur(3px);">
     <div style="background:#fff;border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.18);width:92%;max-width:460px;animation:fadeUp .3s ease;">
@@ -3684,6 +3700,7 @@ const PAGE_META = {
   pds:      ['Personal Data Sheet', 'CS Form No. 212 (Revised 2025)'],
   saln:     ['SALN',                'Statement of Assets, Liabilities and Net Worth'],
   service_record: ['Service Record', 'Your government service history'],
+  dept_head_leaves: ['Dept Head Leave Approval', 'Approve or deny leave requests from your department'],
 };
 
 // ════════════════════════════════════════════════════════
@@ -3793,6 +3810,102 @@ function goPage(name, btn) {
   if (name === 'saln')      loadSALN();
   if (name === 'service_record') loadServiceRecord();
   if (name === 'file')      loadFileLeavePanel();
+  if (name === 'dept_head_leaves') loadDeptHeadLeaves();
+}
+// ════════════════════════════════════════════════════════
+//  DEPT HEAD LEAVE APPROVAL
+// ════════════════════════════════════════════════════════
+async function loadDeptHeadLeaves() {
+  const cont = document.getElementById('deptHeadLeavesList');
+  cont.innerHTML = '<div style="color:var(--g400);font-size:.92rem;">Loading pending leave requests…</div>';
+  try {
+    const res = await fetch('Employee_portal.php?action=dept_head_pending_leaves').then(r=>r.json());
+    if (!res.success) {
+      cont.innerHTML = `<div style="color:#ef4444;padding:18px;">${res.message||'Failed to load leave requests.'}</div>`;
+      return;
+    }
+    const data = res.data || [];
+    if (!data.length) {
+      cont.innerHTML = '<div style="color:var(--g400);padding:24px;text-align:center;">No pending leave requests for your department.</div>';
+      return;
+    }
+    cont.innerHTML = data.map(lr => renderDeptHeadLeaveRow(lr)).join('');
+  } catch(e) {
+    cont.innerHTML = '<div style="color:#ef4444;padding:18px;">Network error loading leave requests.</div>';
+  }
+}
+
+function renderDeptHeadLeaveRow(lr) {
+  const filed = fmt(lr.filed_at);
+  const dateRange = lr.date_from === lr.date_to ? fmt(lr.date_from) : `${fmt(lr.date_from)} – ${fmt(lr.date_to)}`;
+  const color = TYPE_COLORS[lr.type_name] || '#2563eb';
+  // Card style exactly as in leave requests
+  return `
+    <div class="req-card">
+      <div class="req-stripe" style="background:${color};"></div>
+      <div class="req-body">
+        <div class="req-top">
+          <div class="req-title">
+            <span class="badge" style="background:${color}22;color:${color};">${lr.type_name} Leave</span>
+            <span style="font-weight:700;margin-left:7px;">${escapeHtml(lr.first_name)} ${escapeHtml(lr.last_name)}</span>
+          </div>
+          <span class="badge b-pending">⏳ Pending Dept Head</span>
+        </div>
+        <div class="req-meta">
+          <span>📅 ${dateRange}</span>
+          <span>📆 <strong>${lr.days_requested} day${lr.days_requested!=1?'s':''}</strong></span>
+        </div>
+        <div class="req-reason">Reason of Leave: ${escapeHtml(lr.reason||'')}</div>
+        <div class="req-footer" style="gap:10px;flex-wrap:wrap;align-items:center;">
+          <span class="req-filed">Filed: ${filed}</span>
+          <input type="text" class="req-remark-input" id="remark-${lr.request_id}" placeholder="Remarks (optional)" style="min-width:160px;max-width:260px;padding:7px 10px;border-radius:7px;border:1.5px solid #e5e7eb;"/>
+          <button class="submit-btn" style="background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;font-weight:700;" onclick="approveDeptHeadLeave(${lr.request_id})">✅ Approve</button>
+          <button class="submit-btn" style="background:linear-gradient(135deg,#ef4444,#b91c1c);color:#fff;font-weight:700;" onclick="denyDeptHeadLeave(${lr.request_id})">✗ Deny</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function approveDeptHeadLeave(requestId) {
+  const remarks = document.getElementById('remark-' + requestId)?.value || '';
+  if (!confirm('Approve this leave request?')) return;
+  await deptHeadLeaveAction(requestId, 'approve', remarks);
+}
+
+async function denyDeptHeadLeave(requestId) {
+  const remarks = document.getElementById('remark-' + requestId)?.value || '';
+  if (!confirm('Deny this leave request?')) return;
+  await deptHeadLeaveAction(requestId, 'deny', remarks);
+}
+
+async function deptHeadLeaveAction(requestId, action, remarks) {
+  const cont = document.getElementById('deptHeadLeavesList');
+  cont.innerHTML = '<div style="color:var(--g400);font-size:.92rem;">Processing…</div>';
+  try {
+    const form = new FormData();
+    form.append('leave_id', requestId);
+    form.append('remarks', remarks);
+    form.append('action', action === 'approve' ? 'dept_head_approve_leave' : 'dept_head_deny_leave');
+    form.append('csrf_token', CSRF_TOKEN);
+    const res = await fetch('Employee_portal.php', {method:'POST', body:form}).then(r=>r.json());
+    if (!res.success) {
+      cont.innerHTML = `<div style="color:#ef4444;padding:18px;">${res.message||'Action failed.'}</div>`;
+      setTimeout(loadDeptHeadLeaves, 1800);
+      return;
+    }
+    cont.innerHTML = `<div style="color:#22c55e;padding:18px;">${res.message||'Action successful.'}</div>`;
+    setTimeout(loadDeptHeadLeaves, 1200);
+  } catch(e) {
+    cont.innerHTML = '<div style="color:#ef4444;padding:18px;">Network error.</div>';
+    setTimeout(loadDeptHeadLeaves, 1800);
+  }
+}
+
+function escapeHtml(str) {
+  return String(str||'').replace(/[&<>"']/g, function(m) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m];
+  });
 }
 
 // ════════════════════════════════════════════════════════

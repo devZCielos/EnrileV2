@@ -170,6 +170,7 @@ if ($action) {
                         lt.name AS leave_type,
                         lt.leave_type_id,
                         COALESCE(d.name, '')          AS department,
+                        COALESCE(d.head_name, '')     AS dept_head_name,
                         COALESCE(lb.total_credits, 0) AS vl_total,
                         COALESCE(lb.used_days, 0)     AS vl_used,
                         COALESCE(lb.remaining_days, 0)AS vl_remaining
@@ -217,7 +218,8 @@ if ($action) {
                 $remark  = trim($_POST['remark']  ?? '') ?: 'Approved.';
                 $adminId = $_SESSION['user_id'];
 
-                $req = $pdo->prepare("SELECT * FROM leave_requests WHERE request_id = ? AND status='Pending'");
+
+                $req = $pdo->prepare("SELECT * FROM leave_requests WHERE request_id = ? AND LOWER(status) LIKE 'pending%'");
                 $req->execute([$id]);
                 $r = $req->fetch();
                 if (!$r) { echo json_encode(['success'=>false,'message'=>'Request not found or already processed.']); break; }
@@ -252,7 +254,8 @@ if ($action) {
                 $remark  = trim($_POST['remark'] ?? '') ?: 'Request denied.';
                 $adminId = $_SESSION['user_id'];
 
-                $req = $pdo->prepare("SELECT * FROM leave_requests WHERE request_id=? AND status='Pending'");
+
+                $req = $pdo->prepare("SELECT * FROM leave_requests WHERE request_id=? AND LOWER(status) LIKE 'pending%'");
                 $req->execute([$id]);
                 if (!$req->fetch()) { echo json_encode(['success'=>false,'message'=>'Request not found or already processed.']); break; }
 
@@ -1003,7 +1006,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
               <div style="min-height:12px;border-bottom:1px solid #000;margin:2px 0;">&nbsp;</div>
               <div style="min-height:12px;border-bottom:1px solid #000;margin:2px 0;">&nbsp;</div>
               <div style="margin-top:28px;border-top:1px solid #000;padding-top:4px;text-align:center;">
-                <div style="font-size:.67rem;font-weight:700;">Signature over Printed Name</div>
+                <div id="cf-7b-authorized-officer" style="font-size:.80rem;font-weight:700;letter-spacing:.02em;text-transform:uppercase;">(Authorized Officer)</div>
                 <div style="font-size:.63rem;color:#333;">(Authorized Officer)</div>
               </div>
             </td>
@@ -1495,6 +1498,14 @@ if (!CSRF_TOKEN) {
     if (cbDeny)    cbDeny.className    = 'csf-chk' + (statusNorm === 'denied'  ? ' checked' : '');
     if (denyReason) denyReason.textContent = (statusNorm === 'denied' && r.admin_remarks) ? r.admin_remarks : '';
 
+    // 7B — Department Head as Authorized Officer
+    var deptHeadName = r.dept_head_name || '(Authorized Officer)';
+    var authOfficerEls = document.querySelectorAll('#cf-authorized-officer, #cf-7b-authorized-officer');
+    authOfficerEls.forEach(function(el) {
+      el.textContent = deptHeadName;
+      el.style.textTransform = 'uppercase';
+    });
+
     // 7C/7D
     function fillDisapproveLines(text) {
       var lines = ['', '', ''];
@@ -1542,7 +1553,9 @@ if (!CSRF_TOKEN) {
 
     // Footer action buttons
     var closeBtnHtml = '<button class="btn btn-cancel" onclick="closeModal(\'modalView\')">Close</button>';
-    document.getElementById('dFooter').innerHTML = r.status === 'Pending'
+    // Show Approve/Deny if status starts with 'Pending' (case-insensitive)
+    var showActions = (r.status || '').toLowerCase().startsWith('pending');
+    document.getElementById('dFooter').innerHTML = showActions
       ? closeBtnHtml +
         '<button class="btn btn-danger" onclick="closeModal(\'modalView\');openDeny(' + id + ')">✗ Deny</button>' +
         '<button class="btn btn-success" onclick="closeModal(\'modalView\');openApprove(' + id + ')">✅ Approve</button>'
