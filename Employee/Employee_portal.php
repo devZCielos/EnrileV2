@@ -1,4 +1,29 @@
 ﻿<?php
+// DEBUG: Show all errors for troubleshooting
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../config/csrf.php';
+define('UPLOAD_DIR', __DIR__ . '/../uploads/documents/');
+define('UPLOAD_URL', '../uploads/documents/');
+if (!is_dir(UPLOAD_DIR)) mkdir(UPLOAD_DIR, 0755, true);
+define('PHOTO_DIR', __DIR__ . '/../uploads/profile_photos/');
+define('PHOTO_URL', '../uploads/profile_photos/');
+if (!is_dir(PHOTO_DIR)) mkdir(PHOTO_DIR, 0755, true);
+$allowedMimes = [
+  'application/pdf'  => 'pdf',
+  'application/msword' => 'doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
+  'application/vnd.ms-excel' => 'xls',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx',
+  'image/jpeg' => 'jpg',
+  'image/png'  => 'png',
+  'image/gif'  => 'gif',
+];
+$maxFileSize = 10 * 1024 * 1024; // 10 MB
+$action = $_GET['action'] ?? $_POST['action'] ?? '';
+// ...existing code continues...
 // ============================================================
 //  LGU ENRILE HRMS — Employee Portal
 //  File: Employee/Employee_portal.php
@@ -16,13 +41,14 @@ if (empty($_SESSION['user_id']) || empty($_SESSION['user_email'])) {
     }
     header('Location: ../Login/login.php'); exit();
 }
-if ($_SESSION['user_role'] !== 'employee' && empty($_SESSION['switched_from_admin'])) {
-    if ($_isAjax) {
-        header('Content-Type: application/json');
-        echo json_encode(['success'=>false,'message'=>'Access denied.']);
-        exit();
-    }
-    header('Location: ../Admin/dashboard.php'); exit();
+// Allow both 'employee' and 'dept_head' roles to use the Employee Portal
+if (!in_array($_SESSION['user_role'], ['employee', 'dept_head']) && empty($_SESSION['switched_from_admin'])) {
+  if ($_isAjax) {
+    header('Content-Type: application/json');
+    echo json_encode(['success'=>false,'message'=>'Access denied.']);
+    exit();
+  }
+  header('Location: ../Admin/dashboard.php'); exit();
 }
 
 // Session timeout — 8 hours
@@ -40,7 +66,7 @@ if (isset($_SESSION['login_time'])) {
 }
 
 require_once __DIR__ . '/../config/db.php';
-require_once __DIR__ . '/../config/csrf.php';
+// ...existing code...
 
 // Tables `pds_records` and `saln_records` are defined in lgu_enrile_hrms.sql — no runtime CREATE needed.
 
@@ -82,6 +108,93 @@ if ($action) {
         $employeeId = (int)($empRow->fetchColumn() ?: 0);
 
         switch ($action) {
+          // ── DEPT HEAD: View pending leave requests in their department ──
+          case 'dept_head_pending_leaves':
+            if ($_SESSION['user_role'] !== 'dept_head') {
+              echo json_encode(['success' => false, 'message' => 'Access denied.']); break;
+            }
+            // Get department_id of dept head
+            $stmt = $pdo->prepare("SELECT department_id FROM employees WHERE user_id = ?");
+            $stmt->execute([$userId]);
+            $deptId = $stmt->fetchColumn();
+            if (!$deptId) {
+              echo json_encode(['success' => false, 'message' => 'No department assigned.']); break;
+            }
+            // Get pending leave requests for employees in this department
+            $query = "
+              SELECT lr.*, lt.name AS type_name, e.first_name, e.last_name
+              FROM leave_requests lr
+              JOIN employees e ON e.employee_id = lr.employee_id
+              JOIN leave_types lt ON lt.leave_type_id = lr.leave_type_id
+              WHERE e.department_id = ? AND lr.status = 'Pending Dept Head'
+              ORDER BY lr.filed_at ASC
+            ";
+            $stmt = $pdo->prepare($query);
+            $stmt->execute([$deptId]);
+            echo json_encode(['success' => true, 'data' => $stmt->fetchAll()]);
+            break;
+
+          // ── DEPT HEAD: Approve leave request ──
+          case 'dept_head_approve_leave':
+            if ($_SESSION['user_role'] !== 'dept_head') {
+              echo json_encode(['success' => false, 'message' => 'Access denied.']); break;
+            }
+            $leaveId = (int)($_POST['leave_id'] ?? 0);
+            $remarks = trim($_POST['remarks'] ?? '');
+            // Get department_id of dept head
+            $stmt = $pdo->prepare("SELECT department_id FROM employees WHERE user_id = ?");
+            $stmt->execute([$userId]);
+            $deptId = $stmt->fetchColumn();
+            // Check if leave belongs to this department and is pending dept head
+            $stmt = $pdo->prepare("
+              SELECT lr.request_id
+              FROM leave_requests lr
+              JOIN employees e ON e.employee_id = lr.employee_id
+              WHERE lr.request_id = ? AND e.department_id = ? AND lr.status = 'Pending Dept Head'
+            ");
+            $stmt->execute([$leaveId, $deptId]);
+            if (!$stmt->fetch()) {
+              echo json_encode(['success' => false, 'message' => 'Invalid leave request.']); break;
+            }
+            // Approve: set status, dept_head_id, remarks, action date
+            $pdo->prepare("
+              UPDATE leave_requests
+              SET status = 'Pending HR', dept_head_id = ?, dept_head_remarks = ?, dept_head_action_date = NOW()
+              WHERE request_id = ?
+            ")->execute([$userId, $remarks, $leaveId]);
+            echo json_encode(['success' => true, 'message' => 'Leave request approved and forwarded to HR/Admin.']);
+            break;
+
+          // ── DEPT HEAD: Deny leave request ──
+          case 'dept_head_deny_leave':
+            if ($_SESSION['user_role'] !== 'dept_head') {
+              echo json_encode(['success' => false, 'message' => 'Access denied.']); break;
+            }
+            $leaveId = (int)($_POST['leave_id'] ?? 0);
+            $remarks = trim($_POST['remarks'] ?? '');
+            // Get department_id of dept head
+            $stmt = $pdo->prepare("SELECT department_id FROM employees WHERE user_id = ?");
+            $stmt->execute([$userId]);
+            $deptId = $stmt->fetchColumn();
+            // Check if leave belongs to this department and is pending dept head
+            $stmt = $pdo->prepare("
+              SELECT lr.request_id
+              FROM leave_requests lr
+              JOIN employees e ON e.employee_id = lr.employee_id
+              WHERE lr.request_id = ? AND e.department_id = ? AND lr.status = 'Pending Dept Head'
+            ");
+            $stmt->execute([$leaveId, $deptId]);
+            if (!$stmt->fetch()) {
+              echo json_encode(['success' => false, 'message' => 'Invalid leave request.']); break;
+            }
+            // Deny: set status, dept_head_id, remarks, action date
+            $pdo->prepare("
+              UPDATE leave_requests
+              SET status = 'Denied by Dept Head', dept_head_id = ?, dept_head_remarks = ?, dept_head_action_date = NOW()
+              WHERE request_id = ?
+            ")->execute([$userId, $remarks, $leaveId]);
+            echo json_encode(['success' => true, 'message' => 'Leave request denied.']);
+            break;
 
             // ── PROFILE ──────────────────────────────────────
             case 'whoami':
@@ -417,40 +530,40 @@ if ($action) {
                 }
                 // ── End overlap check ────────────────────────────────────────
 
+
                 // Get current balance
                 $bal = $pdo->prepare("
-                    SELECT remaining_days FROM leave_balances
-                    WHERE  employee_id = ? AND leave_type_id = ? AND calendar_year = YEAR(NOW())
+                  SELECT remaining_days FROM leave_balances
+                  WHERE  employee_id = ? AND leave_type_id = ? AND calendar_year = YEAR(NOW())
                 ");
                 $bal->execute([$employeeId, $leaveTypeId]);
                 $remaining = (int)($bal->fetchColumn() ?: 0);
-                
+
                 // Get pending days for this leave type
                 $pendingDaysStmt = $pdo->prepare("
-                    SELECT COALESCE(SUM(days_requested), 0) AS pending_days
-                    FROM leave_requests
-                    WHERE employee_id = ? AND leave_type_id = ? AND status = 'Pending' AND YEAR(filed_at) = YEAR(NOW())
+                  SELECT COALESCE(SUM(days_requested), 0) AS pending_days
+                  FROM leave_requests
+                  WHERE employee_id = ? AND leave_type_id = ? AND status = 'Pending' AND YEAR(filed_at) = YEAR(NOW())
                 ");
                 $pendingDaysStmt->execute([$employeeId, $leaveTypeId]);
                 $pendingDays = (int)($pendingDaysStmt->fetchColumn() ?: 0);
-                
+
                 // Calculate available days after pending requests
                 $available = $remaining - $pendingDays;
-                
-                if ($daysReq > $available) {
-                    $msg = $pendingDays > 0
-                        ? "Insufficient balance. You have {$remaining} day(s) total, but {$pendingDays} day(s) are pending. Available: {$available} day(s)."
-                        : "Insufficient balance. You only have {$remaining} day(s) remaining.";
-                    echo json_encode(['success' => false, 'message' => $msg]); break;
-                }
+
+                // Determine if leave is with pay or without pay
+                $withPay = ($daysReq <= $available) ? 1 : 0;
 
                 $stmt = $pdo->prepare("
-                    INSERT INTO leave_requests
-                        (employee_id, leave_type_id, date_from, date_to, days_requested, reason, status, filed_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 'Pending', NOW(), NOW())
+                  INSERT INTO leave_requests
+                    (employee_id, leave_type_id, date_from, date_to, days_requested, with_pay, reason, status, filed_at, updated_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending', NOW(), NOW())
                 ");
-                $stmt->execute([$employeeId, $leaveTypeId, $dateFrom, $dateTo, $daysReq, $reason]);
+                $stmt->execute([$employeeId, $leaveTypeId, $dateFrom, $dateTo, $daysReq, $withPay, $reason]);
                 $requestId = (int)$pdo->lastInsertId();
+
+                // Prepare notification message for response
+                $leavePayMsg = $withPay ? 'Leave request submitted successfully!' : 'Leave request submitted successfully! Note: This leave will be WITHOUT PAY as your leave credits are insufficient.';
 
                 // ── CREATE LEAVE NOTIFICATIONS ──────────────────────────────
                 // Get leave type details including advance notice requirements
@@ -509,7 +622,7 @@ if ($action) {
                 }
                 // ── END NOTIFICATION CREATION ───────────────────────────────
 
-                echo json_encode(['success' => true, 'message' => 'Leave request submitted successfully!']);
+                echo json_encode(['success' => true, 'message' => $leavePayMsg, 'with_pay' => $withPay]);
                 break;
 
             // ── CANCEL LEAVE ──────────────────────────────────
@@ -1019,6 +1132,14 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
   <title>Employee Portal | LGU Enrile HRMS</title>
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet"/>
   <style>
+    .saln-table-scroll {
+      width: 100%;
+      overflow-x: auto;
+      margin-bottom: 18px;
+    }
+    .saln-tbl {
+      min-width: 1200px;
+    }
     :root {
       --primary:#2563eb; --primary-dk:#1e40af; --primary-lt:#eff6ff;
       --accent:#22c55e;  --accent-dk:#15803d;  --accent-lt:#dcfce7;
@@ -1841,6 +1962,98 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
   
     .tb-profile-wrap{position:relative;display:inline-block;}
     .tb-av-ini{font-size:.78rem;font-weight:800;color:#fff;}
+      /* --- ANNEX B TABLES: Prevent input overlap and improve alignment --- */
+      .saln-tbl {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+        margin-bottom: 18px;
+        background: #f8fafc;
+        table-layout: fixed;
+      }
+      .saln-tbl th, .saln-tbl td {
+        border: 1px solid #e2e8f0;
+        padding: 8px 6px;
+        text-align: left;
+        vertical-align: middle;
+        background: #f8fafc;
+        font-size: 13px;
+        word-break: break-word;
+        white-space: normal;
+      }
+      .saln-tbl th {
+        font-weight: 700;
+        color: #334155;
+        background: #f1f5f9;
+        font-size: 11px;
+        word-break: break-word;
+        white-space: normal;
+        max-width: 140px;
+        line-height: 1.2;
+        overflow-wrap: break-word;
+        hyphens: auto;
+      }
+      .saln-tbl th span {
+        display: block;
+        font-weight: normal;
+        font-size: 10px;
+        line-height: 1.15;
+        margin-top: 2px;
+        max-width: 140px;
+        white-space: normal;
+        word-break: break-word;
+        overflow-wrap: break-word;
+        hyphens: auto;
+      }
+      .saln-tbl input[type="text"],
+      .saln-tbl input[type="number"] {
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+        padding: 7px 10px;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        font-size: 13px;
+        background: #fff;
+        outline: none;
+        transition: border-color 0.2s;
+        margin: 0;
+        display: block;
+      }
+      .saln-tbl input[type="text"]:focus,
+      .saln-tbl input[type="number"]:focus {
+        border-color: #2563eb;
+        background: #f0f7ff;
+      }
+      /* Responsive fix for smaller screens */
+      @media (max-width: 1100px) {
+        .saln-tbl th, .saln-tbl td {
+          font-size: 11px;
+          padding: 6px 3px;
+        }
+        .saln-tbl input[type="text"],
+        .saln-tbl input[type="number"] {
+          font-size: 12px;
+          padding: 6px 7px;
+        }
+      }
+      @media (max-width: 800px) {
+        .saln-tbl, .saln-tbl thead, .saln-tbl tbody, .saln-tbl tr, .saln-tbl th, .saln-tbl td {
+          display: block;
+          width: 100%;
+        }
+        .saln-tbl tr {
+          margin-bottom: 10px;
+        }
+        .saln-tbl th {
+          background: #e0e7ef;
+          font-size: 12px;
+          padding: 7px 5px;
+        }
+        .saln-tbl td {
+          padding: 5px 3px;
+        }
+      }
   </style>
 </head>
 <body>
@@ -1870,6 +2083,8 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     <button class="sb-item" onclick="goPage('documents',this)"><div class="sb-icon">📁</div>All Documents</button>
     <button class="sb-item sb-sub" onclick="goPage('pds',this)"><div class="sb-icon">📋</div>PDS</button>
     <button class="sb-item sb-sub" onclick="goPage('saln',this)"><div class="sb-icon">📊</div>SALN</button>
+    <button class="sb-item sb-sub annex-link" onclick="goPage('annex_b',this)"><div class="sb-icon">🅱️</div>Annex B</button>
+    <button class="sb-item sb-sub annex-link" onclick="goPage('annex_c',this)"><div class="sb-icon">🇨</div>Annex C</button>
     <button class="sb-item sb-sub" onclick="goPage('service_record',this)"><div class="sb-icon">📜</div>Service Record</button>
   </nav>
   <div class="sb-foot">
@@ -2759,165 +2974,437 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     </div>
   </div>
 
+
     <!-- ══ SALN PAGE ══ -->
-  <div class="page" id="page-saln">
-    <div class="form-page">
+    <div class="page" id="page-saln" style="position:relative;z-index:2;">
+      <div class="form-page">
+        <!-- Header -->
+        <div style="margin-bottom:14px;">
+          <div style="font-size:1.15rem;font-weight:800;color:var(--g800);text-transform:uppercase;letter-spacing:.04em;">Sworn Statement of Assets, Liabilities, and Net Worth</div>
+          <div style="font-size:.76rem;color:var(--g400);margin-top:3px;">As required by R.A. No. 6713 · 2025 SALN Form · Per CSC Resolution No. 2500632</div>
+        </div>
+        <!-- Year selector -->
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;">
+          <span style="font-size:.80rem;font-weight:700;color:var(--g600);">Filing Year:</span>
+          <div class="year-tabs" id="salnYearTabs"></div>
+          <button class="add-row-btn" onclick="addSalnYear()" style="margin-top:0;">+ New Year</button>
+        </div>
+        <div class="form-status" id="salnStatus"></div>
 
-      <!-- Header -->
-      <div style="margin-bottom:14px;">
-        <div style="font-size:1.15rem;font-weight:800;color:var(--g800);text-transform:uppercase;letter-spacing:.04em;">Sworn Statement of Assets, Liabilities, and Net Worth</div>
-        <div style="font-size:.76rem;color:var(--g400);margin-top:3px;">As required by R.A. No. 6713 · 2025 SALN Form · Per CSC Resolution No. 2500632</div>
-      </div>
-
-      <!-- Year selector -->
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;">
-        <span style="font-size:.80rem;font-weight:700;color:var(--g600);">Filing Year:</span>
-        <div class="year-tabs" id="salnYearTabs"></div>
-        <button class="add-row-btn" onclick="addSalnYear()" style="margin-top:0;">+ New Year</button>
-      </div>
-      <div class="form-status" id="salnStatus"></div>
-
-      <!-- Compliance type -->
-      <div class="form-section-hd">Compliance For</div>
-      <div class="form-section-body">
-        <div class="fg3">
-          <div class="fg"><label>Type of Filing</label>
-            <select id="saln_filing_type">
-              <option value="">— Select —</option>
-              <option value="Annual">Annual filing as of December 31</option>
-              <option value="Assumption">Assumption of office</option>
-              <option value="Exit">Exit</option>
-            </select>
+        <!-- Compliance For -->
+        <div class="form-section-hd">Compliance For</div>
+        <div class="form-section-body">
+          <div class="fg3">
+            <div class="fg"><label>Type of Filing</label>
+              <select id="saln_filing_type">
+                <option value="">— Select —</option>
+                <option value="Annual">Annual filing as of December 31</option>
+                <option value="Assumption">Assumption of office</option>
+                <option value="Exit">Exit</option>
+              </select>
+            </div>
+            <div class="fg"><label>SALN Year / As of Date</label>
+              <input type="date" id="saln_as_of"/>
+            </div>
           </div>
-          <div class="fg"><label>SALN Year / As of Date</label>
-            <input type="date" id="saln_as_of"/>
-          </div>
-        </div>
-        <div style="margin-top:10px;">
-          <div style="font-size:.74rem;font-weight:700;color:var(--g600);margin-bottom:6px;">Joint or Separate Filing (for spouses who are both public officials/employees)</div>
-          <div style="display:flex;gap:20px;flex-wrap:wrap;">
-            <label style="display:flex;align-items:center;gap:6px;font-size:.84rem;font-weight:600;cursor:pointer;"><input type="radio" name="saln_filing_mode" value="Joint"/> Joint Filing</label>
-            <label style="display:flex;align-items:center;gap:6px;font-size:.84rem;font-weight:600;cursor:pointer;"><input type="radio" name="saln_filing_mode" value="Separate"/> Separate Filing</label>
-            <label style="display:flex;align-items:center;gap:6px;font-size:.84rem;font-weight:600;cursor:pointer;"><input type="radio" name="saln_filing_mode" value="NA" checked/> Not Applicable</label>
-          </div>
-        </div>
-      </div>
-
-      <!-- Declarant -->
-      <div class="form-section-hd">Declarant</div>
-      <div class="form-section-body">
-        <div class="fg3">
-          <div class="fg"><label>Family Name</label><input type="text" id="saln_dec_lastname"/></div>
-          <div class="fg"><label>First Name</label><input type="text" id="saln_dec_firstname"/></div>
-          <div class="fg"><label>M.I.</label><input type="text" id="saln_dec_mi" style="max-width:80px;"/></div>
-          <div class="fg"><label>Position</label><input type="text" id="saln_dec_position"/></div>
-          <div class="fg fg-full"><label>Agency / Office</label><input type="text" id="saln_dec_agency"/></div>
-          <div class="fg fg-full"><label>Office Address</label><input type="text" id="saln_dec_office_addr"/></div>
-        </div>
-      </div>
-
-      <!-- Spouse -->
-      <div class="form-section-hd">Spouse</div>
-      <div class="form-section-body">
-        <div class="fg3">
-          <div class="fg"><label>Family Name</label><input type="text" id="saln_sp_lastname"/></div>
-          <div class="fg"><label>First Name</label><input type="text" id="saln_sp_firstname"/></div>
-          <div class="fg"><label>M.I.</label><input type="text" id="saln_sp_mi" style="max-width:80px;"/></div>
-          <div class="fg"><label>Position</label><input type="text" id="saln_sp_position"/></div>
-          <div class="fg fg-full"><label>Agency / Office</label><input type="text" id="saln_sp_agency"/></div>
-          <div class="fg fg-full"><label>Office Address</label><input type="text" id="saln_sp_office_addr"/></div>
-        </div>
-        <div style="margin-top:10px;">
-          <div style="font-size:.74rem;font-weight:700;color:var(--g600);margin-bottom:4px;">If with multiple marriages, indicate name(s) of spouse(s):</div>
-          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-            <input type="text" id="saln_multi_spouse" style="flex:1;padding:8px 11px;border:1.5px solid var(--g200);border-radius:var(--r-sm);font-family:'Nunito',sans-serif;font-size:.84rem;" placeholder="Name(s) of spouse(s)"/>
-            <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;font-weight:600;white-space:nowrap;cursor:pointer;"><input type="checkbox" id="saln_multi_na"/> Not Applicable</label>
+          <div style="margin-top:10px;">
+            <div style="font-size:.74rem;font-weight:700;color:var(--g600);margin-bottom:6px;">Joint or Separate Filing (for spouses who are both public officials/employees)</div>
+            <div style="display:flex;gap:20px;flex-wrap:wrap;">
+              <label style="display:flex;align-items:center;gap:6px;font-size:.84rem;font-weight:600;cursor:pointer;"><input type="radio" name="saln_filing_mode" value="Joint"/> Joint Filing</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:.84rem;font-weight:600;cursor:pointer;"><input type="radio" name="saln_filing_mode" value="Separate"/> Separate Filing</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:.84rem;font-weight:600;cursor:pointer;"><input type="radio" name="saln_filing_mode" value="NA" checked/> Not Applicable</label>
+            </div>
           </div>
         </div>
-      </div>
 
-      <!-- Unmarried Children -->
-      <div class="form-section-hd">Unmarried Children Below 18 Living in Declarant's Household</div>
-      <div class="form-section-body">
-        <div id="saln_children_list"></div>
-        <button class="add-row-btn" onclick="addSalnChild()">+ Add Child</button>
-      </div>
+        <!-- Declarant -->
+        <div class="form-section-hd">Declarant</div>
+        <div class="form-section-body">
+          <div class="fg3">
+            <div class="fg"><label>Family Name</label><input type="text" id="saln_dec_lastname"/></div>
+            <div class="fg"><label>First Name</label><input type="text" id="saln_dec_firstname"/></div>
+            <div class="fg"><label>M.I.</label><input type="text" id="saln_dec_mi" style="max-width:80px;"/></div>
+            <div class="fg"><label>Position</label><input type="text" id="saln_dec_position"/></div>
+            <div class="fg fg-full"><label>Agency / Office</label><input type="text" id="saln_dec_agency"/></div>
+            <div class="fg fg-full"><label>Office Address</label><input type="text" id="saln_dec_office_addr"/></div>
+          </div>
+        </div>
 
-      <!-- 1a. Real Properties -->
-      <div class="form-section-hd">Assets — 1a. Real Properties</div>
-      <div class="form-section-body">
-        <p style="font-size:.74rem;color:var(--g600);margin-bottom:10px;">Including those of the spouse and unmarried children below 18 years of age living in declarant's household.</p>
-        <div id="saln_real_list"></div>
-        <button class="add-row-btn" onclick="addReal()">+ Add Real Property</button>
-        <div class="fg2" style="margin-top:12px;border-top:1.5px solid var(--g100);padding-top:10px;">
-          <div class="fg"><label>Subtotal — Real Properties (₱)</label><input type="number" id="saln_real_subtotal" placeholder="0.00" step="0.01" style="background:var(--g50);"/></div>
+        <!-- Spouse -->
+        <div class="form-section-hd">Spouse</div>
+        <div class="form-section-body">
+          <div class="fg3">
+            <div class="fg"><label>Family Name</label><input type="text" id="saln_sp_lastname"/></div>
+            <div class="fg"><label>First Name</label><input type="text" id="saln_sp_firstname"/></div>
+            <div class="fg"><label>M.I.</label><input type="text" id="saln_sp_mi" style="max-width:80px;"/></div>
+            <div class="fg"><label>Position</label><input type="text" id="saln_sp_position"/></div>
+            <div class="fg fg-full"><label>Agency / Office</label><input type="text" id="saln_sp_agency"/></div>
+            <div class="fg fg-full"><label>Office Address</label><input type="text" id="saln_sp_office_addr"/></div>
+          </div>
+          <div style="margin-top:10px;">
+            <div style="font-size:.74rem;font-weight:700;color:var(--g600);margin-bottom:4px;">If with multiple marriages, indicate name(s) of spouse(s):</div>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+              <input type="text" id="saln_multi_spouse" style="flex:1;padding:8px 11px;border:1.5px solid var(--g200);border-radius:var(--r-sm);font-family:'Nunito',sans-serif;font-size:.84rem;" placeholder="Name(s) of spouse(s)"/>
+              <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;font-weight:600;white-space:nowrap;cursor:pointer;"><input type="checkbox" id="saln_multi_na"/> Not Applicable</label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Unmarried Children -->
+        <div class="form-section-hd">Unmarried Children Below 18 Living in Declarant's Household</div>
+        <div class="form-section-body">
+          <div id="saln_children_list"></div>
+          <button class="add-row-btn" onclick="addSalnChild()">+ Add Child</button>
+        </div>
+
+        <!-- 1a. Real Properties -->
+        <div class="form-section-hd">Assets — 1a. Real Properties</div>
+        <div class="form-section-body">
+          <p style="font-size:.74rem;color:var(--g600);margin-bottom:10px;">Including those of the spouse and unmarried children below 18 years of age living in declarant's household.</p>
+          <div id="saln_real_list"></div>
+          <button class="add-row-btn" onclick="addReal()">+ Add Real Property</button>
+          <div class="fg2" style="margin-top:12px;border-top:1.5px solid var(--g100);padding-top:10px;">
+            <div class="fg"><label>Subtotal — Real Properties (₱)</label><input type="number" id="saln_real_subtotal" placeholder="0.00" step="0.01" style="background:var(--g50);"/></div>
+          </div>
+        </div>
+
+        <!-- 1b. Personal Properties -->
+        <div class="form-section-hd">Assets — 1b. Personal Properties</div>
+        <div class="form-section-body">
+          <div id="saln_personal_list"></div>
+          <button class="add-row-btn" onclick="addPersonal()">+ Add Personal Property</button>
+          <div class="fg2" style="margin-top:12px;border-top:1.5px solid var(--g100);padding-top:10px;">
+            <div class="fg"><label>Subtotal — Personal Properties (₱)</label><input type="number" id="saln_personal_subtotal" placeholder="0.00" step="0.01" style="background:var(--g50);"/></div>
+            <div class="fg"><label>TOTAL ASSETS (₱) <span style="color:var(--primary);">= Real + Personal</span></label><input type="number" id="saln_total_assets" placeholder="0.00" step="0.01" style="background:#eff6ff;font-weight:800;"/></div>
+          </div>
+        </div>
+
+        <!-- 2. Liabilities -->
+        <div class="form-section-hd">Liabilities</div>
+        <div class="form-section-body">
+          <div id="saln_liab_list"></div>
+          <button class="add-row-btn" onclick="addLiab()">+ Add Liability</button>
+          <div class="fg2" style="margin-top:12px;border-top:1.5px solid var(--g100);padding-top:10px;">
+            <div class="fg"><label>TOTAL LIABILITIES (₱)</label><input type="number" id="saln_total_liab" placeholder="0.00" step="0.01" style="background:var(--g50);font-weight:800;"/></div>
+            <div class="fg"><label>NET WORTH (₱) <span style="color:var(--accent);">= Total Assets − Total Liabilities</span></label><input type="number" id="saln_net_worth" placeholder="0.00" step="0.01" style="background:#f0fdf4;font-weight:800;"/></div>
+          </div>
+        </div>
+
+        <!-- 3. Business Interests -->
+        <div class="form-section-hd">Business Interests and Financial Connections</div>
+        <div class="form-section-body">
+          <p style="font-size:.74rem;color:var(--g600);margin-bottom:8px;">Of Declarant / Declarant's Spouse / Unmarried Children Below 18 Living in Declarant's Household</p>
+          <label style="display:flex;align-items:center;gap:8px;font-size:.84rem;font-weight:600;cursor:pointer;margin-bottom:10px;">
+            <input type="checkbox" id="saln_no_biz" onchange="toggleBiz()"/> I/We do not have any business interest or financial connection.
+          </label>
+          <div id="saln_biz_wrap">
+            <div id="saln_biz_list"></div>
+            <button class="add-row-btn" onclick="addBiz()">+ Add Business Interest</button>
+          </div>
+        </div>
+
+        <!-- 4. Relatives in Government -->
+        <div class="form-section-hd">Relatives in the Government Service</div>
+        <div class="form-section-body">
+          <p style="font-size:.74rem;color:var(--g600);margin-bottom:8px;">Within the Fourth Degree of Consanguinity or Affinity. Include also Bilas, Balae and Inso.</p>
+          <label style="display:flex;align-items:center;gap:8px;font-size:.84rem;font-weight:600;cursor:pointer;margin-bottom:10px;">
+            <input type="checkbox" id="saln_no_rel" onchange="toggleRel()"/> I/We do not know of any relative/s in the government service.
+          </label>
+          <div id="saln_rel_wrap">
+            <div id="saln_rel_list"></div>
+            <button class="add-row-btn" onclick="addRel()">+ Add Relative</button>
+          </div>
+        </div>
+
+        <!-- Government ID for SALN -->
+        <div class="form-section-hd">Government Issued ID</div>
+        <div class="form-section-body">
+          <div class="fg3">
+            <div class="fg"><label>Government Issued ID (type)</label><input type="text" id="saln_gov_id" placeholder="e.g. Philippine Passport"/></div>
+            <div class="fg"><label>ID No.</label><input type="text" id="saln_gov_id_no"/></div>
+            <div class="fg"><label>Date Issued</label><input type="date" id="saln_gov_id_issued"/></div>
+          </div>
+        </div>
+
+        <div style="text-align:right;margin-top:20px;padding-bottom:30px;display:flex;gap:8px;justify-content:flex-end;">
+          <button class="save-form-btn" style="background:linear-gradient(135deg,#16a34a,#15803d);" onclick="printSALN()">🖨️ Print SALN</button>
+          <button class="save-form-btn" onclick="saveSALN()">💾 Save SALN</button>
         </div>
       </div>
+    </div>
 
-      <!-- 1b. Personal Properties -->
-      <div class="form-section-hd">Assets — 1b. Personal Properties</div>
-      <div class="form-section-body">
-        <div id="saln_personal_list"></div>
-        <button class="add-row-btn" onclick="addPersonal()">+ Add Personal Property</button>
-        <div class="fg2" style="margin-top:12px;border-top:1.5px solid var(--g100);padding-top:10px;">
-          <div class="fg"><label>Subtotal — Personal Properties (₱)</label><input type="number" id="saln_personal_subtotal" placeholder="0.00" step="0.01" style="background:var(--g50);"/></div>
-          <div class="fg"><label>TOTAL ASSETS (₱) <span style="color:var(--primary);">= Real + Personal</span></label><input type="number" id="saln_total_assets" placeholder="0.00" step="0.01" style="background:#eff6ff;font-weight:800;"/></div>
+    <!-- ══ ANNEX B PAGE ══ -->
+    <div class="page" id="page-annex_b" style="position:relative;z-index:2;">
+      <div class="form-page">
+        <h2>Annex B — Declarant's Assets, Liabilities and Net Worth (Sheet AS-1)</h2>
+        <div style="margin-bottom:10px;font-size:.92rem;">Use this sheet for additional properties and liabilities of the declarant.</div>
+        <div class="fg"><label>As of:</label><input type="text" placeholder="e.g. December 31, 2025" aria-label="As of date"/></div>
+        <div class="form-section-hd">1. ASSETS</div>
+        <div class="form-section-body">
+          <div style="font-weight:700;margin-bottom:6px;">a. Real Properties</div>
+          <div class="saln-table-scroll">
+            <table class="saln-tbl">
+            <thead style="background:#f1f5f9;">
+              <tr>
+                <th style="min-width:170px;">Description<br><span style="font-weight:normal;font-size:5pt;">(e.g. lot, house and lot, condominium and improvements)</span></th>
+                <th style="min-width:120px;">Kind<br><span style="font-weight:normal;font-size:5pt;">(e.g. residential, commercial, industrial, agricultural, and mixed use)</span></th>
+                <th style="min-width:140px;">Exact Location</th>
+                <th style="min-width:120px;">Assessed Value<br></th>
+                <th style="min-width:140px;">Current Fair<br>Market Value</th>
+                <th style="min-width:110px;">Acquisition Year</th>
+                <th style="min-width:120px;">Acquisition Mode</th>
+                <th style="min-width:140px;">Acquisition Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><input type="text" placeholder="e.g. House and Lot" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. Residential" aria-label="Kind" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. 123 Main St." aria-label="Exact Location" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="e.g. 1000000" aria-label="Assessed Value" min="0" step="any" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="e.g. 1200000" aria-label="Current Fair Market Value" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="e.g. 2025" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. Purchase" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="e.g. 950000" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+              </tr>
+              <tr>
+                <td><input type="text"  aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td><input type="text"  aria-label="Kind" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="text"  aria-label="Exact Location" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number"  aria-label="Assessed Value" min="0" step="any" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number"  aria-label="Current Fair Market Value" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number"  aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
+                <td><input type="text"  aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number"  aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+              </tr>
+              <tr>
+                <td><input type="text" placeholder="" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Kind" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Exact Location" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Assessed Value" min="0" step="any" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Current Fair Market Value" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+              </tr>
+              <tr>
+                <td><input type="text" placeholder="" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Kind" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Exact Location" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Assessed Value" min="0" step="any" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Current Fair Market Value" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+              </tr>
+            </tbody>
+            </table>
+          </div>
+          
+          <div style="font-weight:700;margin:10px 0 6px;">b. Personal Properties</div>
+          <div class="saln-table-scroll">
+            <table class="saln-tbl">
+            <thead><tr><th>Description</th><th>Value</th><th>Remarks</th></tr></thead>
+            <tbody>
+              <tr><td><input type="text" placeholder="e.g. Jewelry" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 50000" aria-label="Value" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Gift from family" aria-label="Remarks"/></td></tr>
+              <tr><td><input type="text" placeholder="e.g. Vehicle" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 300000" aria-label="Value" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Car loan" aria-label="Remarks"/></td></tr>
+              <tr><td><input type="text"  aria-label="Description"/></td><td><input type="number"  aria-label="Value" min="0" step="any"/></td><td><input type="text"  aria-label="Remarks"/></td></tr>
+              <tr><td><input type="text"  aria-label="Description"/></td><td><input type="number"  aria-label="Value" min="0" step="any"/></td><td><input type="text"  aria-label="Remarks"/></td></tr>
+            </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="form-section-hd">2. LIABILITIES</div>
+        <div class="form-section-body">
+          <div class="saln-table-scroll">
+            <table class="saln-tbl">
+            <thead><tr><th>Description</th><th>Amount</th><th>Remarks</th></tr></thead>
+            <tbody>
+              <tr><td><input type="text" placeholder="e.g. Bank Loan" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 100000" aria-label="Amount" min="0" step="any"/></td><td><input type="text" placeholder="e.g. For car purchase" aria-label="Remarks"/></td></tr>
+              <tr><td><input type="text" placeholder="e.g. Credit Card" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 20000" aria-label="Amount" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Personal expenses" aria-label="Remarks"/></td></tr>
+            </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="form-section-hd">3. BUSINESS INTERESTS AND FINANCIAL CONNECTIONS</div>
+        <div class="form-section-body">
+          <div class="saln-table-scroll">
+            <table class="saln-tbl">
+            <thead style="background:#f1f5f9;">
+              <tr>
+                <th style="min-width:200px;">NAME OF ENTITY/BUSINESS ENTERPRISE</th>
+                <th style="min-width:180px;">BUSINESS ADDRESS</th>
+                <th style="min-width:220px;">NATURE OF BUSINESS INTEREST &/OR FINANCIAL CONNECTION</th>
+                <th style="min-width:180px;">DATE OF ACQUISITION OF INTEREST OR CONNECTION</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><input type="text" placeholder="e.g. ABC Corp." aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. Manila" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. Shareholder" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. 2022-05-01" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+              </tr>
+              <tr>
+                <td><input type="text" placeholder="e.g. XYZ Lending" aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. Tuguegarao" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. Investor" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. 2023-01-15" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+              </tr>
+              <tr>
+                <td><input type="text" placeholder="" aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+              </tr>
+            </tbody>
+            </table>
+          </div>
         </div>
       </div>
-
-      <!-- 2. Liabilities -->
-      <div class="form-section-hd">Liabilities</div>
-      <div class="form-section-body">
-        <div id="saln_liab_list"></div>
-        <button class="add-row-btn" onclick="addLiab()">+ Add Liability</button>
-        <div class="fg2" style="margin-top:12px;border-top:1.5px solid var(--g100);padding-top:10px;">
-          <div class="fg"><label>TOTAL LIABILITIES (₱)</label><input type="number" id="saln_total_liab" placeholder="0.00" step="0.01" style="background:var(--g50);font-weight:800;"/></div>
-          <div class="fg"><label>NET WORTH (₱) <span style="color:var(--accent);">= Total Assets − Total Liabilities</span></label><input type="number" id="saln_net_worth" placeholder="0.00" step="0.01" style="background:#f0fdf4;font-weight:800;"/></div>
-        </div>
-      </div>
-
-      <!-- 3. Business Interests -->
-      <div class="form-section-hd">Business Interests and Financial Connections</div>
-      <div class="form-section-body">
-        <p style="font-size:.74rem;color:var(--g600);margin-bottom:8px;">Of Declarant / Declarant's Spouse / Unmarried Children Below 18 Living in Declarant's Household</p>
-        <label style="display:flex;align-items:center;gap:8px;font-size:.84rem;font-weight:600;cursor:pointer;margin-bottom:10px;">
-          <input type="checkbox" id="saln_no_biz" onchange="toggleBiz()"/> I/We do not have any business interest or financial connection.
-        </label>
-        <div id="saln_biz_wrap">
-          <div id="saln_biz_list"></div>
-          <button class="add-row-btn" onclick="addBiz()">+ Add Business Interest</button>
-        </div>
-      </div>
-
-      <!-- 4. Relatives in Government -->
-      <div class="form-section-hd">Relatives in the Government Service</div>
-      <div class="form-section-body">
-        <p style="font-size:.74rem;color:var(--g600);margin-bottom:8px;">Within the Fourth Degree of Consanguinity or Affinity. Include also Bilas, Balae and Inso.</p>
-        <label style="display:flex;align-items:center;gap:8px;font-size:.84rem;font-weight:600;cursor:pointer;margin-bottom:10px;">
-          <input type="checkbox" id="saln_no_rel" onchange="toggleRel()"/> I/We do not know of any relative/s in the government service.
-        </label>
-        <div id="saln_rel_wrap">
-          <div id="saln_rel_list"></div>
-          <button class="add-row-btn" onclick="addRel()">+ Add Relative</button>
-        </div>
-      </div>
-
-      <!-- Government ID for SALN -->
-      <div class="form-section-hd">Government Issued ID</div>
-      <div class="form-section-body">
-        <div class="fg3">
-          <div class="fg"><label>Government Issued ID (type)</label><input type="text" id="saln_gov_id" placeholder="e.g. Philippine Passport"/></div>
-          <div class="fg"><label>ID No.</label><input type="text" id="saln_gov_id_no"/></div>
-          <div class="fg"><label>Date Issued</label><input type="date" id="saln_gov_id_issued"/></div>
-        </div>
-      </div>
-
       <div style="text-align:right;margin-top:20px;padding-bottom:30px;display:flex;gap:8px;justify-content:flex-end;">
-        <button class="save-form-btn" style="background:linear-gradient(135deg,#16a34a,#15803d);" onclick="printSALN()">🖨️ Print SALN</button>
-        <button class="save-form-btn" onclick="saveSALN()">💾 Save SALN</button>
+        <button class="save-form-btn" style="background:linear-gradient(135deg,#16a34a,#15803d);" onclick="printAnnex('annex_b')">🖨️ Print Annex B</button>
+        <button class="save-form-btn" onclick="saveAnnex('annex_b')">💾 Save Annex B</button>
+      </div>
+    </div>
+
+    <!-- ══ ANNEX C PAGE ══ -->
+    <div class="page" id="page-annex_c">
+      <div class="form-page">
+        <h2>Annex C — Spouse and Children's Assets, Liabilities and Net Worth (Sheet AS-2)</h2>
+        <div style="margin-bottom:10px;font-size:.92rem;">Additional sheet/s for the exclusive properties of the declarant's spouse and unmarried children below eighteen (18) years of age living in declarant's household.</div>
+        <div class="fg"><label>As of:</label><input type="text" placeholder="e.g. December 31, 2025"/></div>
+        <div class="form-section-hd">1. ASSETS</div>
+        <div class="form-section-body">
+          <div style="font-weight:700;margin-bottom:6px;">a. Real Properties</div>
+          <div class="saln-table-scroll">
+            <table class="saln-tbl">
+            <thead style="background:#f1f5f9;">
+              <tr>
+                <th style="min-width:170px;">Description<br><span style="font-weight:normal;font-size:5pt;">(e.g. lot, house and lot, condominium and improvements)</span></th>
+                <th style="min-width:120px;">Kind<br><span style="font-weight:normal;font-size:5pt;">(e.g. residential, commercial, industrial, agricultural, and mixed use)</span></th>
+                <th style="min-width:140px;">Exact Location</th>
+                <th style="min-width:120px;">Assessed Value<br></th>
+                <th style="min-width:140px;">Current Fair<br>Market Value</th>
+                <th style="min-width:110px;">Acquisition Year</th>
+                <th style="min-width:120px;">Acquisition Mode</th>
+                <th style="min-width:140px;">Acquisition Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><input type="text" placeholder="e.g. House and Lot" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. Residential" aria-label="Kind" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. 123 Main St." aria-label="Exact Location" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="e.g. 1000000" aria-label="Assessed Value" min="0" step="any" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="e.g. 1200000" aria-label="Current Fair Market Value" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="e.g. 2025" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. Purchase" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="e.g. 950000" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+              </tr>
+              <tr>
+                <td><input type="text"  aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td><input type="text"  aria-label="Kind" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="text"  aria-label="Exact Location" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number"  aria-label="Assessed Value" min="0" step="any" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number"  aria-label="Current Fair Market Value" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number"  aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
+                <td><input type="text"  aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number"  aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+              </tr>
+              <tr>
+                <td><input type="text" placeholder="" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Kind" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Exact Location" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Assessed Value" min="0" step="any" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Current Fair Market Value" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+              </tr>
+              <tr>
+                <td><input type="text" placeholder="" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Kind" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Exact Location" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Assessed Value" min="0" step="any" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Current Fair Market Value" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
+                <td><input type="number" placeholder="" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+              </tr>
+            </tbody>
+            </table>
+          </div>
+          
+          <div style="font-weight:700;margin:10px 0 6px;">b. Personal Properties</div>
+          <div class="saln-table-scroll">
+            <table class="saln-tbl">
+            <thead><tr><th>Description</th><th>Value</th><th>Remarks</th></tr></thead>
+            <tbody>
+              <tr><td><input type="text" placeholder="e.g. Jewelry" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 50000" aria-label="Value" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Gift from family" aria-label="Remarks"/></td></tr>
+              <tr><td><input type="text" placeholder="e.g. Vehicle" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 300000" aria-label="Value" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Car loan" aria-label="Remarks"/></td></tr>
+              <tr><td><input type="text"  aria-label="Description"/></td><td><input type="number"  aria-label="Value" min="0" step="any"/></td><td><input type="text"  aria-label="Remarks"/></td></tr>
+              <tr><td><input type="text"  aria-label="Description"/></td><td><input type="number"  aria-label="Value" min="0" step="any"/></td><td><input type="text"  aria-label="Remarks"/></td></tr>
+            </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="form-section-hd">2. LIABILITIES</div>
+        <div class="form-section-body">
+          <div class="saln-table-scroll">
+            <table class="saln-tbl">
+            <thead><tr><th>Description</th><th>Amount</th><th>Remarks</th></tr></thead>
+            <tbody>
+              <tr><td><input type="text" placeholder="e.g. Bank Loan" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 100000" aria-label="Amount" min="0" step="any"/></td><td><input type="text" placeholder="e.g. For car purchase" aria-label="Remarks"/></td></tr>
+              <tr><td><input type="text" placeholder="e.g. Credit Card" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 20000" aria-label="Amount" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Personal expenses" aria-label="Remarks"/></td></tr>
+            </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="form-section-hd">3. BUSINESS INTERESTS AND FINANCIAL CONNECTIONS</div>
+        <div class="form-section-body">
+          <div class="saln-table-scroll">
+            <table class="saln-tbl">
+            <thead style="background:#f1f5f9;">
+              <tr>
+                <th style="min-width:200px;">NAME OF ENTITY/BUSINESS ENTERPRISE</th>
+                <th style="min-width:180px;">BUSINESS ADDRESS</th>
+                <th style="min-width:220px;">NATURE OF BUSINESS INTEREST &/OR FINANCIAL CONNECTION</th>
+                <th style="min-width:180px;">DATE OF ACQUISITION OF INTEREST OR CONNECTION</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><input type="text" placeholder="e.g. ABC Corp." aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. Manila" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. Shareholder" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. 2022-05-01" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+              </tr>
+              <tr>
+                <td><input type="text" placeholder="e.g. XYZ Lending" aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. Tuguegarao" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. Investor" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="e.g. 2023-01-15" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+              </tr>
+              <tr>
+                <td><input type="text" placeholder="" aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>
+                <td><input type="text" placeholder="" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+              </tr>
+            </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div style="text-align:right;margin-top:20px;padding-bottom:30px;display:flex;gap:8px;justify-content:flex-end;">
+        <button class="save-form-btn" style="background:linear-gradient(135deg,#16a34a,#15803d);" onclick="printAnnex('annex_c')">🖨️ Print Annex C</button>
+        <button class="save-form-btn" onclick="saveAnnex('annex_c')">💾 Save Annex C</button>
       </div>
     </div>
   </div>
+
+  <!-- ══ SERVICE RECORD PAGE ══ -->
 
   <!-- ══ SERVICE RECORD PAGE ══ -->
   <div class="page" id="page-service_record">
@@ -2927,13 +3414,13 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
       <div id="srRequestBanner" style="display:none;padding:12px 16px;border-radius:10px;margin-bottom:14px;font-size:.84rem;font-weight:700;border:1.5px solid #fde68a;background:#fffbeb;color:#92400e;"></div>
 
       <!-- Records section — white card matching form-section style -->
-      <div class="form-section-hd">Service Record Entries</div>
-      <div class="form-section-body" style="padding:0;min-height:320px;">
-        <div id="srContent">
-          <div style="text-align:center;padding:60px 20px;color:var(--g400);">
-            <div style="font-size:3rem;margin-bottom:12px;">📜</div>
-            <div style="font-size:.90rem;font-weight:700;margin-bottom:6px;">No service record entries yet.</div>
-            <div style="font-size:.76rem;line-height:1.6;">Your service record will appear here once HR has entered your employment history.<br>Use the <strong>📨 Request Service Record</strong> button below to ask HR to prepare it.</div>
+      <div class="form-section-card" style="background:#fff;border-radius:16px;box-shadow:0 2px 16px rgba(37,99,235,0.07);border:1.5px solid #e2e8f0;max-width:1000px;margin:0 auto 0 auto;">
+        <div style="background:linear-gradient(90deg,#2563eb 70%,#1e40af 100%);color:#fff;font-weight:800;font-size:1.08rem;padding:18px 28px;border-radius:16px 16px 0 0;letter-spacing:.02em;display:flex;align-items:center;gap:10px;">
+          🗂️ <span style="margin-left:6px;">Service Record Entries</span>
+        </div>
+        <div class="form-section-body" style="padding:0;min-height:320px;border-radius:0 0 16px 16px;">
+          <div id="srContent" style="overflow-x:auto;padding:0 12px 18px 12px;box-sizing:border-box;width:100%;">
+            <!-- The table will be injected here by JS if entries exist -->
           </div>
         </div>
       </div>
@@ -3090,6 +3577,51 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
 <script src="../config/service_record_print_template.js?v=1"></script>
 
 <script>
+// Toggle annex links based on active page
+var annexVisible = false;
+function toggleAnnexLinks(activePage, isToggle) {
+  var annexLinks = document.querySelectorAll('.annex-link');
+  if (activePage === "saln") {
+    if (isToggle) annexVisible = !annexVisible;
+    annexLinks.forEach(function(btn){ btn.style.display = annexVisible ? "flex" : "none"; });
+  } else if (["annex_a","annex_b","annex_c"].includes(activePage)) {
+    annexVisible = true;
+    annexLinks.forEach(function(btn){ btn.style.display = "flex"; });
+  } else {
+    annexVisible = false;
+    annexLinks.forEach(function(btn){ btn.style.display = "none"; });
+  }
+}
+
+// Patch goPage to toggle annex links
+if (!window._originalGoPage) {
+  window._originalGoPage = window.goPage;
+  window.goPage = function(name, btn) {
+    toggleAnnexLinks(name, name === "saln");
+    if (window._originalGoPage) return window._originalGoPage.apply(this, arguments);
+  }
+}
+
+// On page load, set annex links visibility
+document.addEventListener('DOMContentLoaded', function() {
+  var active = document.querySelector('.sb-item.active');
+  var page = active && active.getAttribute('onclick') ? active.getAttribute('onclick').match(/goPage\('([^']+)'/) : null;
+  toggleAnnexLinks(page ? page[1] : 'dashboard', false);
+});
+
+// Patch goPage to toggle annex links
+var _goPage = window.goPage;
+window.goPage = function(name, btn) {
+  toggleAnnexLinks(name);
+  if (_goPage) return _goPage.apply(this, arguments);
+}
+
+// On page load, set annex links visibility
+document.addEventListener('DOMContentLoaded', function() {
+  var active = document.querySelector('.sb-item.active');
+  var page = active && active.getAttribute('onclick') ? active.getAttribute('onclick').match(/goPage\('([^']+)'/) : null;
+  toggleAnnexLinks(page ? page[1] : 'dashboard');
+});
 const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
 // ════════════════════════════════════════════════════════
 //  HELPERS
@@ -3237,12 +3769,21 @@ function showNonPermanentBanner(empType) {
 }
 
 function goPage(name, btn) {
-  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
-  document.querySelectorAll('.sb-item').forEach(b=>b.classList.remove('active'));
-  document.getElementById(`page-${name}`).classList.add('active');
+  document.querySelectorAll('.page').forEach(p => {
+    p.classList.remove('active');
+    p.style.display = 'none';
+  });
+  document.querySelectorAll('.sb-item').forEach(b => b.classList.remove('active'));
+  var pageDiv = document.getElementById(`page-${name}`);
+  if (pageDiv) {
+    pageDiv.classList.add('active');
+    pageDiv.style.display = '';
+  }
   if (btn) btn.classList.add('active');
-  document.getElementById('tbTitle').textContent = PAGE_META[name][0];
-  document.getElementById('tbSub').textContent   = PAGE_META[name][1];
+  if (PAGE_META[name]) {
+    document.getElementById('tbTitle').textContent = PAGE_META[name][0];
+    document.getElementById('tbSub').textContent   = PAGE_META[name][1];
+  }
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('mobOverlay').classList.remove('show');
   if (name === 'requests')  loadRequests();
@@ -3315,19 +3856,21 @@ function renderSRPage(r) {
     const branchRaw = String(sr.branch || '').trim();
     const branchNorm = branchRaw.toLowerCase().replace(/[^a-z]/g, '');
     const branchDisp = branchNorm === 'localgovernmentunit' ? 'LGU' : (branchRaw || '—');
-    const rowBg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
-    const baseTd = 'border:1px solid var(--g200);padding:7px 8px;vertical-align:middle;line-height:1.3;';
+    const rowBg = idx % 2 === 0 ? '#f9fafb' : '#fff';
+    const baseTd = 'border:1px solid var(--g200);padding:5px 6px;vertical-align:middle;line-height:1.3;';
+    // Show 'Present' if no to-date
+    const toDate = sr.date_to ? fmt(sr.date_to) : '<span style="color:#22c55e;font-weight:700;">Present</span>';
     return `
     <tr style="background:${rowBg};">
-      <td style="${baseTd}white-space:nowrap;font-size:.78rem;text-align:center;">${sr.date_from ? fmt(sr.date_from) : '—'}</td>
-      <td style="${baseTd}white-space:nowrap;font-size:.78rem;text-align:center;">${sr.date_to   ? fmt(sr.date_to)   : '—'}</td>
+      <td style="${baseTd}white-space:nowrap;font-size:.77rem;text-align:center;">${sr.date_from ? fmt(sr.date_from) : '—'}</td>
+      <td style="${baseTd}white-space:nowrap;font-size:.77rem;text-align:center;">${toDate}</td>
       <td style="${baseTd}font-weight:600;word-break:break-word;">${escSR(sr.designation||'—')}</td>
       <td style="${baseTd}text-align:center;"><span style="display:inline-block;padding:3px 9px;border-radius:12px;font-size:.70rem;font-weight:800;background:#eff6ff;color:#1e40af;">${escSR(sr.status||'—')}</span></td>
       <td style="${baseTd}text-align:right;font-weight:700;white-space:nowrap;">${sr.salary ? '₱'+parseFloat(sr.salary).toLocaleString('en-PH',{minimumFractionDigits:2}) : '—'}</td>
       <td style="${baseTd}word-break:break-word;">${escSR(branchDisp)}</td>
       <td style="${baseTd}word-break:break-word;">${escSR(sr.station||'—')}</td>
       <td style="${baseTd}font-size:.75rem;color:var(--g500);text-align:center;">${escSR(sr.lvbs_wo_pay||'—')}</td>
-      <td style="${baseTd}white-space:nowrap;font-size:.78rem;text-align:center;">${sr.separation_date ? fmt(sr.separation_date) : '—'}</td>
+      <td style="${baseTd}white-space:nowrap;font-size:.77rem;text-align:center;">${sr.separation_date ? fmt(sr.separation_date) : '—'}</td>
       <td style="${baseTd}word-break:break-word;">${escSR(sr.separation_cause||'—')}</td>
     </tr>`;
   }).join('');
@@ -3336,26 +3879,26 @@ function renderSRPage(r) {
     <div style="overflow-x:auto;border:1px solid var(--g200);border-top:none;border-radius:0 0 12px 12px;">
       <table style="width:100%;min-width:1120px;border-collapse:collapse;table-layout:fixed;font-size:.80rem;background:#fff;">
         <colgroup>
-          <col style="width:96px"><col style="width:96px"><col style="width:220px"><col style="width:120px"><col style="width:130px"><col style="width:170px"><col style="width:180px"><col style="width:110px"><col style="width:110px"><col style="width:180px">
+          <col style="width:90px"><col style="width:90px"><col style="width:180px"><col style="width:100px"><col style="width:110px"><col style="width:120px"><col style="width:120px"><col style="width:90px"><col style="width:90px"><col style="width:120px">
         </colgroup>
-        <thead>
+        <thead style="position:sticky;top:0;z-index:2;background:#f1f5f9;">
           <tr>
-            <th colspan="2" style="background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;padding:7px 8px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;">Service</th>
-            <th colspan="3" style="background:#f3e8ff;color:#6b21a8;border:1px solid #d8b4fe;padding:7px 8px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;">Record of Appointment</th>
-            <th colspan="2" style="background:#dcfce7;color:#166534;border:1px solid #86efac;padding:7px 8px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;">Office / Entity</th>
-            <th rowspan="2" style="background:var(--g100);border:1px solid var(--g200);padding:7px 8px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;vertical-align:bottom;">LVBS<br>W/O Pay</th>
-            <th colspan="2" style="background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;padding:7px 8px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;">Separation</th>
+            <th colspan="2" style="background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;padding:6px 6px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;">Service</th>
+            <th colspan="3" style="background:#f3e8ff;color:#6b21a8;border:1px solid #d8b4fe;padding:6px 6px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;">Record of Appointment</th>
+            <th colspan="2" style="background:#dcfce7;color:#166534;border:1px solid #86efac;padding:6px 6px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;">Office / Entity</th>
+            <th rowspan="2" style="background:var(--g100);border:1px solid var(--g200);padding:6px 6px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;vertical-align:bottom;">LVBS<br>W/O Pay</th>
+            <th colspan="2" style="background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;padding:6px 6px;text-align:center;font-size:.70rem;font-weight:800;text-transform:uppercase;">Separation</th>
           </tr>
           <tr>
-            <th style="background:var(--g100);border:1px solid var(--g200);padding:6px 8px;font-size:.68rem;font-weight:800;color:var(--g600);text-align:center;">From</th>
-            <th style="background:var(--g100);border:1px solid var(--g200);padding:6px 8px;font-size:.68rem;font-weight:800;color:var(--g600);text-align:center;">To</th>
-            <th style="background:var(--g100);border:1px solid var(--g200);padding:6px 8px;font-size:.68rem;font-weight:800;color:var(--g600);">Designation</th>
-            <th style="background:var(--g100);border:1px solid var(--g200);padding:6px 8px;font-size:.68rem;font-weight:800;color:var(--g600);text-align:center;">Status</th>
-            <th style="background:var(--g100);border:1px solid var(--g200);padding:6px 8px;font-size:.68rem;font-weight:800;color:var(--g600);text-align:right;">Salary/Annum</th>
-            <th style="background:var(--g100);border:1px solid var(--g200);padding:6px 8px;font-size:.68rem;font-weight:800;color:var(--g600);">Branch</th>
-            <th style="background:var(--g100);border:1px solid var(--g200);padding:6px 8px;font-size:.68rem;font-weight:800;color:var(--g600);">Station/Place</th>
-            <th style="background:var(--g100);border:1px solid var(--g200);padding:6px 8px;font-size:.68rem;font-weight:800;color:var(--g600);text-align:center;">Date</th>
-            <th style="background:var(--g100);border:1px solid var(--g200);padding:6px 8px;font-size:.68rem;font-weight:800;color:var(--g600);">Cause</th>
+            <th style="background:var(--g100);border:1px solid var(--g200);padding:5px 6px;font-size:.68rem;font-weight:800;color:var(--g600);text-align:center;">From</th>
+            <th style="background:var(--g100);border:1px solid var(--g200);padding:5px 6px;font-size:.68rem;font-weight:800;color:var(--g600);text-align:center;">To</th>
+            <th style="background:var(--g100);border:1px solid var(--g200);padding:5px 6px;font-size:.68rem;font-weight:800;color:var(--g600);">Designation</th>
+            <th style="background:var(--g100);border:1px solid var(--g200);padding:5px 6px;font-size:.68rem;font-weight:800;color:var(--g600);text-align:center;">Status</th>
+            <th style="background:var(--g100);border:1px solid var(--g200);padding:5px 6px;font-size:.68rem;font-weight:800;color:var(--g600);text-align:right;">Salary/Annum</th>
+            <th style="background:var(--g100);border:1px solid var(--g200);padding:5px 6px;font-size:.68rem;font-weight:800;color:var(--g600);">Branch</th>
+            <th style="background:var(--g100);border:1px solid var(--g200);padding:5px 6px;font-size:.68rem;font-weight:800;color:var(--g600);">Station/Place</th>
+            <th style="background:var(--g100);border:1px solid var(--g200);padding:5px 6px;font-size:.68rem;font-weight:800;color:var(--g600);text-align:center;">Date</th>
+            <th style="background:var(--g100);border:1px solid var(--g200);padding:5px 6px;font-size:.68rem;font-weight:800;color:var(--g600);">Cause</th>
           </tr>
         </thead>
         <tbody>
@@ -3976,7 +4519,10 @@ function renderBalancesPage() {
     const histHtml=b.history&&b.history.length?b.history.map(h=>`<div class="hist-row"><span style="font-weight:700;">${b.type_name} (${h.days_requested} day${h.days_requested!=1?'s':''})</span><span class="hist-date">${fmt(h.date_from)}${h.date_from!==h.date_to?' – '+fmt(h.date_to):''}</span></div>`).join(''):`<div class="hist-none">No ${b.type_name.toLowerCase()} leaves used this year.</div>`;
     const lockBanner = isLocked ? `<div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:7px 12px;font-size:.73rem;font-weight:700;color:#92400e;margin-bottom:8px;">🔒 ${b.disabled_reason}</div>` : '';
     const cardStyle = (isLocked || hasNoLeaves) ? 'opacity:.6;filter:grayscale(.6);' : '';
-    const fileButton = (!isLocked && !hasNoLeaves) ? `<button class="file-btn" onclick="fileLeaveForType('${b.type_name}',${b.leave_type_id})" title="File ${b.type_name} request" style="background:none;border:none;cursor:pointer;font-size:2rem;padding:0;color:${c};transition:all .2s;hover:opacity:.8;">➕</button>` : hasNoLeaves ? `<button class="file-btn" disabled title="No remaining leaves for ${b.type_name}" style="background:none;border:none;cursor:not-allowed;font-size:2rem;padding:0;color:${c};opacity:.4;transition:all .2s;">➕</button>` : '';
+    // Always enable the + button unless locked, to allow filing even with zero balance (for Without Pay)
+    const fileButton = !isLocked
+      ? `<button class="file-btn" onclick="fileLeaveForType('${b.type_name}',${b.leave_type_id})" title="File ${b.type_name} request" style="background:none;border:none;cursor:pointer;font-size:2rem;padding:0;color:${c};transition:all .2s;hover:opacity:.8;">➕</button>`
+      : '';
     return `<div class="bal-card" style="animation-delay:${i*.05}s;${cardStyle}">${lockBanner}<div class="bc-top"><div><div class="bc-title">${isLocked?'🔒':icon} ${b.type_name}</div><div class="bc-sub">CY <?= date('Y') ?> Credits</div></div><div class="bc-icon" style="background:${c}22;display:flex;align-items:center;justify-content:center;">${fileButton || icon}</div></div><div class="bc-nums"><div class="bc-nb"><div class="bc-n" style="color:var(--primary);">${b.total_credits}</div><div class="bc-nl">Total</div></div><div class="bc-nb"><div class="bc-n" style="color:var(--warn);">${b.used_days}</div><div class="bc-nl">Used</div></div><div class="bc-nb"><div class="bc-n" style="color:var(--accent);">${b.remaining_days}</div><div class="bc-nl">Left</div></div></div><div class="bc-bar"><div class="bc-fill" style="width:${pct}%;background:${c};"></div></div>${pendingAvailBanner}<div class="hist"><div class="hist-label">Recent Usage</div>${histHtml}</div></div>`;
   }).join('');
   
@@ -4087,13 +4633,13 @@ function renderLeaveTypePicker() {
 
   // ── 2. Consumed leave types (all days used up) ───────────────
   if (consumed.length) {
-    html += `<div style="grid-column:1/-1;font-size:.72rem;font-weight:700;color:var(--g400);letter-spacing:.04em;padding:8px 2px 2px;border-top:1px dashed var(--g200);margin-top:4px;">⛔ FULLY CONSUMED — No remaining days</div>`;
+    html += `<div style="grid-column:1/-1;font-size:.72rem;font-weight:700;color:var(--g400);letter-spacing:.04em;padding:8px 2px 2px;border-top:1px dashed var(--g200);margin-top:4px;">⛔ FULLY CONSUMED — No remaining days (You may still file as WITHOUT PAY)</div>`;
     consumed.forEach(lt => {
       const icon = TYPE_ICONS[lt.name] || '📅';
-      html += `<div class="lt-opt lt-opt-disabled" title="No remaining days for ${lt.name}" style="cursor:not-allowed;opacity:.4;filter:grayscale(1);pointer-events:none;">
-        <div class="lt-icon" style="font-size:1.1rem;">⛔</div>
-        <div class="lt-name" style="color:var(--g400);">${lt.name}</div>
-        <div class="lt-avail" style="color:#ef4444;font-size:.68rem;font-weight:700;">0 days remaining</div>
+      html += `<div class="lt-opt lt-opt-consumed" data-id="${lt.leave_type_id}" data-name="${lt.name}" data-bal="0" onclick="pickLT(this)" title="No remaining days for ${lt.name} (will be filed as WITHOUT PAY)">
+        <div class="lt-icon" style="font-size:1.1rem;color:#ef4444;">⛔</div>
+        <div class="lt-name" style="color:#ef4444;">${lt.name}</div>
+        <div class="lt-avail" style="color:#ef4444;font-size:.68rem;font-weight:700;">0 days remaining (Without Pay)</div>
       </div>`;
     });
   }
@@ -4457,13 +5003,16 @@ async function submitLeave() {
     return;
   }
   
-  if(days>selTypeBal){showToast(`⚠️ ${days} days exceeds your ${selTypeBal}-day ${selTypeName} balance.`,'error');return;}
+  // Allow filing as WITHOUT PAY if balance is 0 (fully consumed)
+  if(days>selTypeBal && selTypeBal > 0){
+    showToast(`⚠️ ${days} days exceeds your ${selTypeBal}-day ${selTypeName} balance.`,'error');
+    return;
+  }
   if(!selTypeId){showToast('⚠️ Please select a leave type.','info');return;}
   // Check if selected type is disabled (marriage-restricted)
   const selType = leaveTypes.find(lt => lt.leave_type_id == selTypeId);
   if(selType && selType.disabled_reason){showToast('🔒 ' + selType.disabled_reason,'error');return;}
-  // Check if selected type is fully consumed
-  if(selType && parseInt(selType.remaining_days) <= 0){showToast('⛔ You have no remaining days for ' + selTypeName + ' this year.','error');return;}
+  // Do not block fully consumed leave types; allow filing as WITHOUT PAY
   // Combine detail + reason
   var detail = getLeaveDetail();
   var fullReason = detail ? '[' + detail + '] ' + reason : reason;
@@ -5476,6 +6025,15 @@ function saln_v(id, val) {
   var el = document.getElementById(id);
   if (!el) return;
   if (el.type === 'checkbox') { el.checked = !!val; return; }
+  // Fix: Don't set invalid date values
+  if (el.type === 'date') {
+    if (!val || val === '0000-00-00' || val === '1970-01-01') {
+      el.value = '';
+    } else {
+      el.value = val;
+    }
+    return;
+  }
   el.value = val !== undefined && val !== null ? val : '';
 }
 function saln_g(id) {
@@ -5698,6 +6256,291 @@ function printSALN() {
   }, null, true);
 }
 
+// ════════════════════════════════════════════════════════
+//  ANNEX B / C — Save & Print
+// ════════════════════════════════════════════════════════
+function saveAnnex(which) {
+  const label = which === 'annex_b' ? 'Annex B' : 'Annex C';
+  const page  = document.getElementById('page-' + which);
+  if (!page) return;
+
+  // Collect all table inputs into a plain object keyed by section
+  const data = {};
+  page.querySelectorAll('table').forEach((tbl, ti) => {
+    const rows = [];
+    tbl.querySelectorAll('tbody tr').forEach(tr => {
+      const row = {};
+      tr.querySelectorAll('input, select').forEach((inp, ci) => {
+        row['col_' + ci] = inp.value.trim();
+      });
+      rows.push(row);
+    });
+    data['table_' + ti] = rows;
+  });
+
+  // Store in localStorage as a lightweight save
+  try {
+    localStorage.setItem('hrms_' + which, JSON.stringify({ saved_at: new Date().toISOString(), data }));
+    showToast('✅ ' + label + ' saved locally.', 'success');
+  } catch(e) {
+    showToast('❌ Could not save ' + label + '.', 'error');
+  }
+}
+
+function printAnnex(which) {
+  if (which === 'annex_b') {
+    // --- ANNEX B PRINT LOGIC ---
+    const page = document.getElementById('page-annex_b');
+    if (!page) return;
+    const asOf = (page.querySelector('input[placeholder*="December"]') || {}).value || '';
+    // Get table values
+    const getTableInputs = (selector, colCount, rowCount) => {
+      const tbl = page.querySelector(selector);
+      if (!tbl) return Array(rowCount).fill(0).map(()=>Array(colCount).fill(''));
+      const rows = [...tbl.querySelectorAll('tbody tr')];
+      return Array(rowCount).fill(0).map((_,i)=>
+        Array(colCount).fill(0).map((_,j)=>{
+          const cell = rows[i]?.children[j];
+          if (!cell) return '';
+          const inp = cell.querySelector('input,select');
+          return inp ? (inp.value||'') : '';
+        })
+      );
+    };
+    // Real Properties: 8 cols, 4 rows
+    const real = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(1) table', 8, 4);
+    // Personal Properties: 3 cols, 4 rows
+    const pers = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(2) table', 3, 4);
+    // Liabilities: 3 cols, 4 rows
+    const liab = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(3) table', 3, 4);
+    // Business Interests: 4 cols, 3 rows
+    const biz = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(4) table', 4, 3);
+
+    const css = `
+      *{box-sizing:border-box;margin:0;padding:0;}
+      body{font-family:'Arial Narrow',Arial,sans-serif;font-size:9pt;color:#000;padding:12mm 14mm;}
+      @page{size:8.5in 13in;margin:12mm 14mm;}
+      h2{font-size:11pt;font-weight:700;text-align:center;text-transform:uppercase;margin-bottom:4pt;}
+      .sub{font-size:8pt;text-align:center;margin-bottom:12pt;color:#444;}
+      .as-of{font-size:9pt;margin-bottom:10pt;}
+      .section-hd{font-size:9pt;font-weight:700;background:#e0e0e0;padding:4pt 6pt;border:0.5pt solid #000;margin-bottom:0;text-transform:uppercase;}
+      table{width:100%;border-collapse:collapse;margin-bottom:10pt;}
+      th{background:#e8e8e8;border:0.5pt solid #000;padding:4pt 6pt;font-size:8pt;font-weight:700;text-align:left;}
+      td{border:0.5pt solid #000;padding:4pt 6pt;font-size:8.5pt;min-height:14pt;vertical-align:middle;}
+      .tbl-section-hd{background:#e0e0e0;font-weight:700;text-align:left;font-size:9pt;padding:6pt 4pt;border:0.5pt solid #000;}
+      .tbl-subhd{background:#f3f3f3;font-weight:700;text-align:left;font-size:8pt;padding:4pt 4pt;border:0.5pt solid #000;}
+    `;
+    const html = `<!DOCTYPE html>
+<html><head>
+    <meta charset="UTF-8"/>
+    <title>Annex B — Declarant's Assets, Liabilities and Net Worth (Sheet AS-1)</title>
+    <style>${css}</style>
+</head><body>
+    <div style="width:100%;display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:2pt;">
+      <div></div>
+      <div style="text-align:right;font-size:8pt;line-height:1.3;">
+        SALN Form AS-1 (Declarant)<br>
+        Per CSC Resolution No. 2500632<br>
+        Promulgated on 25 June 2025
+      </div>
+    </div>
+    <h2>ANNEX B — DECLARANT'S ASSETS, LIABILITIES AND NET WORTH (SHEET AS-1)</h2>
+    <div class="sub">2025 SALN Form · Per CSC Resolution No. 2500632</div>
+    ${asOf ? `<div class="as-of"><strong>As of:</strong> ${asOf}</div>` : ''}
+    <div class="tbl-section-hd">1. ASSETS</div>
+    <div class="tbl-subhd">a. Real Properties</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Description<br><span style="font-weight:normal;font-size:7pt;">(e.g. lot, house and lot, condominium and improvements)</span></th>
+          <th>Kind<br><span style="font-weight:normal;font-size:7pt;">(e.g. residential, commercial, industrial, agricultural, and mixed use)</span></th>
+          <th>Exact Location</th>
+          <th>Assessed Value<br><span style="font-weight:normal;font-size:7pt;">(As found in the Tax Declaration of Real Property)</span></th>
+          <th>Current Fair<br>Market Value</th>
+          <th>Acquisition Year</th>
+          <th>Acquisition Mode</th>
+          <th>Acquisition Cost</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${real.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
+      </tbody>
+    </table>
+    <div class="tbl-subhd">b. Personal Properties</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Description</th>
+          <th>Acquisition Year</th>
+          <th>Acquisition Cost / Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${pers.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
+      </tbody>
+    </table>
+    <div class="tbl-section-hd">2. LIABILITIES</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Nature</th>
+          <th>Name of Creditors</th>
+          <th>Outstanding Balance</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${liab.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
+      </tbody>
+    </table>
+    <div class="tbl-section-hd">3. BUSINESS INTERESTS AND FINANCIAL CONNECTIONS</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Name of Entity/Business Enterprise</th>
+          <th>Business Address</th>
+          <th>Nature of Business Interest &/or Financial Connection</th>
+          <th>Date of Acquisition of Interest or Connection</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${biz.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
+      </tbody>
+    </table>
+</body></html>`;
+    const w = window.open('', '_blank', 'width=900,height=1100');
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 500);
+    return;
+  }
+  if (which === 'annex_c') {
+    // --- ANNEX C PRINT LOGIC ---
+    const page = document.getElementById('page-annex_c');
+    if (!page) return;
+    // Helper to get table values
+    const getTableInputs = (selector, colCount, rowCount) => {
+      const tbl = page.querySelector(selector);
+      if (!tbl) return Array(rowCount).fill(0).map(()=>Array(colCount).fill(''));
+      const rows = [...tbl.querySelectorAll('tbody tr')];
+      return Array(rowCount).fill(0).map((_,i)=>
+        Array(colCount).fill(0).map((_,j)=>{
+          const cell = rows[i]?.children[j];
+          if (!cell) return '';
+          const inp = cell.querySelector('input,select');
+          return inp ? (inp.value||'') : '';
+        })
+      );
+    };
+    // Real Properties: 8 cols, 5 rows
+    const real = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(1) table', 8, 5);
+    // Personal Properties: 3 cols, 4 rows
+    const pers = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(2) table', 3, 4);
+    // Liabilities: 3 cols, 4 rows
+    const liab = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(3) table', 3, 4);
+    // Business Interests: 4 cols, 3 rows
+    const biz = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(4) table', 4, 3);
+
+    const css = `
+      *{box-sizing:border-box;margin:0;padding:0;}
+      body{font-family:'Arial Narrow',Arial,sans-serif;font-size:9pt;color:#000;padding:12mm 14mm;}
+      @page{size:8.5in 13in;margin:12mm 14mm;}
+      h2{font-size:11pt;font-weight:700;text-align:center;text-transform:uppercase;margin-bottom:4pt;}
+      .sub{font-size:8pt;text-align:center;margin-bottom:12pt;color:#444;}
+      .section-hd{font-size:9pt;font-weight:700;background:#e0e0e0;padding:4pt 6pt;border:0.5pt solid #000;margin-bottom:0;text-transform:uppercase;}
+      table{width:100%;border-collapse:collapse;margin-bottom:10pt;}
+      th{background:#d1d5db;border:1.5pt solid #000;padding:6pt 4pt;font-size:10pt;font-weight:700;text-align:center;}
+      td{border:1.5pt solid #000;padding:8pt 4pt;font-size:10pt;min-height:14pt;vertical-align:middle;text-align:center;}
+    `;
+    const html = `<!DOCTYPE html>
+<html><head>
+    <meta charset="UTF-8"/>
+    <title>Annex C</title>
+    <style>${css}</style>
+</head><body>
+    <h2 style="text-align:left;margin-bottom:0;">1. ASSETS</h2>
+    <div style="font-size:1.2em;font-weight:700;margin:10pt 0 2pt 0;text-align:left;">a. Real Properties</div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>DESCRIPTION<br><span style="font-weight:normal;font-size:9pt;">(e.g. lot, house and lot, condominium and improvements)</span></th>
+            <th>KIND<br><span style="font-weight:normal;font-size:9pt;">(e.g. residential, commercial, industrial, agricultural and mixed use)</span></th>
+            <th>EXACT<br>LOCATION</th>
+            <th>ASSESSED<br>VALUE<br><span style="font-weight:normal;font-size:9pt;">(As found in the Tax Declaration of Real Property)</span></th>
+            <th>CURRENT FAIR<br>MARKET VALUE</th>
+            <th colspan="2">ACQUISITION<br>YEAR / MODE</th>
+            <th>ACQUISITION<br>COST</th>
+          </tr>
+          <tr>
+            <th colspan="5"></th>
+            <th>YEAR</th>
+            <th>MODE</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${real.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div style="font-size:1.1em;font-weight:700;margin:18pt 0 2pt 0;text-align:left;">b. Personal Properties</div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>DESCRIPTION</th>
+            <th>ACQUISITION YEAR</th>
+            <th>ACQUISITION COST / AMOUNT</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${pers.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <h2 style="text-align:left;margin-top:24pt;">2. LIABILITIES</h2>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>NATURE</th>
+            <th>NAME OF CREDITORS</th>
+            <th>OUTSTANDING BALANCE</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${liab.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div style="font-size:1.1em;font-weight:700;margin:18pt 0 2pt 0;text-align:left;text-transform:uppercase;">Business Interests and Financial Connections</div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>NAME OF ENTITY/BUSINESS ENTERPRISE</th>
+            <th>BUSINESS ADDRESS</th>
+            <th>NATURE OF BUSINESS INTEREST &/OR FINANCIAL CONNECTION</th>
+            <th>DATE OF ACQUISITION OF INTEREST OR CONNECTION</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${biz.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+</body></html>`;
+    const w = window.open('', '_blank', 'width=900,height=1100');
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 500);
+    return;
+  }
+  // fallback for other annexes
+  return;
+}
 function buildSALNPrintHTML(d, emp, openPrint) {
   const sj   = s => { try{ return s?JSON.parse(s):null; }catch(e){return null;} };
   const v    = x => (x===null||x===undefined||x===''||x==='null') ? '' : String(x);

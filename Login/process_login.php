@@ -88,14 +88,20 @@ if (!(bool)$user['is_active']) {
 // ── Role mismatch check ───────────────────────────────────────
 // If someone clicks "Employee" toggle but their DB role is admin (or vice versa),
 // warn them instead of silently redirecting to the wrong portal.
-$dbRole      = $user['role'];
-$isAdminRole = in_array($dbRole, ['admin', 'hr_staff', 'dept_head']);
 
+$dbRole = $user['role'];
+$isAdminRole = in_array($dbRole, ['admin', 'hr_staff']); // dept_head is now allowed as employee
+
+
+// Allow dept_head to log in as employee, but block as admin/hr
 if ($role === 'employee' && $isAdminRole) {
     redirectBack('This account is an Admin/HR account. Please use the Admin/HR login.', $email, $role);
 }
 if ($role !== 'employee' && $dbRole === 'employee') {
     redirectBack('This account is an Employee account. Please use the Employee login.', $email, $role);
+}
+if ($role !== 'employee' && $dbRole === 'dept_head') {
+    redirectBack('Department Heads must use the Employee login.', $email, $role);
 }
 
 // ── Regenerate session (clear any old admin session) ──────────

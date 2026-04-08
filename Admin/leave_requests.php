@@ -156,32 +156,33 @@ if ($action) {
 
             case 'get':
                 $id   = (int)($_GET['id'] ?? 0);
-                $stmt = $pdo->prepare("
-                    SELECT lr.request_id, lr.status, lr.date_from, lr.date_to,
-                           lr.days_requested, lr.reason, lr.admin_remarks,
-                           lr.filed_at, lr.reviewed_by, lr.reviewed_at,
-                           e.first_name,
-                           COALESCE(e.middle_name, '')  AS middle_name,
-                           e.last_name,
-                           COALESCE(e.position_title, '') AS position_title,
-                           COALESCE(e.salary_grade, '')   AS salary_grade,
-                           COALESCE(e.employment_type,'') AS employment_type,
-                           lt.name AS leave_type,
-                           lt.leave_type_id,
-                           COALESCE(d.name, '')          AS department,
-                           COALESCE(lb.total_credits, 0) AS vl_total,
-                           COALESCE(lb.used_days, 0)     AS vl_used,
-                           COALESCE(lb.remaining_days, 0)AS vl_remaining
-                    FROM leave_requests lr
-                    JOIN employees   e  ON lr.employee_id   = e.employee_id
-                    JOIN leave_types lt ON lr.leave_type_id = lt.leave_type_id
-                    LEFT JOIN departments d   ON e.department_id    = d.department_id
-                    LEFT JOIN leave_balances lb
-                           ON lb.employee_id   = lr.employee_id
-                          AND lb.leave_type_id = lr.leave_type_id
-                          AND lb.calendar_year = YEAR(lr.date_from)
-                    WHERE lr.request_id = ?
-                ");
+                  $stmt = $pdo->prepare("
+                      SELECT lr.request_id, lr.status, lr.date_from, lr.date_to,
+                        lr.days_requested, lr.reason, lr.admin_remarks,
+                        lr.filed_at, lr.reviewed_by, lr.reviewed_at,
+                        lr.with_pay,
+                        e.first_name,
+                        COALESCE(e.middle_name, '')  AS middle_name,
+                        e.last_name,
+                        COALESCE(e.position_title, '') AS position_title,
+                        COALESCE(e.salary_grade, '')   AS salary_grade,
+                        COALESCE(e.employment_type,'') AS employment_type,
+                        lt.name AS leave_type,
+                        lt.leave_type_id,
+                        COALESCE(d.name, '')          AS department,
+                        COALESCE(lb.total_credits, 0) AS vl_total,
+                        COALESCE(lb.used_days, 0)     AS vl_used,
+                        COALESCE(lb.remaining_days, 0)AS vl_remaining
+                      FROM leave_requests lr
+                      JOIN employees   e  ON lr.employee_id   = e.employee_id
+                      JOIN leave_types lt ON lr.leave_type_id = lt.leave_type_id
+                      LEFT JOIN departments d   ON e.department_id    = d.department_id
+                      LEFT JOIN leave_balances lb
+                        ON lb.employee_id   = lr.employee_id
+                       AND lb.leave_type_id = lr.leave_type_id
+                       AND lb.calendar_year = YEAR(lr.date_from)
+                      WHERE lr.request_id = ?
+                  ");
                 $stmt->execute([$id]);
                 $row = $stmt->fetch();
                 echo json_encode($row
@@ -1517,8 +1518,14 @@ if (!CSRF_TOKEN) {
     }
 
     if (statusNorm === 'approved') {
-      setLine('cf-approved-pay', String(r.days_requested || ''));
-      setLine('cf-approved-nopay', '');
+      // Show days with pay or without pay based on r.with_pay
+      if (r.with_pay === 0 || r.with_pay === '0') {
+        setLine('cf-approved-pay', '');
+        setLine('cf-approved-nopay', String(r.days_requested || ''));
+      } else {
+        setLine('cf-approved-pay', String(r.days_requested || ''));
+        setLine('cf-approved-nopay', '');
+      }
       setLine('cf-approved-others', '');
       fillDisapproveLines('');
     } else if (statusNorm === 'denied') {
