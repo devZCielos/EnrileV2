@@ -1,5 +1,3 @@
-﻿
-
 <?php
 // DEBUG: Show all errors for troubleshooting
 ini_set('display_errors', 1);
@@ -122,13 +120,14 @@ if ($action) {
             if (!$deptId) {
               echo json_encode(['success' => false, 'message' => 'No department assigned.']); break;
             }
-            // Get pending leave requests for employees in this department
+            // Get all relevant leave requests for employees in this department (pending, approved, denied)
             $query = "
               SELECT lr.*, lt.name AS type_name, e.first_name, e.last_name
               FROM leave_requests lr
               JOIN employees e ON e.employee_id = lr.employee_id
               JOIN leave_types lt ON lt.leave_type_id = lr.leave_type_id
-              WHERE e.department_id = ? AND lr.status = 'Pending Dept Head'
+              WHERE e.department_id = ?
+                AND lr.status IN ('Pending Dept Head', 'Pending HR', 'Denied by Dept Head')
               ORDER BY lr.filed_at ASC
             ";
             $stmt = $pdo->prepare($query);
@@ -434,27 +433,41 @@ if ($action) {
                 $status = $_GET['status'] ?? 'all';
                 $where  = 'lr.employee_id = ?';
                 $params = [$employeeId];
-                if ($status !== 'all') { $where .= ' AND lr.status = ?'; $params[] = ucfirst($status); }
+                $pendingStatuses = ['Pending', 'Pending Dept Head', 'Pending HR'];
+                if ($status !== 'all') {
+                  if (strtolower($status) === 'pending') {
+                    $where .= ' AND lr.status IN (?,?,?)';
+                    array_push($params, ...$pendingStatuses);
+                  } else {
+                    $where .= ' AND lr.status = ?';
+                    $params[] = ucfirst($status);
+                  }
+                }
 
                 $stmt = $pdo->prepare("
-                    SELECT lr.*, lt.name AS type_name
-                    FROM   leave_requests lr
-                    JOIN   leave_types lt ON lt.leave_type_id = lr.leave_type_id
-                    WHERE  $where
-                    ORDER  BY lr.filed_at DESC
+                  SELECT lr.*, lt.name AS type_name
+                  FROM   leave_requests lr
+                  JOIN   leave_types lt ON lt.leave_type_id = lr.leave_type_id
+                  WHERE  $where
+                  ORDER  BY lr.filed_at DESC
                 ");
                 $stmt->execute($params);
                 $rows = $stmt->fetchAll();
 
+                // Count logic: group all pending-like statuses under 'Pending'
                 $counts = $pdo->prepare("
-                    SELECT status, COUNT(*) AS cnt
-                    FROM   leave_requests WHERE employee_id = ?
-                    GROUP  BY status
+                  SELECT status, COUNT(*) AS cnt
+                  FROM   leave_requests WHERE employee_id = ?
+                  GROUP  BY status
                 ");
                 $counts->execute([$employeeId]);
                 $statusCounts = ['Pending'=>0,'Approved'=>0,'Denied'=>0,'Cancelled'=>0];
                 foreach ($counts->fetchAll() as $sc) {
+                  if (in_array($sc['status'], $pendingStatuses)) {
+                    $statusCounts['Pending'] += (int)$sc['cnt'];
+                  } elseif (isset($statusCounts[$sc['status']])) {
                     $statusCounts[$sc['status']] = (int)$sc['cnt'];
+                  }
                 }
 
                 ob_clean();
@@ -630,10 +643,14 @@ if ($action) {
             // ── CANCEL LEAVE ──────────────────────────────────
             case 'cancel_leave':
                 $reqId = (int)($_POST['request_id'] ?? 0);
-                $chk   = $pdo->prepare("SELECT request_id FROM leave_requests WHERE request_id = ? AND employee_id = ? AND status = 'Pending'");
-                $chk->execute([$reqId, $employeeId]);
+                $pendingLike = [
+                  'Pending', 'Pending Dept Head', 'Pending HR'
+                ];
+                $inClause = implode(',', array_fill(0, count($pendingLike), '?'));
+                $chk = $pdo->prepare("SELECT request_id FROM leave_requests WHERE request_id = ? AND employee_id = ? AND status IN ($inClause)");
+                $chk->execute(array_merge([$reqId, $employeeId], $pendingLike));
                 if (!$chk->fetch()) {
-                    echo json_encode(['success' => false, 'message' => 'Request not found or cannot be cancelled.']); break;
+                  echo json_encode(['success' => false, 'message' => 'Request not found or cannot be cancelled.']); break;
                 }
                 $pdo->prepare("UPDATE leave_requests SET status = 'Cancelled', updated_at = NOW() WHERE request_id = ?")->execute([$reqId]);
                 echo json_encode(['success' => true, 'message' => 'Leave request cancelled.']);
@@ -1134,6 +1151,24 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
   <title>Employee Portal | LGU Enrile HRMS</title>
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet"/>
   <style>
+    /* ── Dept Head Stat Cards ── */
+.stat-card{background:var(--white);border-radius:var(--r);padding:18px 20px;border:1.5px solid var(--g200);box-shadow:var(--sh-sm);position:relative;overflow:hidden;animation:fadeUp 0.4s ease both;transition:transform 0.2s,box-shadow 0.2s;}
+.stat-card:hover{transform:translateY(-3px);box-shadow:var(--sh-md);}
+.stat-card::before{content:'';position:absolute;top:0;left:0;right:0;height:4px;border-radius:var(--r) var(--r) 0 0;}
+.stat-card.orange::before{background:linear-gradient(90deg,#f59e0b,#fcd34d);}
+.stat-card.green::before{background:linear-gradient(90deg,#22c55e,#86efac);}
+.stat-card.red::before{background:linear-gradient(90deg,#ef4444,#fca5a5);}
+.stat-card.blue::before{background:linear-gradient(90deg,#2563eb,#60a5fa);}
+.stat-card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+.stat-icon{width:44px;height:44px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:1.2rem;}
+.stat-card.orange .stat-icon{background:#fef3c7;}
+.stat-card.green  .stat-icon{background:#dcfce7;}
+.stat-card.red    .stat-icon{background:#fee2e2;}
+.stat-card.blue   .stat-icon{background:#dbeafe;}
+.stat-value{font-size:2rem;font-weight:800;color:var(--g800);line-height:1;margin-bottom:3px;}
+.stat-label{font-size:.78rem;color:var(--g400);font-weight:600;}
+.stat-sub{font-size:.70rem;color:var(--g400);margin-top:6px;}
+
     .saln-table-scroll {
       width: 100%;
       overflow-x: auto;
@@ -2407,12 +2442,6 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
       <p>View your available leave credits and usage history</p>
     </div>
     <div id="balancesGrid" class="balances-grid"></div>
-    <div style="margin-top:24px;">
-      <table class="mini-tbl" style="width:100%;max-width:700px;margin:0 auto;">
-        <thead><tr><th>Type</th><th>Total</th><th>Used</th><th>Available</th><th>Status</th></tr></thead>
-        <tbody id="balSummary"></tbody>
-      </table>
-    </div>
   </div>
 
   <!-- ══ MY DOCUMENTS ══ -->
@@ -3423,27 +3452,131 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
 
   <!-- ══ Dept Head Leave Approval ══ -->
   <div class="page" id="page-dept_head_leaves">
-      <div style="max-width: 1115px; margin: 18px auto 0 auto;">
-      <div class="card" style="padding:36px 40px 40px 40px; border-radius:0 0 16px 16px;">
-        <div id="deptHeadLeavesList"></div>
+    <!-- Stat cards -->
+    <div class="stat-cards" id="dhStatCards" style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:22px;">
+      <div class="stat-card orange"><div class="stat-card-header"><div class="stat-icon">⏳</div></div><div class="stat-value" id="dh-sc-pending">—</div><div class="stat-label">Pending Approval</div><div class="stat-sub">Awaiting your review</div></div>
+      <div class="stat-card green"><div class="stat-card-header"><div class="stat-icon">✅</div></div><div class="stat-value" id="dh-sc-approved">—</div><div class="stat-label">Forwarded to HR</div><div class="stat-sub">Approved by you</div></div>
+      <div class="stat-card red"><div class="stat-card-header"><div class="stat-icon">✗</div></div><div class="stat-value" id="dh-sc-denied">—</div><div class="stat-label">Denied</div><div class="stat-sub">Denied by you</div></div>
+      <div class="stat-card blue"><div class="stat-card-header"><div class="stat-icon">📅</div></div><div class="stat-value" id="dh-sc-total">—</div><div class="stat-label">Total Requests</div><div class="stat-sub">All time</div></div>
+    </div>
+   <!-- Toolbar -->
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+      <div style="display:flex;align-items:center;gap:8px;background:#fff;border:1.5px solid var(--g200);border-radius:var(--r-sm);padding:9px 12px;flex:1 1 auto;min-width:160px;box-shadow:var(--sh-sm);transition:border-color .2s;" onfocusin="this.style.borderColor='var(--primary)'" onfocusout="this.style.borderColor='var(--g200)'">
+        <span style="color:var(--g400);font-size:1rem;">🔍</span>
+        <input type="text" id="dhSearch" placeholder="Search employee or leave type…" oninput="dhDebounce()" style="border:none;outline:none;font-family:'Nunito',sans-serif;font-size:.875rem;width:100%;background:transparent;color:var(--g800);"/>
+      </div>
+      <select id="dhStatusFilter" onchange="loadDeptHeadLeaves(1)" style="padding:8px 10px;border:1.5px solid var(--g200);border-radius:var(--r-sm);font-family:'Nunito',sans-serif;font-size:.80rem;color:var(--g600);background:#fff;cursor:pointer;box-shadow:var(--sh-sm);outline:none;transition:border-color .2s;flex:0 1 auto;min-width:100px;" onfocus="this.style.borderColor='var(--primary)'" onblur="this.style.borderColor='var(--g200)'">
+        <option value="">All Requests</option>
+        <option value="Pending Dept Head">Pending</option>
+        <option value="Pending HR">Forwarded to HR</option>
+        <option value="Denied by Dept Head">Denied</option>
+      </select>
+      <select id="dhDeptFilter" onchange="loadDeptHeadLeaves(1)" style="padding:8px 10px;border:1.5px solid var(--g200);border-radius:var(--r-sm);font-family:'Nunito',sans-serif;font-size:.80rem;color:var(--g600);background:#fff;cursor:pointer;box-shadow:var(--sh-sm);outline:none;transition:border-color .2s;flex:0 1 auto;min-width:100px;" onfocus="this.style.borderColor='var(--primary)'" onblur="this.style.borderColor='var(--g200)'">
+        <option value="">All Departments</option>
+      </select>
+      <select id="dhTypeFilter" onchange="loadDeptHeadLeaves(1)" style="padding:8px 10px;border:1.5px solid var(--g200);border-radius:var(--r-sm);font-family:'Nunito',sans-serif;font-size:.80rem;color:var(--g600);background:#fff;cursor:pointer;box-shadow:var(--sh-sm);outline:none;transition:border-color .2s;flex:0 1 auto;min-width:100px;" onfocus="this.style.borderColor='var(--primary)'" onblur="this.style.borderColor='var(--g200)'">
+        <option value="">All Leave Types</option>
+      </select>
+      <select id="dhMonthFilter" onchange="loadDeptHeadLeaves(1)" style="padding:8px 10px;border:1.5px solid var(--g200);border-radius:var(--r-sm);font-family:'Nunito',sans-serif;font-size:.80rem;color:var(--g600);background:#fff;cursor:pointer;box-shadow:var(--sh-sm);outline:none;transition:border-color .2s;flex:0 1 auto;min-width:100px;" onfocus="this.style.borderColor='var(--primary)'" onblur="this.style.borderColor='var(--g200)'">
+        <option value="">All Months</option>
+        <option value="1">January</option><option value="2">February</option><option value="3">March</option>
+        <option value="4">April</option><option value="5">May</option><option value="6">June</option>
+        <option value="7">July</option><option value="8">August</option><option value="9">September</option>
+        <option value="10">October</option><option value="11">November</option><option value="12">December</option>
+      </select>
+      <button onclick="dhResetFilters()" style="display:flex;align-items:center;gap:6px;padding:8px 14px;background:linear-gradient(135deg,#f59e0b,#d97706);color:white;border:none;border-radius:var(--r-sm);font-family:'Nunito',sans-serif;font-size:.80rem;font-weight:700;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(245,158,11,.30);white-space:nowrap;flex:0 1 auto;">🔄 Reset Filters</button>
+    </div>
+    <!-- Table panel -->
+    <div class="panel card" style="overflow:hidden;">
+      <div style="overflow-x:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:.83rem;">
+          <thead>
+            <tr style="background:var(--g50);">
+              <th style="padding:11px 16px;text-align:left;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);white-space:nowrap;">Employee</th>
+              <th style="padding:11px 16px;text-align:left;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);white-space:nowrap;">Leave Type</th>
+              <th style="padding:11px 16px;text-align:left;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);white-space:nowrap;">Date From</th>
+              <th style="padding:11px 16px;text-align:left;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);white-space:nowrap;">Date To</th>
+              <th style="padding:11px 16px;text-align:left;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);white-space:nowrap;">Days</th>
+              <th style="padding:11px 16px;text-align:left;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);">Reason</th>
+              <th style="padding:11px 16px;text-align:left;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);white-space:nowrap;">Filed On</th>
+              <th style="padding:11px 16px;text-align:center;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);white-space:nowrap;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="dhTableBody">
+            <tr><td colspan="8" style="text-align:center;padding:40px;color:var(--g400);">Loading…</td></tr>
+          </tbody>
+        </table>
+        <div id="dhEmptyState" style="display:none;padding:52px 20px;text-align:center;">
+          <div style="font-size:2.8rem;margin-bottom:12px;opacity:.5;">📋</div>
+          <p style="font-size:.875rem;font-weight:600;color:var(--g400);">No pending leave requests in your department.</p>
+        </div>
+      </div>
+      <!-- Pagination -->
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-top:1px solid var(--g100);font-size:.80rem;color:var(--g400);flex-wrap:wrap;gap:10px;font-weight:600;">
+        <span id="dhPageInfo"></span>
+        <div style="display:flex;gap:4px;" id="dhPageBtns"></div>
+      </div>
+    </div>
+    <!-- Approve Modal -->
+    <div id="dhModalApprove" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:800;align-items:center;justify-content:center;backdrop-filter:blur(4px);">
+      <div style="background:#fff;border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.18);width:92%;max-width:440px;animation:fadeUp .3s ease;">
+        <div style="background:linear-gradient(135deg,#22c55e,#15803d);padding:18px 22px 14px;border-radius:14px 14px 0 0;display:flex;align-items:center;justify-content:space-between;">
+          <div><div style="font-size:1rem;font-weight:800;color:#fff;font-family:'Playfair Display',serif;">✅ Approve Leave</div><div style="font-size:.73rem;color:rgba(255,255,255,.65);margin-top:2px;">Confirm approval and forward to HR</div></div>
+          <button onclick="document.getElementById('dhModalApprove').style.display='none';" style="width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.18);border:none;color:#fff;font-size:1rem;cursor:pointer;">✕</button>
+        </div>
+        <div style="padding:24px 22px;text-align:center;">
+          <div style="font-size:2.4rem;margin-bottom:10px;">✅</div>
+          <h4 style="font-size:.95rem;font-weight:800;color:var(--g800);margin-bottom:6px;">Approve this leave request?</h4>
+          <p id="dhApproveText" style="font-size:.82rem;color:var(--g600);line-height:1.6;margin-bottom:12px;"></p>
+          <textarea id="dhApproveRemark" placeholder="Optional remarks for HR…" style="width:100%;padding:9px 12px;border:1.5px solid var(--g200);border-radius:9px;font-family:'Nunito',sans-serif;font-size:.84rem;resize:none;height:72px;outline:none;"></textarea>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:10px;padding:12px 22px 16px;border-top:1px solid var(--g100);">
+          <button onclick="document.getElementById('dhModalApprove').style.display='none';" style="padding:9px 20px;border:1.5px solid var(--g200);background:#fff;border-radius:9px;font-family:'Nunito',sans-serif;font-size:.83rem;font-weight:700;cursor:pointer;">Cancel</button>
+          <button id="dhApproveBtn" onclick="dhConfirmApprove()" style="padding:9px 22px;background:linear-gradient(135deg,#22c55e,#15803d);color:#fff;border:none;border-radius:9px;font-family:'Nunito',sans-serif;font-size:.83rem;font-weight:700;cursor:pointer;">✅ Yes, Approve</button>
+        </div>
+      </div>
+    </div>
+    <!-- Deny Modal -->
+    <div id="dhModalDeny" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:800;align-items:center;justify-content:center;backdrop-filter:blur(4px);">
+      <div style="background:#fff;border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.18);width:92%;max-width:440px;animation:fadeUp .3s ease;">
+        <div style="background:linear-gradient(135deg,#ef4444,#dc2626);padding:18px 22px 14px;border-radius:14px 14px 0 0;display:flex;align-items:center;justify-content:space-between;">
+          <div><div style="font-size:1rem;font-weight:800;color:#fff;font-family:'Playfair Display',serif;">✗ Deny Leave</div><div style="font-size:.73rem;color:rgba(255,255,255,.65);margin-top:2px;">Confirm denial of this request</div></div>
+          <button onclick="document.getElementById('dhModalDeny').style.display='none';" style="width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.18);border:none;color:#fff;font-size:1rem;cursor:pointer;">✕</button>
+        </div>
+        <div style="padding:24px 22px;text-align:center;">
+          <div style="font-size:2.4rem;margin-bottom:10px;">⚠️</div>
+          <h4 style="font-size:.95rem;font-weight:800;color:var(--g800);margin-bottom:6px;">Deny this leave request?</h4>
+          <p id="dhDenyText" style="font-size:.82rem;color:var(--g600);line-height:1.6;margin-bottom:12px;"></p>
+          <textarea id="dhDenyRemark" placeholder="Please state the reason for denial…" style="width:100%;padding:9px 12px;border:1.5px solid var(--g200);border-radius:9px;font-family:'Nunito',sans-serif;font-size:.84rem;resize:none;height:72px;outline:none;"></textarea>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:10px;padding:12px 22px 16px;border-top:1px solid var(--g100);">
+          <button onclick="document.getElementById('dhModalDeny').style.display='none';" style="padding:9px 20px;border:1.5px solid var(--g200);background:#fff;border-radius:9px;font-family:'Nunito',sans-serif;font-size:.83rem;font-weight:700;cursor:pointer;">Cancel</button>
+          <button id="dhDenyBtn" onclick="dhConfirmDeny()" style="padding:9px 22px;background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;border:none;border-radius:9px;font-family:'Nunito',sans-serif;font-size:.83rem;font-weight:700;cursor:pointer;">✗ Yes, Deny</button>
+        </div>
       </div>
     </div>
   </div>
 
   <!-- ══ Service Record ══ -->
   <div class="page" id="page-service_record">
-    <div id="srRequestBanner" style="display:none;padding:12px 16px;border-radius:10px;margin-bottom:14px;font-size:.84rem;font-weight:700;border:1.5px solid #fde68a;background:#fffbeb;color:#92400e;"></div>
     <div style="max-width: 860px; margin: 18px auto 0 auto;">
-      <div class="card" style="padding:0 0 32px 0; border-radius:0 0 16px 16px;">
-        <div class="form-section-body" style="padding:0;min-height:320px;border-radius:0 0 16px 16px;">
-          <div id="srContent" style="overflow-x:auto;padding:0 12px 18px 12px;box-sizing:border-box;width:100%;">
-            <!-- The table will be injected here by JS if entries exist -->
+      <div class="card" style="padding:0 0 32px 0; border-radius:16px;">
+        <!-- Blue header banner -->
+        <div style="background:linear-gradient(90deg,#2563eb,#3576f6);border-radius:16px 16px 0 0;padding:22px 28px 18px 28px;display:flex;align-items:center;gap:16px;box-shadow:0 2px 8px rgba(37,99,235,0.07);">
+          <span style="font-size:2.1rem;line-height:1;">📋</span>
+          <div>
+            <div style="font-size:1.32rem;font-weight:800;color:#fff;font-family:'Playfair Display',serif;letter-spacing:-.5px;">Service Record History</div>
+            <div style="font-size:.98rem;color:#dbeafe;font-weight:500;margin-top:2px;">View your official employment record as maintained by HR</div>
           </div>
+        </div>
+        <div id="srRequestBanner" style="display:none;padding:12px 16px;border-radius:10px;margin:18px 18px 0 18px;font-size:.84rem;font-weight:700;border:1.5px solid #fde68a;background:#fffbeb;color:#92400e;"></div>
+        <div id="srContent" style="overflow-x:auto;padding:0 12px 18px 12px;box-sizing:border-box;width:100%;">
+          <!-- The table will be injected here by JS if entries exist -->
         </div>
       </div>
       <div style="margin-top:20px;padding-bottom:30px;display:flex;gap:8px;justify-content:flex-end;">
         <button class="save-form-btn" onclick="requestServiceRecord()" id="btnRequestSR" style="background:linear-gradient(135deg,#2563eb,#1e40af);">📨 Request Service Record</button>
-        <button class="print-form-btn" onclick="printMySR()" id="btnPrintSR" style="background:linear-gradient(135deg,#16a34a,#15803d);display:none;">🖨️ Print Service Record</button>
+        <button class="save-form-btn" onclick="printMySR()" id="btnPrintSR" style="background:linear-gradient(135deg,#22c55e,#15803d);display:inline-flex;align-items:center;gap:8px;">🖨️ Print Service Record</button>
       </div>
     </div>
   </div>
@@ -3685,6 +3818,9 @@ let docDebounce = null;
   // Poll notifications immediately then every 30 seconds
   try { pollEpNotifications(); } catch(e) { console.warn(e); }
   setInterval(function(){ try { pollEpNotifications(); } catch(e){} }, 30000);
+    // Poll leave requests immediately then every 30 seconds
+    try { pollLeaveRequests(); } catch(e) { console.warn(e); }
+    setInterval(function(){ try { pollLeaveRequests(); } catch(e){} }, 30000);
 })();
 
 // ════════════════════════════════════════════════════════
@@ -3810,102 +3946,237 @@ function goPage(name, btn) {
   if (name === 'saln')      loadSALN();
   if (name === 'service_record') loadServiceRecord();
   if (name === 'file')      loadFileLeavePanel();
+  if (name === 'annex_b')  loadAnnex('annex_b');
+  if (name === 'annex_c')  loadAnnex('annex_c');
   if (name === 'dept_head_leaves') loadDeptHeadLeaves();
 }
 // ════════════════════════════════════════════════════════
 //  DEPT HEAD LEAVE APPROVAL
 // ════════════════════════════════════════════════════════
-async function loadDeptHeadLeaves() {
-  const cont = document.getElementById('deptHeadLeavesList');
-  cont.innerHTML = '<div style="color:var(--g400);font-size:.92rem;">Loading pending leave requests…</div>';
-  try {
-    const res = await fetch('Employee_portal.php?action=dept_head_pending_leaves').then(r=>r.json());
-    if (!res.success) {
-      cont.innerHTML = `<div style="color:#ef4444;padding:18px;">${res.message||'Failed to load leave requests.'}</div>`;
-      return;
-    }
-    const data = res.data || [];
-    if (!data.length) {
-      cont.innerHTML = '<div style="color:var(--g400);padding:24px;text-align:center;">No pending leave requests for your department.</div>';
-      return;
-    }
-    cont.innerHTML = data.map(lr => renderDeptHeadLeaveRow(lr)).join('');
-  } catch(e) {
-    cont.innerHTML = '<div style="color:#ef4444;padding:18px;">Network error loading leave requests.</div>';
-  }
+let dhCurrentPage = 1;
+const dhPageSize  = 8;
+let dhAllRows     = [];
+let dhApproveTarget = null, dhDenyTarget = null, dhDebounceTimer = null;
+
+function dhDebounce() { clearTimeout(dhDebounceTimer); dhDebounceTimer = setTimeout(() => loadDeptHeadLeaves(1), 320); }
+function dhResetFilters() {
+  document.getElementById('dhSearch').value = '';
+  document.getElementById('dhStatusFilter').value = '';
+  document.getElementById('dhDeptFilter').value = '';
+  document.getElementById('dhTypeFilter').value = '';
+  document.getElementById('dhMonthFilter').value = '';
+  loadDeptHeadLeaves(1);
 }
 
-function renderDeptHeadLeaveRow(lr) {
-  const filed = fmt(lr.filed_at);
-  const dateRange = lr.date_from === lr.date_to ? fmt(lr.date_from) : `${fmt(lr.date_from)} – ${fmt(lr.date_to)}`;
-  const color = TYPE_COLORS[lr.type_name] || '#2563eb';
-  // Card style exactly as in leave requests
-  return `
-    <div class="req-card">
-      <div class="req-stripe" style="background:${color};"></div>
-      <div class="req-body">
-        <div class="req-top">
-          <div class="req-title">
-            <span class="badge" style="background:${color}22;color:${color};">${lr.type_name} Leave</span>
-            <span style="font-weight:700;margin-left:7px;">${escapeHtml(lr.first_name)} ${escapeHtml(lr.last_name)}</span>
+async function loadDeptHeadLeaves(page) {
+  if (page) dhCurrentPage = page;
+  const tbody = document.getElementById('dhTableBody');
+  const empty = document.getElementById('dhEmptyState');
+  tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--g400);">Loading…</td></tr>';
+  empty.style.display = 'none';
+
+  try {
+    const res = await fetch('Employee_portal.php?action=dept_head_pending_leaves').then(r => r.json());
+    if (!res.success) {
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:40px;color:#ef4444;">${res.message||'Failed to load.'}</td></tr>`;
+      return;
+    }
+
+    // Client-side filter
+    const search = (document.getElementById('dhSearch').value || '').toLowerCase();
+    const status = document.getElementById('dhStatusFilter').value;
+    const dept   = document.getElementById('dhDeptFilter').value;
+    const type   = document.getElementById('dhTypeFilter').value;
+    const month  = document.getElementById('dhMonthFilter').value;
+    let rows = res.data || [];
+
+    if (search) rows = rows.filter(r =>
+      (r.first_name + ' ' + r.last_name).toLowerCase().includes(search) ||
+      (r.type_name || '').toLowerCase().includes(search)
+    );
+    if (status) rows = rows.filter(r => r.status === status);
+    if (dept)   rows = rows.filter(r => (r.department || '') === dept);
+    if (type)   rows = rows.filter(r => (r.type_name  || '') === type);
+    if (month)  rows = rows.filter(r => {
+      const d = new Date(r.date_from);
+      return (d.getMonth() + 1) == parseInt(month);
+    });
+
+    dhAllRows = rows;
+
+    // Populate dept and type dropdowns once from the full data
+    const allData = res.data || [];
+    const deptSel = document.getElementById('dhDeptFilter');
+    const typeSel = document.getElementById('dhTypeFilter');
+    if (deptSel.options.length <= 1) {
+      [...new Set(allData.map(r => r.department).filter(Boolean))].sort().forEach(d => {
+        const o = document.createElement('option'); o.value = d; o.textContent = d; deptSel.appendChild(o);
+      });
+    }
+    if (typeSel.options.length <= 1) {
+      [...new Set(allData.map(r => r.type_name).filter(Boolean))].sort().forEach(t => {
+        const o = document.createElement('option'); o.value = t; o.textContent = t; typeSel.appendChild(o);
+      });
+    }
+    // Stat counts (from full unfiltered data)
+    const all = res.data || [];
+    const pendingCount = all.filter(r => r.status === 'Pending Dept Head').length;
+    const approvedCount = all.filter(r => r.status === 'Pending HR').length;
+    const deniedCount = all.filter(r => r.status === 'Denied by Dept Head').length;
+    document.getElementById('dh-sc-pending').textContent  = pendingCount;
+    document.getElementById('dh-sc-approved').textContent = approvedCount;
+    document.getElementById('dh-sc-denied').textContent   = deniedCount;
+    document.getElementById('dh-sc-total').textContent    = all.length;
+
+    // Pagination
+    const total  = rows.length;
+    const pages  = Math.max(1, Math.ceil(total / dhPageSize));
+    dhCurrentPage = Math.min(dhCurrentPage, pages);
+    const offset = (dhCurrentPage - 1) * dhPageSize;
+    const paged  = rows.slice(offset, offset + dhPageSize);
+
+    // Page info
+    const from = total ? offset + 1 : 0;
+    const to   = Math.min(offset + dhPageSize, total);
+    document.getElementById('dhPageInfo').textContent = `Showing ${from}–${to} of ${total} request${total !== 1 ? 's' : ''}`;
+
+    // Page buttons
+    const pb = document.getElementById('dhPageBtns');
+    pb.innerHTML = '';
+    const mkBtn = (label, pg, disabled) => {
+      const b = document.createElement('button');
+      b.style.cssText = `min-width:32px;height:32px;border-radius:7px;border:1.5px solid ${pg === dhCurrentPage ? 'var(--primary)' : 'var(--g200)'};background:${pg === dhCurrentPage ? 'var(--primary)' : '#fff'};cursor:${disabled ? 'default' : 'pointer'};font-size:.80rem;font-weight:700;display:inline-flex;align-items:center;justify-content:center;padding:0 8px;color:${pg === dhCurrentPage ? '#fff' : 'var(--g600)'};font-family:'Nunito',sans-serif;opacity:${disabled ? '.4' : '1'};`;
+      b.textContent = label; b.disabled = disabled;
+      b.onclick = () => loadDeptHeadLeaves(pg);
+      pb.appendChild(b);
+    };
+    mkBtn('‹', dhCurrentPage - 1, dhCurrentPage === 1);
+    for (let i = 1; i <= pages; i++) mkBtn(i, i, false);
+    mkBtn('›', dhCurrentPage + 1, dhCurrentPage >= pages);
+
+    if (!paged.length) {
+      tbody.innerHTML = '';
+      empty.style.display = 'block';
+      return;
+    }
+
+    const COLORS = ['#2563eb','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4','#ec4899','#f97316'];
+    const aColor = s => COLORS[Math.abs([...s].reduce((a,c) => a + c.charCodeAt(0), 0)) % COLORS.length];
+    const ini    = n => n.split(' ').slice(0,2).map(w => w[0]).join('').toUpperCase();
+    const fmtD   = d => d ? new Date(d.slice(0,10)+'T00:00:00').toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'numeric'}) : '—';
+
+    const TYPE_COLORS = {Vacation:'#2563eb',Sick:'#f59e0b',Emergency:'#ef4444',Maternity:'#ec4899',Paternity:'#22c55e',Special:'#a855f7'};
+
+    tbody.innerHTML = paged.map(r => {
+      const name   = `${r.first_name} ${r.last_name}`;
+      const col    = aColor(name);
+      const tc     = TYPE_COLORS[r.type_name] || '#2563eb';
+      const reason = (r.reason || '').length > 48 ? r.reason.slice(0, 48) + '…' : (r.reason || '—');
+      // Button logic
+      let approveBtn = '', denyBtn = '';
+      if (r.status === 'Pending Dept Head') {
+        approveBtn = `<button onclick="dhOpenApprove(${r.request_id},'${escapeHtml(name)}','${r.type_name}','${fmtD(r.date_from)}','${fmtD(r.date_to)}',${r.days_requested})"
+          style="padding:5px 11px;border-radius:7px;border:none;font-size:.72rem;font-weight:700;cursor:pointer;background:#dcfce7;color:#166534;font-family:'Nunito',sans-serif;transition:all .2s;"
+          onmouseover="this.style.background='#22c55e';this.style.color='#fff';" onmouseout="this.style.background='#dcfce7';this.style.color='#166534';">✅ Approve</button>`;
+        denyBtn = `<button onclick="dhOpenDeny(${r.request_id},'${escapeHtml(name)}','${r.type_name}','${fmtD(r.date_from)}','${fmtD(r.date_to)}',${r.days_requested})"
+          style="padding:5px 11px;border-radius:7px;border:none;font-size:.72rem;font-weight:700;cursor:pointer;background:#fee2e2;color:#991b1b;font-family:'Nunito',sans-serif;transition:all .2s;"
+          onmouseover="this.style.background='#ef4444';this.style.color='#fff';" onmouseout="this.style.background='#fee2e2';this.style.color='#991b1b';">✗ Deny</button>`;
+      } else if (r.status === 'Pending HR' || r.status === 'Approved') {
+        approveBtn = `<button disabled style="padding:5px 11px;border-radius:7px;border:none;font-size:.72rem;font-weight:700;background:#dcfce7;color:#b6e4c6;opacity:.6;cursor:not-allowed;font-family:'Nunito',sans-serif;">✅ Approve</button>`;
+      } else if (r.status === 'Denied by Dept Head' || r.status === 'Denied') {
+        denyBtn = `<button disabled style="padding:5px 11px;border-radius:7px;border:none;font-size:.72rem;font-weight:700;background:#fee2e2;color:#fca5a5;opacity:.6;cursor:not-allowed;font-family:'Nunito',sans-serif;">✗ Deny</button>`;
+      }
+      return `<tr style="transition:background .15s;" onmouseover="this.style.background='#f0f6ff'" onmouseout="this.style.background=''">
+        <td style="padding:13px 16px;border-bottom:1px solid var(--g100);vertical-align:middle;">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <div style="width:36px;height:36px;border-radius:50%;background:${col};display:flex;align-items:center;justify-content:center;font-size:.75rem;font-weight:800;color:#fff;flex-shrink:0;box-shadow:0 2px 5px rgba(0,0,0,.14);">${ini(name)}</div>
+            <div>
+              <div style="font-weight:700;font-size:.875rem;color:var(--g800);">${name}</div>
+              <div style="font-size:.70rem;color:var(--g400);margin-top:1px;">${r.department || '—'}</div>
+            </div>
           </div>
-          <span class="badge b-pending">⏳ Pending Dept Head</span>
-        </div>
-        <div class="req-meta">
-          <span>📅 ${dateRange}</span>
-          <span>📆 <strong>${lr.days_requested} day${lr.days_requested!=1?'s':''}</strong></span>
-        </div>
-        <div class="req-reason">Reason of Leave: ${escapeHtml(lr.reason||'')}</div>
-        <div class="req-footer" style="gap:10px;flex-wrap:wrap;align-items:center;">
-          <span class="req-filed">Filed: ${filed}</span>
-          <input type="text" class="req-remark-input" id="remark-${lr.request_id}" placeholder="Remarks (optional)" style="min-width:160px;max-width:260px;padding:7px 10px;border-radius:7px;border:1.5px solid #e5e7eb;"/>
-          <button class="submit-btn" style="background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;font-weight:700;" onclick="approveDeptHeadLeave(${lr.request_id})">✅ Approve</button>
-          <button class="submit-btn" style="background:linear-gradient(135deg,#ef4444,#b91c1c);color:#fff;font-weight:700;" onclick="denyDeptHeadLeave(${lr.request_id})">✗ Deny</button>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-async function approveDeptHeadLeave(requestId) {
-  const remarks = document.getElementById('remark-' + requestId)?.value || '';
-  if (!confirm('Approve this leave request?')) return;
-  await deptHeadLeaveAction(requestId, 'approve', remarks);
-}
-
-async function denyDeptHeadLeave(requestId) {
-  const remarks = document.getElementById('remark-' + requestId)?.value || '';
-  if (!confirm('Deny this leave request?')) return;
-  await deptHeadLeaveAction(requestId, 'deny', remarks);
-}
-
-async function deptHeadLeaveAction(requestId, action, remarks) {
-  const cont = document.getElementById('deptHeadLeavesList');
-  cont.innerHTML = '<div style="color:var(--g400);font-size:.92rem;">Processing…</div>';
-  try {
-    const form = new FormData();
-    form.append('leave_id', requestId);
-    form.append('remarks', remarks);
-    form.append('action', action === 'approve' ? 'dept_head_approve_leave' : 'dept_head_deny_leave');
-    form.append('csrf_token', CSRF_TOKEN);
-    const res = await fetch('Employee_portal.php', {method:'POST', body:form}).then(r=>r.json());
-    if (!res.success) {
-      cont.innerHTML = `<div style="color:#ef4444;padding:18px;">${res.message||'Action failed.'}</div>`;
-      setTimeout(loadDeptHeadLeaves, 1800);
-      return;
-    }
-    cont.innerHTML = `<div style="color:#22c55e;padding:18px;">${res.message||'Action successful.'}</div>`;
-    setTimeout(loadDeptHeadLeaves, 1200);
+        </td>
+        <td style="padding:13px 16px;border-bottom:1px solid var(--g100);vertical-align:middle;">
+          <span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;font-size:.70rem;font-weight:700;background:${tc}22;color:${tc};">${r.type_name}</span>
+        </td>
+        <td style="padding:13px 16px;border-bottom:1px solid var(--g100);font-size:.80rem;color:var(--g600);vertical-align:middle;white-space:nowrap;">${fmtD(r.date_from)}</td>
+        <td style="padding:13px 16px;border-bottom:1px solid var(--g100);font-size:.80rem;color:var(--g600);vertical-align:middle;white-space:nowrap;">${fmtD(r.date_to)}</td>
+        <td style="padding:13px 16px;border-bottom:1px solid var(--g100);vertical-align:middle;">
+          <span style="display:inline-block;padding:3px 10px;background:var(--g100);border-radius:20px;font-size:.72rem;font-weight:800;color:var(--g600);">${r.days_requested} day${r.days_requested != 1 ? 's' : ''}</span>
+        </td>
+        <td style="padding:13px 16px;border-bottom:1px solid var(--g100);font-size:.78rem;color:var(--g600);max-width:180px;vertical-align:middle;">${escapeHtml(reason)}</td>
+        <td style="padding:13px 16px;border-bottom:1px solid var(--g100);font-size:.78rem;color:var(--g400);vertical-align:middle;white-space:nowrap;">${fmtD(r.filed_at)}</td>
+        <td style="padding:13px 16px;border-bottom:1px solid var(--g100);text-align:center;vertical-align:middle;">
+          <div style="display:flex;gap:5px;align-items:center;justify-content:center;">
+            ${approveBtn}
+            ${denyBtn}
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
   } catch(e) {
-    cont.innerHTML = '<div style="color:#ef4444;padding:18px;">Network error.</div>';
-    setTimeout(loadDeptHeadLeaves, 1800);
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:40px;color:#ef4444;">Network error loading leave requests.</td></tr>`;
   }
+}
+
+function dhOpenApprove(id, name, type, from, to, days) {
+  dhApproveTarget = id;
+  document.getElementById('dhApproveText').textContent = `Approving ${type} Leave for ${name} (${from} – ${to}, ${days} day${days != 1 ? 's' : ''}). This will be forwarded to HR for final approval.`;
+  document.getElementById('dhApproveRemark').value = '';
+  document.getElementById('dhModalApprove').style.display = 'flex';
+}
+
+function dhOpenDeny(id, name, type, from, to, days) {
+  dhDenyTarget = id;
+  document.getElementById('dhDenyText').textContent = `Denying ${type} Leave for ${name} (${from} – ${to}, ${days} day${days != 1 ? 's' : ''}).`;
+  document.getElementById('dhDenyRemark').value = '';
+  document.getElementById('dhModalDeny').style.display = 'flex';
+}
+
+async function dhConfirmApprove() {
+  const btn = document.getElementById('dhApproveBtn');
+  btn.disabled = true; btn.textContent = '⏳ Processing…';
+  const fd = new FormData();
+  fd.append('action', 'dept_head_approve_leave');
+  fd.append('leave_id', dhApproveTarget);
+  fd.append('remarks', document.getElementById('dhApproveRemark').value.trim());
+  fd.append('csrf_token', CSRF_TOKEN);
+  try {
+    const r = await fetch('Employee_portal.php', { method: 'POST', body: fd }).then(r => r.json());
+    if (r.success) {
+      showToast('✅ ' + r.message, 'success');
+      document.getElementById('dhModalApprove').style.display = 'none';
+      loadDeptHeadLeaves(dhCurrentPage);
+    } else {
+      showToast('❌ ' + (r.message || 'Action failed.'), 'error');
+    }
+  } catch(e) { showToast('❌ Network error.', 'error'); }
+  finally { btn.disabled = false; btn.textContent = '✅ Yes, Approve'; }
+}
+
+async function dhConfirmDeny() {
+  const btn = document.getElementById('dhDenyBtn');
+  btn.disabled = true; btn.textContent = '⏳ Processing…';
+  const fd = new FormData();
+  fd.append('action', 'dept_head_deny_leave');
+  fd.append('leave_id', dhDenyTarget);
+  fd.append('remarks', document.getElementById('dhDenyRemark').value.trim());
+  fd.append('csrf_token', CSRF_TOKEN);
+  try {
+    const r = await fetch('Employee_portal.php', { method: 'POST', body: fd }).then(r => r.json());
+    if (r.success) {
+      showToast('Leave request denied.', 'error');
+      document.getElementById('dhModalDeny').style.display = 'none';
+      loadDeptHeadLeaves(dhCurrentPage);
+    } else {
+      showToast('❌ ' + (r.message || 'Action failed.'), 'error');
+    }
+  } catch(e) { showToast('❌ Network error.', 'error'); }
+  finally { btn.disabled = false; btn.textContent = '✗ Yes, Deny'; }
 }
 
 function escapeHtml(str) {
-  return String(str||'').replace(/[&<>"']/g, function(m) {
-    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m];
-  });
+  return String(str || '').replace(/[&<>"']/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
 }
 
 // ════════════════════════════════════════════════════════
@@ -4257,6 +4528,51 @@ async function pollEpNotifications() {
       else            { cnt.textContent = '';     cnt.classList.remove('show'); }
     }
   } catch(e) { console.warn('notif poll:', e); }
+}
+
+// ── Poll for latest leave requests/statuses every 30 seconds ───────────────
+async function pollLeaveRequests() {
+  // Only poll if the requests page is visible/active
+  const main = document.querySelector('.main');
+  if (!main || !main.innerHTML.includes('My Leave Requests')) return;
+  try {
+    // Use the same logic as loadRequests, but only update if on the requests page
+    const res  = await fetch(`Employee_portal.php?action=requests&status=${curReqTab}`);
+    const json = await res.json();
+    if (!json.success) return;
+    // Update counts and badge
+    const all=(json.counts.Pending||0)+(json.counts.Approved||0)+(json.counts.Denied||0)+(json.counts.Cancelled||0);
+    const tcAll = document.getElementById('tc-all');
+    if (tcAll) tcAll.textContent=all;
+    const tcPending = document.getElementById('tc-pending');
+    if (tcPending) tcPending.textContent=json.counts.Pending||0;
+    const tcApproved = document.getElementById('tc-approved');
+    if (tcApproved) tcApproved.textContent=json.counts.Approved||0;
+    const tcDenied = document.getElementById('tc-denied');
+    if (tcDenied) tcDenied.textContent=json.counts.Denied||0;
+    const tcCancelled = document.getElementById('tc-cancelled');
+    if (tcCancelled) tcCancelled.textContent=json.counts.Cancelled||0;
+    const pending=json.counts.Pending||0;
+    const badge=document.getElementById('pendBadge');
+    if (badge) { badge.textContent=pending; badge.style.display=pending?'inline-block':'none'; }
+    // Update requests list if present
+    const list=document.getElementById('reqList');
+    const empty=document.getElementById('reqEmpty');
+    if(list && empty) {
+      if(!json.data.length){list.innerHTML='';empty.style.display='block';return;}
+      empty.style.display='none';
+      list.innerHTML=json.data.map(r=>{
+        const remarkCls=r.status==='Approved'?'approved':r.status==='Denied'?'denied':'pending';
+        const remarkHtml=r.admin_remarks?`<div class="req-remark ${remarkCls}">💬 HR NOTE:  ${r.admin_remarks}</div>`:'';
+        const pendingLike = ['Pending', 'Pending Dept Head', 'Pending HR'];
+        const cancelHtml = pendingLike.includes(r.status) ? `<button class="cancel-btn" onclick="cancelReq(${r.request_id})">Cancel</button>` : '';
+        const color=TYPE_COLORS[r.type_name]||'#2563eb';
+        return `<div class="req-card"><div class="req-stripe" style="background:${color};"></div><div class="req-body"><div class="req-top"><div class="req-title"><span class="badge" style="background:${color}22;color:${color};">${r.type_name} Leave</span></div><span class="badge ${ST_CLS[r.status]||'b-pending'}">${ST_ICO[r.status]||''} ${r.status}</span></div><div class="req-meta"><span>📅 ${fmt(r.date_from)} – ${fmt(r.date_to)}</span><span>📆 <strong>${r.days_requested} day${r.days_requested!=1?'s':''}</strong></span></div><div class="req-reason">Reason of Leave: ${r.reason}</div>${remarkHtml}<div class="req-footer"><span class="req-filed">Filed: ${fmt(r.filed_at)}</span>${cancelHtml}</div></div></div>`;
+      }).join('');
+    }
+  } catch(e) {
+    // Optionally log or handle errors
+  }
 }
 
 function epFmtTime(dt) {
@@ -4640,16 +4956,6 @@ function renderBalancesPage() {
   }).join('');
   
   grid.innerHTML = cardsHtml;
-  
-  const stMap={ok:'<span class="badge b-approved">✅ OK</span>',low:'<span class="badge b-pending">⚠️ Low</span>',empty:'<span class="badge b-denied">❌ Empty</span>',locked:'<span class="badge" style="background:#fef3c7;color:#92400e;">🔒 Locked</span>'};
-  document.getElementById('balSummary').innerHTML=balanceData.map(b=>{
-    const pending = parseFloat(b.pending_days) || 0;
-    const available = parseFloat(b.available_after_pending) || 0;
-    if(b.disabled_reason) return `<tr style="opacity:.6;"><td><span class="badge" style="background:#fef3c7;color:#92400e;">🔒 ${b.type_name}</span></td><td>${b.total_credits}</td><td>${b.used_days}</td><td style="font-weight:800;color:var(--g400);">${b.remaining_days}</td><td>${stMap.locked}</td></tr>`;
-    const st=available===0?'empty':available<=2?'low':'ok';
-    const pendingCol = pending > 0 ? ` (⏳ ${pending} pending)` : '';
-    return`<tr><td><span class="badge" style="background:${(TYPE_COLORS[b.type_name]||'#2563eb')}22;color:${TYPE_COLORS[b.type_name]||'#2563eb'};">${b.type_name}</span></td><td>${b.total_credits}</td><td>${b.used_days}</td><td style="font-weight:800;color:var(--accent);">${available}${pendingCol}</td><td>${stMap[st]}</td></tr>`;
-  }).join('');
 }
 
 // ════════════════════════════════════════════════════════
@@ -4861,7 +5167,8 @@ async function loadRequests() {
     list.innerHTML=json.data.map(r=>{
       const remarkCls=r.status==='Approved'?'approved':r.status==='Denied'?'denied':'pending';
       const remarkHtml=r.admin_remarks?`<div class="req-remark ${remarkCls}">💬 HR NOTE:  ${r.admin_remarks}</div>`:'';
-      const cancelHtml=r.status==='Pending'?`<button class="cancel-btn" onclick="cancelReq(${r.request_id})">Cancel</button>`:'';
+      const pendingLike = ['Pending', 'Pending Dept Head', 'Pending HR'];
+      const cancelHtml = pendingLike.includes(r.status) ? `<button class="cancel-btn" onclick="cancelReq(${r.request_id})">Cancel</button>` : '';
       const color=TYPE_COLORS[r.type_name]||'#2563eb';
       return `<div class="req-card"><div class="req-stripe" style="background:${color};"></div><div class="req-body"><div class="req-top"><div class="req-title"><span class="badge" style="background:${color}22;color:${color};">${r.type_name} Leave</span></div><span class="badge ${ST_CLS[r.status]||'b-pending'}">${ST_ICO[r.status]||''} ${r.status}</span></div><div class="req-meta"><span>📅 ${fmt(r.date_from)} – ${fmt(r.date_to)}</span><span>📆 <strong>${r.days_requested} day${r.days_requested!=1?'s':''}</strong></span></div><div class="req-reason">Reason of Leave: ${r.reason}</div>${remarkHtml}<div class="req-footer"><span class="req-filed">Filed: ${fmt(r.filed_at)}</span>${cancelHtml}</div></div></div>`;
     }).join('');
@@ -6377,9 +6684,9 @@ function saveAnnex(which) {
   const page  = document.getElementById('page-' + which);
   if (!page) return;
 
-  // Collect all table inputs into a plain object keyed by section
+  // Collect all inputs from all tables, keyed by table index + row + col
   const data = {};
-  page.querySelectorAll('table').forEach((tbl, ti) => {
+  page.querySelectorAll('.saln-table-scroll table').forEach((tbl, ti) => {
     const rows = [];
     tbl.querySelectorAll('tbody tr').forEach(tr => {
       const row = {};
@@ -6391,135 +6698,274 @@ function saveAnnex(which) {
     data['table_' + ti] = rows;
   });
 
-  // Store in localStorage as a lightweight save
+  // Also save the "As of" field
+  const asOf = page.querySelector('.fg input[type="text"]');
+  if (asOf) data['as_of'] = asOf.value.trim();
+
   try {
     localStorage.setItem('hrms_' + which, JSON.stringify({ saved_at: new Date().toISOString(), data }));
-    showToast('✅ ' + label + ' saved locally.', 'success');
+    showToast('✅ ' + label + ' saved! Data will reload when you return to this page.', 'success');
   } catch(e) {
     showToast('❌ Could not save ' + label + '.', 'error');
   }
 }
 
+function loadAnnex(which) {
+  const page = document.getElementById('page-' + which);
+  if (!page) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem('hrms_' + which) || 'null');
+    if (!saved || !saved.data) return;
+    const data = saved.data;
+
+    // Restore "As of" field
+    const asOf = page.querySelector('.fg input[type="text"]');
+    if (asOf && data.as_of) asOf.value = data.as_of;
+
+    // Restore all table inputs
+    page.querySelectorAll('.saln-table-scroll table').forEach((tbl, ti) => {
+      const rows = data['table_' + ti] || [];
+      tbl.querySelectorAll('tbody tr').forEach((tr, ri) => {
+        const row = rows[ri] || {};
+        tr.querySelectorAll('input, select').forEach((inp, ci) => {
+          if (row['col_' + ci] !== undefined) inp.value = row['col_' + ci];
+        });
+      });
+    });
+  } catch(e) {}
+}
+
+
 function printAnnex(which) {
+
+  // Collect all rows from a table element directly
+  const getRowsFromTable = (tbl, cols, minRows) => {
+    const domRows = tbl ? [...tbl.querySelectorAll('tbody tr')] : [];
+    const count = Math.max(minRows, domRows.length);
+    return Array(count).fill(0).map((_,i) =>
+      Array(cols).fill(0).map((_,j) => {
+        const cell = domRows[i]?.children[j];
+        if (!cell) return '';
+        const inp = cell.querySelector('input,select');
+        return inp ? (inp.value || '') : (cell.textContent.trim() || '');
+      })
+    );
+  };
+
+  // Get the Nth table inside a page div (1-based), searching all saln-table-scroll wrappers
+  const getNthTable = (page, n) => {
+    const scrolls = [...page.querySelectorAll('.saln-table-scroll')];
+    const scroll = scrolls[n - 1];
+    return scroll ? scroll.querySelector('table') : null;
+  };
+
+  const fmtM = x => {
+    if (!x) return '';
+    const n = parseFloat(String(x).replace(/[^0-9.-]/g,''));
+    return isNaN(n) ? x : '₱' + n.toLocaleString('en-PH',{minimumFractionDigits:2});
+  };
+
+  // ── SHARED CSS — matches official form exactly ───────────────
+  const sharedCss = `
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:'Arial Narrow',Arial,sans-serif;font-size:7pt;color:#000;background:#fff;}
+    @page{size:8.5in 13in;margin:12mm 15mm 10mm 15mm;}
+    @media print{body{margin:0;} .no-print{display:none;}}
+    table{border-collapse:collapse;width:100%;}
+    td,th{border:0.5pt solid #000;padding:2pt 3pt;font-size:6.5pt;vertical-align:middle;}
+    .ref{text-align:right;font-size:6pt;line-height:1.6;margin-bottom:6pt;}
+    .main-title{font-size:10pt;font-weight:700;text-transform:uppercase;text-align:center;letter-spacing:.02em;}
+    .as-of-line{text-align:center;font-size:7pt;margin-top:2pt;}
+    .italic-note{text-align:center;font-size:7pt;font-style:italic;margin-top:3pt;margin-bottom:8pt;}
+    .double-rule{border-top:2pt double #000;border-bottom:0.5pt solid #000;height:3pt;margin:8pt 0 6pt 0;}
+    .assets-title{font-size:8pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;margin-bottom:4pt;}
+    .section-num{font-size:7.5pt;font-weight:700;margin-bottom:2pt;}
+    .section-sub{font-size:7pt;font-weight:700;font-style:italic;margin-bottom:3pt;margin-left:12pt;}
+    .col-hd{background:#c8c8c8;font-weight:700;font-size:6pt;text-align:center;vertical-align:middle;padding:2pt 2pt;}
+    .data-row td{height:22pt;vertical-align:middle;}
+    .subtotal-row td{border:none;text-align:right;font-size:7pt;font-weight:700;padding:2pt 4pt;}
+    .total-row td{border:none;text-align:right;font-size:7.5pt;font-weight:700;padding:1pt 4pt;text-transform:uppercase;}
+    .footer-area{display:flex;justify-content:space-between;align-items:flex-end;margin-top:10pt;}
+    .page-num{font-size:8pt;font-style:italic;}
+    .sig-line{font-size:7pt;font-style:italic;border-top:0.5pt solid #000;padding-top:2pt;min-width:130pt;text-align:center;}
+    .name-block{margin-bottom:8pt;}
+    .name-row td{border:none;border-bottom:0.5pt solid #000;padding:1pt 3pt;font-size:7pt;min-height:14pt;}
+    .name-lbl{font-size:5.5pt;text-align:center;color:#000;padding-top:1pt;}
+  `;
+
+  // ── ANNEX B — Sheet AS-1 (Declarant) ────────────────────────
   if (which === 'annex_b') {
-    // --- ANNEX B PRINT LOGIC ---
     const page = document.getElementById('page-annex_b');
     if (!page) return;
-    const asOf = (page.querySelector('input[placeholder*="December"]') || {}).value || '';
-    // Get table values
-    const getTableInputs = (selector, colCount, rowCount) => {
-      const tbl = page.querySelector(selector);
-      if (!tbl) return Array(rowCount).fill(0).map(()=>Array(colCount).fill(''));
-      const rows = [...tbl.querySelectorAll('tbody tr')];
-      return Array(rowCount).fill(0).map((_,i)=>
-        Array(colCount).fill(0).map((_,j)=>{
-          const cell = rows[i]?.children[j];
-          if (!cell) return '';
-          const inp = cell.querySelector('input,select');
-          return inp ? (inp.value||'') : '';
-        })
-      );
-    };
-    // Real Properties: 8 cols, 4 rows
-    const real = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(1) table', 8, 4);
-    // Personal Properties: 3 cols, 4 rows
-    const pers = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(2) table', 3, 4);
-    // Liabilities: 3 cols, 4 rows
-    const liab = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(3) table', 3, 4);
-    // Business Interests: 4 cols, 3 rows
-    const biz = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(4) table', 4, 3);
 
-    const css = `
-      *{box-sizing:border-box;margin:0;padding:0;}
-      body{font-family:'Arial Narrow',Arial,sans-serif;font-size:9pt;color:#000;padding:12mm 14mm;}
-      @page{size:8.5in 13in;margin:12mm 14mm;}
-      h2{font-size:11pt;font-weight:700;text-align:center;text-transform:uppercase;margin-bottom:4pt;}
-      .sub{font-size:8pt;text-align:center;margin-bottom:12pt;color:#444;}
-      .as-of{font-size:9pt;margin-bottom:10pt;}
-      .section-hd{font-size:9pt;font-weight:700;background:#e0e0e0;padding:4pt 6pt;border:0.5pt solid #000;margin-bottom:0;text-transform:uppercase;}
-      table{width:100%;border-collapse:collapse;margin-bottom:10pt;}
-      th{background:#e8e8e8;border:0.5pt solid #000;padding:4pt 6pt;font-size:8pt;font-weight:700;text-align:left;}
-      td{border:0.5pt solid #000;padding:4pt 6pt;font-size:8.5pt;min-height:14pt;vertical-align:middle;}
-      .tbl-section-hd{background:#e0e0e0;font-weight:700;text-align:left;font-size:9pt;padding:6pt 4pt;border:0.5pt solid #000;}
-      .tbl-subhd{background:#f3f3f3;font-weight:700;text-align:left;font-size:8pt;padding:4pt 4pt;border:0.5pt solid #000;}
-    `;
+    const real = getRowsFromTable(getNthTable(page, 1), 8, 4);
+    const pers = getRowsFromTable(getNthTable(page, 2), 3, 5);
+    const liab = getRowsFromTable(getNthTable(page, 3), 3, 5);
+    const biz  = getRowsFromTable(getNthTable(page, 4), 4, 3);
+
+    // Get declarant name fields if available
+    const getVal = (sel) => (page.querySelector(sel)||{}).value || '';
+
+    const realRows = real.map(r => `<tr class="data-row">
+      <td style="width:15%;">${r[0]||''}&nbsp;</td>
+      <td style="width:12%;">${r[1]||''}&nbsp;</td>
+      <td style="width:14%;">${r[2]||''}&nbsp;</td>
+      <td style="width:9%;text-align:right;">${fmtM(r[3])}&nbsp;</td>
+      <td style="width:10%;text-align:right;">${fmtM(r[4])}&nbsp;</td>
+      <td style="width:8%;text-align:center;">${r[5]||''}&nbsp;</td>
+      <td style="width:9%;">${r[6]||''}&nbsp;</td>
+      <td style="width:9%;text-align:right;">${fmtM(r[7])}&nbsp;</td>
+    </tr>`).join('');
+
+    const persRows = pers.map(r => `<tr class="data-row">
+      <td style="width:62%;">${r[0]||''}&nbsp;</td>
+      <td style="width:18%;text-align:center;">${r[1]||''}&nbsp;</td>
+      <td style="width:20%;text-align:right;">${fmtM(r[2])}&nbsp;</td>
+    </tr>`).join('');
+
+    const liabRows = liab.map(r => `<tr class="data-row">
+      <td style="width:30%;">${r[0]||''}&nbsp;</td>
+      <td style="width:43%;">${r[1]||''}&nbsp;</td>
+      <td style="width:27%;text-align:right;">${fmtM(r[2])}&nbsp;</td>
+    </tr>`).join('');
+
+    const bizRows = biz.map(r => `<tr class="data-row">
+      <td style="width:27%;">${r[0]||''}&nbsp;</td>
+      <td style="width:23%;">${r[1]||''}&nbsp;</td>
+      <td style="width:29%;">${r[2]||''}&nbsp;</td>
+      <td style="width:21%;text-align:center;">${r[3]||''}&nbsp;</td>
+    </tr>`).join('');
+
     const html = `<!DOCTYPE html>
-<html><head>
-    <meta charset="UTF-8"/>
-    <title>Annex B — Declarant's Assets, Liabilities and Net Worth (Sheet AS-1)</title>
-    <style>${css}</style>
+<html><head><meta charset="UTF-8"/>
+<title>Annex B — Sheet AS-1 (Declarant)</title>
+<style>${sharedCss}</style>
 </head><body>
-    <div style="width:100%;display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:2pt;">
-      <div></div>
-      <div style="text-align:right;font-size:8pt;line-height:1.3;">
-        SALN Form AS-1 (Declarant)<br>
-        Per CSC Resolution No. 2500632<br>
-        Promulgated on 25 June 2025
-      </div>
-    </div>
-    <h2>ANNEX B — DECLARANT'S ASSETS, LIABILITIES AND NET WORTH (SHEET AS-1)</h2>
-    <div class="sub">2025 SALN Form · Per CSC Resolution No. 2500632</div>
-    ${asOf ? `<div class="as-of"><strong>As of:</strong> ${asOf}</div>` : ''}
-    <div class="tbl-section-hd">1. ASSETS</div>
-    <div class="tbl-subhd">a. Real Properties</div>
-    <table>
-      <thead>
-        <tr>
-          <th>Description<br><span style="font-weight:normal;font-size:7pt;">(e.g. lot, house and lot, condominium and improvements)</span></th>
-          <th>Kind<br><span style="font-weight:normal;font-size:7pt;">(e.g. residential, commercial, industrial, agricultural, and mixed use)</span></th>
-          <th>Exact Location</th>
-          <th>Assessed Value<br><span style="font-weight:normal;font-size:7pt;">(As found in the Tax Declaration of Real Property)</span></th>
-          <th>Current Fair<br>Market Value</th>
-          <th>Acquisition Year</th>
-          <th>Acquisition Mode</th>
-          <th>Acquisition Cost</th>
+
+<div class="ref">
+  SALN Form AS-1 (Declarant)<br>
+  Per CSC Resolution No. 2500632<br>
+  Promulgated on 25 June 2025
+</div>
+
+<div class="main-title">Sworn Statement of Assets, Liabilities and Net Worth</div>
+<div class="as-of-line">As of <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:160pt;">&nbsp;</span></div>
+<div class="italic-note">(Additional sheet/s for the declarant)</div>
+
+<!-- NAME / POSITION block -->
+<table style="margin-bottom:6pt;" class="name-block">
+  <tr>
+    <td style="border:none;width:7%;padding:2pt 0;font-size:7pt;font-weight:700;vertical-align:bottom;">NAME:</td>
+    <td style="border:none;width:43%;padding:0;vertical-align:bottom;">
+      <table style="width:100%;border-collapse:collapse;">
+        <tr class="name-row">
+          <td style="width:40%;">&nbsp;</td>
+          <td style="border-left:none;width:40%;">&nbsp;</td>
+          <td style="border-left:none;width:20%;">&nbsp;</td>
         </tr>
-      </thead>
-      <tbody>
-        ${real.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
-      </tbody>
-    </table>
-    <div class="tbl-subhd">b. Personal Properties</div>
-    <table>
-      <thead>
         <tr>
-          <th>Description</th>
-          <th>Acquisition Year</th>
-          <th>Acquisition Cost / Amount</th>
+          <td class="name-lbl" style="border:none;">(Family Name)</td>
+          <td class="name-lbl" style="border:none;">(First Name)</td>
+          <td class="name-lbl" style="border:none;">(M.I.)</td>
         </tr>
-      </thead>
-      <tbody>
-        ${pers.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
-      </tbody>
-    </table>
-    <div class="tbl-section-hd">2. LIABILITIES</div>
-    <table>
-      <thead>
-        <tr>
-          <th>Nature</th>
-          <th>Name of Creditors</th>
-          <th>Outstanding Balance</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${liab.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
-      </tbody>
-    </table>
-    <div class="tbl-section-hd">3. BUSINESS INTERESTS AND FINANCIAL CONNECTIONS</div>
-    <table>
-      <thead>
-        <tr>
-          <th>Name of Entity/Business Enterprise</th>
-          <th>Business Address</th>
-          <th>Nature of Business Interest &/or Financial Connection</th>
-          <th>Date of Acquisition of Interest or Connection</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${biz.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
-      </tbody>
-    </table>
+      </table>
+    </td>
+    <td style="border:none;width:8%;padding:2pt 4pt;font-size:7pt;font-weight:700;vertical-align:bottom;">POSITION:</td>
+    <td style="border:none;border-bottom:0.5pt solid #000;width:42%;vertical-align:bottom;">&nbsp;</td>
+  </tr>
+  <tr>
+    <td style="border:none;" colspan="2"></td>
+    <td style="border:none;padding:2pt 4pt;font-size:7pt;font-weight:700;vertical-align:bottom;">AGENCY/OFFICE:</td>
+    <td style="border:none;border-bottom:0.5pt solid #000;vertical-align:bottom;">&nbsp;</td>
+  </tr>
+</table>
+
+<div class="double-rule"></div>
+
+<div class="assets-title">Assets, Liabilities and Net Worth</div>
+
+<!-- 1. ASSETS -->
+<div class="section-num">1.&nbsp;&nbsp;ASSETS</div>
+<div class="section-sub">a.&nbsp;&nbsp;Real Properties</div>
+<table style="margin-bottom:4pt;">
+  <thead>
+    <tr>
+      <th class="col-hd" style="width:15%;">DESCRIPTION<br><span style="font-weight:400;font-size:5pt;">(e.g. lot, house and<br>lot, condominium<br>and improvements)</span></th>
+      <th class="col-hd" style="width:12%;">KIND<br><span style="font-weight:400;font-size:5pt;">(e.g. residential,<br>commercial, industrial,<br>agricultural and mixed<br>use)</span></th>
+      <th class="col-hd" style="width:14%;">EXACT<br>LOCATION</th>
+      <th class="col-hd" style="width:9%;">ASSESSED<br>VALUE</th>
+      <th class="col-hd" style="width:10%;">CURRENT FAIR<br>MARKET VALUE<br><span style="font-weight:400;font-size:5pt;">(As found in the Tax Declaration of<br>Real Property)</span></th>
+      <td colspan="2" style="padding:0;width:17%;background:#c8c8c8;vertical-align:top;border:0.5pt solid #000;">
+        <div style="text-align:center;font-size:6pt;font-weight:700;padding:2pt;border-bottom:0.5pt solid #000;">ACQUISITION</div>
+        <table style="width:100%;border-collapse:collapse;"><tr>
+          <td style="border-right:0.5pt solid #000;padding:2pt 1pt;font-size:5.5pt;font-weight:700;text-align:center;width:50%;background:#c8c8c8;">YEAR</td>
+          <td style="padding:2pt 1pt;font-size:5.5pt;font-weight:700;text-align:center;width:50%;background:#c8c8c8;">MODE</td>
+        </tr></table>
+      </td>
+      <th class="col-hd" style="width:9%;">ACQUISITION<br>COST</th>
+    </tr>
+  </thead>
+  <tbody>${realRows}</tbody>
+</table>
+<table style="margin-bottom:8pt;"><tr class="subtotal-row">
+  <td colspan="8">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">&nbsp;</span></td>
+</tr></table>
+
+<div class="section-sub">b.&nbsp;&nbsp;Personal Properties</div>
+<table style="margin-bottom:0;">
+  <thead>
+    <tr>
+      <th class="col-hd" style="width:62%;">DESCRIPTION</th>
+      <th class="col-hd" style="width:18%;">ACQUISITION YEAR</th>
+      <th class="col-hd" style="width:20%;">ACQUISITION<br>COST/ AMOUNT</th>
+    </tr>
+  </thead>
+  <tbody>${persRows}</tbody>
+</table>
+<table style="margin-bottom:8pt;">
+  <tr class="subtotal-row"><td colspan="3">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">&nbsp;</span></td></tr>
+  <tr class="total-row"><td colspan="3">Total Assets: <span style="display:inline-block;border-bottom:2pt solid #000;min-width:100pt;">&nbsp;</span></td></tr>
+</table>
+
+<!-- 2. LIABILITIES -->
+<div class="section-num">2.&nbsp;&nbsp;LIABILITIES</div>
+<table style="margin-bottom:0;">
+  <thead>
+    <tr>
+      <th class="col-hd" style="width:30%;">NATURE</th>
+      <th class="col-hd" style="width:43%;">NAME OF CREDITORS</th>
+      <th class="col-hd" style="width:27%;">OUTSTANDING BALANCE</th>
+    </tr>
+  </thead>
+  <tbody>${liabRows}</tbody>
+</table>
+<table style="margin-bottom:4pt;"><tr class="total-row">
+  <td colspan="3">Total Liabilities: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">&nbsp;</span></td>
+</tr></table>
+
+<div class="double-rule"></div>
+
+<!-- BUSINESS INTERESTS -->
+<div style="font-size:8pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;margin-bottom:4pt;">Business Interests and Financial Connections</div>
+<table style="margin-bottom:16pt;">
+  <thead>
+    <tr>
+      <th class="col-hd" style="width:27%;">NAME OF ENTITY/BUSINESS<br>ENTERPRISE</th>
+      <th class="col-hd" style="width:23%;">BUSINESS ADDRESS</th>
+      <th class="col-hd" style="width:29%;">NATURE OF BUSINESS<br>INTEREST &amp;/OR FINANCIAL<br>CONNECTION</th>
+      <th class="col-hd" style="width:21%;">DATE OF ACQUISITION OF<br>INTEREST OR CONNECTION</th>
+    </tr>
+  </thead>
+  <tbody>${bizRows}</tbody>
+</table>
+
+<div class="footer-area">
+  <div class="page-num"><em>Page ___ of ___</em></div>
+  <div class="sig-line">Signature/Initial of Declarant</div>
+</div>
+
 </body></html>`;
+
     const w = window.open('', '_blank', 'width=900,height=1100');
     w.document.write(html);
     w.document.close();
@@ -6527,123 +6973,177 @@ function printAnnex(which) {
     setTimeout(() => w.print(), 500);
     return;
   }
+
+  // ── ANNEX C — Sheet AS-2 (Spouse & Children) ────────────────
   if (which === 'annex_c') {
-    // --- ANNEX C PRINT LOGIC ---
     const page = document.getElementById('page-annex_c');
     if (!page) return;
-    // Helper to get table values
-    const getTableInputs = (selector, colCount, rowCount) => {
-      const tbl = page.querySelector(selector);
-      if (!tbl) return Array(rowCount).fill(0).map(()=>Array(colCount).fill(''));
-      const rows = [...tbl.querySelectorAll('tbody tr')];
-      return Array(rowCount).fill(0).map((_,i)=>
-        Array(colCount).fill(0).map((_,j)=>{
-          const cell = rows[i]?.children[j];
-          if (!cell) return '';
-          const inp = cell.querySelector('input,select');
-          return inp ? (inp.value||'') : '';
-        })
-      );
-    };
-    // Real Properties: 8 cols, 5 rows
-    const real = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(1) table', 8, 5);
-    // Personal Properties: 3 cols, 4 rows
-    const pers = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(2) table', 3, 4);
-    // Liabilities: 3 cols, 4 rows
-    const liab = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(3) table', 3, 4);
-    // Business Interests: 4 cols, 3 rows
-    const biz = getTableInputs('.form-section-body .saln-table-scroll:nth-of-type(4) table', 4, 3);
 
-    const css = `
-      *{box-sizing:border-box;margin:0;padding:0;}
-      body{font-family:'Arial Narrow',Arial,sans-serif;font-size:9pt;color:#000;padding:12mm 14mm;}
-      @page{size:8.5in 13in;margin:12mm 14mm;}
-      h2{font-size:11pt;font-weight:700;text-align:center;text-transform:uppercase;margin-bottom:4pt;}
-      .sub{font-size:8pt;text-align:center;margin-bottom:12pt;color:#444;}
-      .section-hd{font-size:9pt;font-weight:700;background:#e0e0e0;padding:4pt 6pt;border:0.5pt solid #000;margin-bottom:0;text-transform:uppercase;}
-      table{width:100%;border-collapse:collapse;margin-bottom:10pt;}
-      th{background:#d1d5db;border:1.5pt solid #000;padding:6pt 4pt;font-size:10pt;font-weight:700;text-align:center;}
-      td{border:1.5pt solid #000;padding:8pt 4pt;font-size:10pt;min-height:14pt;vertical-align:middle;text-align:center;}
-    `;
+    const real = getRowsFromTable(getNthTable(page, 1), 8, 4);
+    const pers = getRowsFromTable(getNthTable(page, 2), 3, 5);
+    const liab = getRowsFromTable(getNthTable(page, 3), 3, 5);
+    const biz  = getRowsFromTable(getNthTable(page, 4), 4, 3);
+
+    const realRows = real.map(r => `<tr class="data-row">
+      <td style="width:15%;">${r[0]||''}&nbsp;</td>
+      <td style="width:12%;">${r[1]||''}&nbsp;</td>
+      <td style="width:14%;">${r[2]||''}&nbsp;</td>
+      <td style="width:9%;text-align:right;">${fmtM(r[3])}&nbsp;</td>
+      <td style="width:10%;text-align:right;">${fmtM(r[4])}&nbsp;</td>
+      <td style="width:8%;text-align:center;">${r[5]||''}&nbsp;</td>
+      <td style="width:9%;">${r[6]||''}&nbsp;</td>
+      <td style="width:9%;text-align:right;">${fmtM(r[7])}&nbsp;</td>
+    </tr>`).join('');
+
+    const persRows = pers.map(r => `<tr class="data-row">
+      <td style="width:62%;">${r[0]||''}&nbsp;</td>
+      <td style="width:18%;text-align:center;">${r[1]||''}&nbsp;</td>
+      <td style="width:20%;text-align:right;">${fmtM(r[2])}&nbsp;</td>
+    </tr>`).join('');
+
+    const liabRows = liab.map(r => `<tr class="data-row">
+      <td style="width:30%;">${r[0]||''}&nbsp;</td>
+      <td style="width:43%;">${r[1]||''}&nbsp;</td>
+      <td style="width:27%;text-align:right;">${fmtM(r[2])}&nbsp;</td>
+    </tr>`).join('');
+
+    const bizRows = biz.map(r => `<tr class="data-row">
+      <td style="width:27%;">${r[0]||''}&nbsp;</td>
+      <td style="width:23%;">${r[1]||''}&nbsp;</td>
+      <td style="width:29%;">${r[2]||''}&nbsp;</td>
+      <td style="width:21%;text-align:center;">${r[3]||''}&nbsp;</td>
+    </tr>`).join('');
+
     const html = `<!DOCTYPE html>
-<html><head>
-    <meta charset="UTF-8"/>
-    <title>Annex C</title>
-    <style>${css}</style>
+<html><head><meta charset="UTF-8"/>
+<title>Annex C — Sheet AS-2 (Spouse &amp; Children)</title>
+<style>${sharedCss}</style>
 </head><body>
-    <h2 style="text-align:left;margin-bottom:0;">1. ASSETS</h2>
-    <div style="font-size:1.2em;font-weight:700;margin:10pt 0 2pt 0;text-align:left;">a. Real Properties</div>
-    <div style="overflow-x:auto;">
-      <table>
-        <thead>
-          <tr>
-            <th>DESCRIPTION<br><span style="font-weight:normal;font-size:9pt;">(e.g. lot, house and lot, condominium and improvements)</span></th>
-            <th>KIND<br><span style="font-weight:normal;font-size:9pt;">(e.g. residential, commercial, industrial, agricultural and mixed use)</span></th>
-            <th>EXACT<br>LOCATION</th>
-            <th>ASSESSED<br>VALUE<br><span style="font-weight:normal;font-size:9pt;">(As found in the Tax Declaration of Real Property)</span></th>
-            <th>CURRENT FAIR<br>MARKET VALUE</th>
-            <th colspan="2">ACQUISITION<br>YEAR / MODE</th>
-            <th>ACQUISITION<br>COST</th>
-          </tr>
-          <tr>
-            <th colspan="5"></th>
-            <th>YEAR</th>
-            <th>MODE</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          ${real.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
-        </tbody>
+
+<div class="ref">
+  2025 SALN Form AS-2 (Spouse &amp; Children)<br>
+  Per CSC Resolution No. 2500632<br>
+  Promulgated on 25 June 2025
+</div>
+
+<div class="main-title">Statement of Assets, Liabilities and Net Worth</div>
+<div class="as-of-line">As of <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:160pt;">&nbsp;</span></div>
+<div class="italic-note">(Additional sheet/s for the exclusive properties of the declarant's spouse and unmarried children<br>below eighteen (18) years of age living in declarant's household)</div>
+
+<!-- NAME / POSITION block -->
+<table style="margin-bottom:6pt;" class="name-block">
+  <tr>
+    <td style="border:none;width:7%;padding:2pt 0;font-size:7pt;font-weight:700;vertical-align:bottom;">NAME:</td>
+    <td style="border:none;width:43%;padding:0;vertical-align:bottom;">
+      <table style="width:100%;border-collapse:collapse;">
+        <tr class="name-row">
+          <td style="width:40%;">&nbsp;</td>
+          <td style="border-left:none;width:40%;">&nbsp;</td>
+          <td style="border-left:none;width:20%;">&nbsp;</td>
+        </tr>
+        <tr>
+          <td class="name-lbl" style="border:none;">(Family Name)</td>
+          <td class="name-lbl" style="border:none;">(First Name)</td>
+          <td class="name-lbl" style="border:none;">(M.I.)</td>
+        </tr>
       </table>
-    </div>
-    <div style="font-size:1.1em;font-weight:700;margin:18pt 0 2pt 0;text-align:left;">b. Personal Properties</div>
-    <div style="overflow-x:auto;">
-      <table>
-        <thead>
-          <tr>
-            <th>DESCRIPTION</th>
-            <th>ACQUISITION YEAR</th>
-            <th>ACQUISITION COST / AMOUNT</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${pers.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
-        </tbody>
-      </table>
-    </div>
-    <h2 style="text-align:left;margin-top:24pt;">2. LIABILITIES</h2>
-    <div style="overflow-x:auto;">
-      <table>
-        <thead>
-          <tr>
-            <th>NATURE</th>
-            <th>NAME OF CREDITORS</th>
-            <th>OUTSTANDING BALANCE</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${liab.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
-        </tbody>
-      </table>
-    </div>
-    <div style="font-size:1.1em;font-weight:700;margin:18pt 0 2pt 0;text-align:left;text-transform:uppercase;">Business Interests and Financial Connections</div>
-    <div style="overflow-x:auto;">
-      <table>
-        <thead>
-          <tr>
-            <th>NAME OF ENTITY/BUSINESS ENTERPRISE</th>
-            <th>BUSINESS ADDRESS</th>
-            <th>NATURE OF BUSINESS INTEREST &/OR FINANCIAL CONNECTION</th>
-            <th>DATE OF ACQUISITION OF INTEREST OR CONNECTION</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${biz.map(r=>`<tr>${r.map(c=>`<td>${c||'&nbsp;'}</td>`).join('')}</tr>`).join('')}
-        </tbody>
-      </table>
-    </div>
+    </td>
+    <td style="border:none;width:8%;padding:2pt 4pt;font-size:7pt;font-weight:700;vertical-align:bottom;">POSITION:</td>
+    <td style="border:none;border-bottom:0.5pt solid #000;width:42%;vertical-align:bottom;">&nbsp;</td>
+  </tr>
+  <tr>
+    <td style="border:none;" colspan="2"></td>
+    <td style="border:none;padding:2pt 4pt;font-size:7pt;font-weight:700;vertical-align:bottom;">AGENCY/OFFICE:</td>
+    <td style="border:none;border-bottom:0.5pt solid #000;vertical-align:bottom;">&nbsp;</td>
+  </tr>
+</table>
+
+<div class="double-rule"></div>
+
+<div class="assets-title">Assets, Liabilities and Net Worth</div>
+
+<!-- 1. ASSETS -->
+<div class="section-num">1.&nbsp;&nbsp;ASSETS</div>
+<div class="section-sub">a.&nbsp;&nbsp;Real Properties</div>
+<table style="margin-bottom:4pt;">
+  <thead>
+    <tr>
+      <th class="col-hd" style="width:15%;">DESCRIPTION<br><span style="font-weight:400;font-size:5pt;">(e.g. lot, house and<br>lot, condominium<br>and improvements)</span></th>
+      <th class="col-hd" style="width:12%;">KIND<br><span style="font-weight:400;font-size:5pt;">(e.g. residential,<br>commercial, industrial,<br>agricultural and mixed<br>use)</span></th>
+      <th class="col-hd" style="width:14%;">EXACT<br>LOCATION</th>
+      <th class="col-hd" style="width:9%;">ASSESSED<br>VALUE</th>
+      <th class="col-hd" style="width:10%;">CURRENT FAIR<br>MARKET VALUE<br><span style="font-weight:400;font-size:5pt;">(As found in the Tax Declaration of<br>Real Property)</span></th>
+      <td colspan="2" style="padding:0;width:17%;background:#c8c8c8;vertical-align:top;border:0.5pt solid #000;">
+        <div style="text-align:center;font-size:6pt;font-weight:700;padding:2pt;border-bottom:0.5pt solid #000;">ACQUISITION</div>
+        <table style="width:100%;border-collapse:collapse;"><tr>
+          <td style="border-right:0.5pt solid #000;padding:2pt 1pt;font-size:5.5pt;font-weight:700;text-align:center;width:50%;background:#c8c8c8;">YEAR</td>
+          <td style="padding:2pt 1pt;font-size:5.5pt;font-weight:700;text-align:center;width:50%;background:#c8c8c8;">MODE</td>
+        </tr></table>
+      </td>
+      <th class="col-hd" style="width:9%;">ACQUISITION<br>COST</th>
+    </tr>
+  </thead>
+  <tbody>${realRows}</tbody>
+</table>
+<table style="margin-bottom:8pt;"><tr class="subtotal-row">
+  <td colspan="8">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">&nbsp;</span></td>
+</tr></table>
+
+<div class="section-sub">b.&nbsp;&nbsp;Personal Properties</div>
+<table style="margin-bottom:0;">
+  <thead>
+    <tr>
+      <th class="col-hd" style="width:62%;">DESCRIPTION</th>
+      <th class="col-hd" style="width:18%;">ACQUISITION YEAR</th>
+      <th class="col-hd" style="width:20%;">ACQUISITION<br>COST/ AMOUNT</th>
+    </tr>
+  </thead>
+  <tbody>${persRows}</tbody>
+</table>
+<table style="margin-bottom:8pt;">
+  <tr class="subtotal-row"><td colspan="3">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">&nbsp;</span></td></tr>
+  <tr class="total-row"><td colspan="3">Total Assets: <span style="display:inline-block;border-bottom:2pt solid #000;min-width:100pt;">&nbsp;</span></td></tr>
+</table>
+
+<!-- 2. LIABILITIES -->
+<div class="section-num">2.&nbsp;&nbsp;LIABILITIES</div>
+<table style="margin-bottom:0;">
+  <thead>
+    <tr>
+      <th class="col-hd" style="width:30%;">NATURE</th>
+      <th class="col-hd" style="width:43%;">NAME OF CREDITORS</th>
+      <th class="col-hd" style="width:27%;">OUTSTANDING BALANCE</th>
+    </tr>
+  </thead>
+  <tbody>${liabRows}</tbody>
+</table>
+<table style="margin-bottom:4pt;"><tr class="total-row">
+  <td colspan="3">Total Liabilities: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">&nbsp;</span></td>
+</tr></table>
+
+<div class="double-rule"></div>
+
+<!-- BUSINESS INTERESTS -->
+<div style="font-size:8pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;margin-bottom:4pt;">Business Interests and Financial Connections</div>
+<table style="margin-bottom:16pt;">
+  <thead>
+    <tr>
+      <th class="col-hd" style="width:27%;">NAME OF ENTITY/BUSINESS<br>ENTERPRISE</th>
+      <th class="col-hd" style="width:23%;">BUSINESS ADDRESS</th>
+      <th class="col-hd" style="width:29%;">NATURE OF BUSINESS<br>INTEREST &amp;/OR FINANCIAL<br>CONNECTION</th>
+      <th class="col-hd" style="width:21%;">DATE OF ACQUISITION OF<br>INTEREST OR CONNECTION</th>
+    </tr>
+  </thead>
+  <tbody>${bizRows}</tbody>
+</table>
+
+<div class="footer-area">
+  <div class="page-num"><em>Page ___ of ___</em></div>
+  <div class="sig-line">Signature/Initial of Declarant</div>
+</div>
+
 </body></html>`;
+
     const w = window.open('', '_blank', 'width=900,height=1100');
     w.document.write(html);
     w.document.close();
@@ -6651,6 +7151,7 @@ function printAnnex(which) {
     setTimeout(() => w.print(), 500);
     return;
   }
+
   // fallback for other annexes
   return;
 }
@@ -6678,56 +7179,51 @@ function buildSALNPrintHTML(d, emp, openPrint) {
   const isSeparate   = d.filing_mode==='Separate';
   const isNA         = !isJoint && !isSeparate;
 
+  // td helpers — no background, plain border like official form
   const C  = (txt,s) => `<td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:6.5pt;vertical-align:middle;${s||''}">${v(txt)}&nbsp;</td>`;
-  const H  = (txt,s) => `<td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:5.5pt;font-weight:700;background:#e0e0e0;vertical-align:middle;${s||''}">${txt}</td>`;
-  const ul = (val,w) => `<span style="display:inline-block;min-width:${w||'70pt'};border-bottom:0.5pt solid #000;font-size:7pt;font-weight:700;padding-bottom:0.5pt;">${v(val)}&nbsp;</span>`;
+  const H  = (txt,s) => `<td style="border:0.5pt solid #000;padding:2pt 3pt;font-size:6pt;font-weight:700;text-align:center;vertical-align:middle;${s||''}">${txt}</td>`;
 
   // Real property rows — min 4
-  const realRows = padR(rp, 4, p => `<tr style="height:13pt;">
-    ${C(p.description,'width:17%;')}${C(p.kind,'width:12%;')}${C(p.location,'width:14%;')}
-    ${C(fmtM(p.assessed_value),'width:9%;text-align:right;')}${C(fmtM(p.market_value),'width:9%;text-align:right;')}
-    ${C(p.acq_year,'width:7%;text-align:center;')}${C(p.acq_mode,'width:9%;')}${C(fmtM(p.acq_cost),'width:9%;text-align:right;')}
+  const realRows = padR(rp, 4, p => `<tr style="height:18pt;">
+    ${C(p.description,'width:18%;font-size:6.5pt;')}${C(p.kind,'width:12%;')}${C(p.location,'width:16%;')}
+    ${C(fmtM(p.assessed_value),'width:10%;text-align:right;')}${C(fmtM(p.market_value),'width:10%;text-align:right;')}
+    ${C(p.acq_year,'width:8%;text-align:center;')}${C(p.acq_mode,'width:10%;')}${C(fmtM(p.acq_cost),'width:10%;text-align:right;')}
   </tr>`);
 
   // Personal property rows — min 6
-  const persRows = padR(pp, 6, p => `<tr style="height:12pt;">
-    ${C(p.description,'width:60%;')}${C(p.acq_year,'width:18%;text-align:center;')}${C(fmtM(p.acq_cost),'width:22%;text-align:right;')}
+  const persRows = padR(pp, 6, p => `<tr style="height:16pt;">
+    ${C(p.description,'width:65%;')}${C(p.acq_year,'width:17%;text-align:center;')}${C(fmtM(p.acq_cost),'width:18%;text-align:right;')}
   </tr>`);
 
   // Liability rows — min 5
-  const liabRows = padR(lb, 5, l => `<tr style="height:12pt;">
-    ${C(l.nature,'width:35%;')}${C(l.creditor,'width:40%;')}${C(fmtM(l.balance),'width:25%;text-align:right;')}
+  const liabRows = padR(lb, 5, l => `<tr style="height:14pt;">
+    ${C(l.nature,'width:34%;')}${C(l.creditor,'width:41%;')}${C(fmtM(l.balance),'width:25%;text-align:right;')}
   </tr>`);
 
   // Business interest rows — min 3
-  const bizRows = padR(d.no_biz?[]:biz, 3, b => `<tr style="height:12pt;">
-    ${C(b.entity_name,'width:28%;')}${C(b.biz_address,'width:25%;')}${C(b.nature,'width:28%;')}${C(fmtD(b.date_acquired),'width:19%;text-align:center;')}
+  const bizRows = padR(d.no_biz?[]:biz, 3, b => `<tr style="height:14pt;">
+    ${C(b.entity_name,'width:27%;')}${C(b.biz_address,'width:26%;')}${C(b.nature,'width:28%;')}${C(fmtD(b.date_acquired),'width:19%;text-align:center;')}
   </tr>`);
 
   // Relatives rows — min 5
-  const relRows = padR(d.no_rel?[]:rel, 5, r => `<tr style="height:12pt;">
-    ${C(r.name,'width:25%;')}${C(r.relationship,'width:15%;')}${C(r.position,'width:25%;')}${C(r.agency_address,'width:35%;')}
+  const relRows = padR(d.no_rel?[]:rel, 5, r => `<tr style="height:14pt;">
+    ${C(r.name,'width:24%;')}${C(r.relationship,'width:16%;')}${C(r.position,'width:24%;')}${C(r.agency_address,'width:36%;')}
   </tr>`);
 
   // Children rows — min 3
-  const childRows = padR(ch, 3, c => `<tr style="height:13pt;">
-    <td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:7pt;width:75%;">${v(c.name)}&nbsp;</td>
-    <td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:7pt;text-align:center;width:25%;">${v(c.age)}&nbsp;</td>
+  const childRows = padR(ch, 3, c => `<tr style="height:16pt;">
+    <td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:7pt;width:76%;">${v(c.name)}&nbsp;</td>
+    <td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:7pt;text-align:center;width:24%;">${v(c.age)}&nbsp;</td>
   </tr>`);
 
   const css = `
     *{box-sizing:border-box;margin:0;padding:0;}
     body{font-family:'Arial Narrow',Arial,sans-serif;font-size:7pt;color:#000;background:#fff;}
-    @page{size:8.5in 13in;margin:5mm 6mm;}
-    @media print{body{margin:0;}}
+    @page{size:8.5in 13in;margin:12mm 14mm 10mm 14mm;}
+    @media print{body{margin:0;} .no-print{display:none;}}
     table{border-collapse:collapse;width:100%;}
-    .page-title{text-align:center;font-size:9.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.04em;}
-    .page-sub{text-align:center;font-size:6.5pt;}
-    .hdr{background:#e0e0e0;font-size:5.5pt;font-weight:700;text-align:center;padding:1.5pt 2pt;border:0.5pt solid #000;vertical-align:middle;}
-    .lbl{font-size:5pt;font-weight:700;text-transform:uppercase;color:#444;}
-    .val{font-size:7pt;font-weight:700;border-bottom:0.4pt solid #555;min-height:9pt;display:block;}
-    .yn{display:inline-block;border:0.5pt solid #000;width:7pt;height:7pt;text-align:center;font-size:6pt;line-height:7pt;margin-right:1pt;}
-    .underline{border-bottom:0.5pt solid #000;display:inline-block;min-width:50pt;}
+    .section-title{font-size:8pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;letter-spacing:.03em;}
+    .page-footer{text-align:center;font-size:7.5pt;font-style:italic;margin-top:6pt;}
   `;
 
   const html = `<!DOCTYPE html>
@@ -6737,312 +7233,313 @@ function buildSALNPrintHTML(d, emp, openPrint) {
   <style>${css}</style>
 </head><body>
 
-<!-- ══ HEADER ══ -->
-<div style="text-align:center;margin-bottom:3pt;">
-  <div style="font-size:6.5pt;color:#555;">2025 SALN Form &nbsp;·&nbsp; Per CSC Resolution No. 2500632 &nbsp;·&nbsp; Promulgated 25 June 2025</div>
-  <div class="page-title" style="margin-top:1pt;">Sworn Statement of Assets, Liabilities, and Net Worth</div>
-  <div class="page-sub">(As required by R.A. No. 6713)</div>
+<!-- top-right reference -->
+<div style="text-align:right;font-size:6pt;margin-bottom:4pt;line-height:1.6;">
+  2025 SALN Form<br>Per CSC Resolution No. 2500632<br>Promulgated on 25 June 2025
 </div>
 
-<!-- ══ COMPLIANCE FOR ══ -->
-<table style="margin-bottom:2pt;">
+<!-- TITLE -->
+<div style="text-align:center;margin-bottom:6pt;">
+  <div style="font-size:10pt;font-weight:700;text-transform:uppercase;letter-spacing:.04em;">Sworn Statement of Assets, Liabilities, and Net Worth</div>
+  <div style="font-size:7pt;">(As required by R.A. No. 6713)</div>
+</div>
+
+<!-- COMPLIANCE FOR -->
+<table style="margin-bottom:4pt;">
   <tr>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;width:18%;font-weight:700;">COMPLIANCE FOR:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 5pt;font-size:6.5pt;">
-      <span class="yn">${cb(isAssumption)}</span> Assumption of office as of ${isAssumption?ul(fmtD(d.as_of_date),'80pt'):'________________________________'}
-      &nbsp;&nbsp;&nbsp;
-      <span class="yn">${cb(isAnnual)}</span> Annual filing as of December 31, ${isAnnual?`<strong>${v(d.saln_year)}</strong>`:'_________'}
-      &nbsp;&nbsp;&nbsp;
-      <span class="yn">${cb(isExit)}</span> Exit as of ${isExit?ul(fmtD(d.as_of_date),'80pt'):'________________________________'}
+    <td colspan="3" style="border:none;padding:0 0 2pt 0;font-size:7.5pt;font-weight:700;text-align:center;text-decoration:underline;">COMPLIANCE FOR:</td>
+  </tr>
+  <tr>
+    <td style="border:none;padding:1pt 6pt;font-size:7pt;width:34%;">
+      <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(isAssumption)}</span>
+      &nbsp;<em>Assumption of office as of</em> ___________
+    </td>
+    <td style="border:none;padding:1pt 6pt;font-size:7pt;width:33%;text-align:center;">
+      <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(isAnnual)}</span>
+      &nbsp;<em>Annual filing as of December 31,</em> ${isAnnual?`<strong>${v(d.saln_year)}</strong>`:'______'}
+    </td>
+    <td style="border:none;padding:1pt 6pt;font-size:7pt;width:33%;text-align:right;">
+      <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(isExit)}</span>
+      &nbsp;<em>Exit as of</em> ___________
     </td>
   </tr>
 </table>
 
-<!-- ══ JOINT / SEPARATE FILING ══ -->
-<table style="margin-bottom:2pt;">
-  <tr>
-    <td style="border:0.5pt solid #000;padding:2pt 5pt;font-size:6pt;">
-      SPOUSES WHO ARE BOTH PUBLIC OFFICIALS/EMPLOYEES MAY FILE THE SALN JOINTLY OR SEPARATELY. THE DECLARANT SHALL CHECK THE APPROPRIATE BOX:
-      &nbsp;&nbsp; <span class="yn">${cb(isJoint)}</span> <strong>Joint Filing</strong>
-      &nbsp;&nbsp; <span class="yn">${cb(isSeparate)}</span> <strong>Separate Filing</strong>
-      &nbsp;&nbsp; <span class="yn">${cb(isNA)}</span> <strong>Not Applicable</strong>
-    </td>
-  </tr>
-  <tr>
-    <td style="border:0.5pt solid #000;border-top:none;padding:2pt 5pt;font-size:6pt;">
-      IF WITH MULTIPLE MARRIAGES, INDICATE NAME(S) OF SPOUSES, OTHERWISE CHECK "NOT APPLICABLE":
-      &nbsp;&nbsp; ${d.multi_spouse_na?`<span class="yn">☑</span> Not Applicable`:ul(v(d.multi_spouse),'200pt')}
-    </td>
-  </tr>
-</table>
+<!-- DOUBLE HORIZONTAL RULE -->
+<div style="border-top:2pt double #000;border-bottom:0.5pt solid #000;height:3pt;margin-bottom:4pt;"></div>
 
-<!-- ══ DECLARANT / SPOUSE ══ -->
-<table style="margin-bottom:2pt;">
+<!-- DECLARANT / SPOUSE BLOCK -->
+<table style="margin-bottom:4pt;">
   <tr>
-    <td style="border:0.5pt solid #000;width:50%;padding:0;vertical-align:top;">
-      <table style="width:100%;border-collapse:collapse;">
-        <tr><td colspan="2" style="border-bottom:0.5pt solid #000;padding:1.5pt 3pt;font-size:6pt;font-weight:700;background:#f0f0f0;">DECLARANT:</td></tr>
+    <!-- DECLARANT left -->
+    <td style="border:0.5pt solid #000;width:55%;padding:4pt 5pt;vertical-align:top;">
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:4pt;">DECLARANT:</div>
+      <table style="border-collapse:collapse;width:100%;margin-bottom:4pt;">
         <tr>
-          <td style="border-bottom:0.5pt solid #000;padding:1.5pt 3pt;width:35%;">
-            <div class="lbl">(Family Name)</div><div class="val">${v(dec.lastname)}</div>
-          </td>
-          <td style="border-bottom:0.5pt solid #000;border-left:0.5pt solid #000;padding:1.5pt 3pt;width:35%;">
-            <div class="lbl">(First Name)</div><div class="val">${v(dec.firstname)}</div>
-          </td>
-          <td style="border-bottom:0.5pt solid #000;border-left:0.5pt solid #000;padding:1.5pt 3pt;width:10%;">
-            <div class="lbl">(M.I.)</div><div class="val">${v(dec.mi)}</div>
-          </td>
-          <td style="border-bottom:0.5pt solid #000;border-left:0.5pt solid #000;padding:1.5pt 3pt;">
-            <div class="lbl">Position</div><div class="val" style="font-size:6.5pt;">${v(dec.position)}</div>
-          </td>
+          <td style="border-bottom:0.5pt solid #000;padding-bottom:1pt;width:40%;font-size:7pt;">${v(dec.lastname)}&nbsp;</td>
+          <td style="border-bottom:0.5pt solid #000;padding-bottom:1pt;padding-left:6pt;width:40%;font-size:7pt;">${v(dec.firstname)}&nbsp;</td>
+          <td style="border-bottom:0.5pt solid #000;padding-bottom:1pt;padding-left:4pt;width:20%;font-size:7pt;">${v(dec.mi)}&nbsp;</td>
         </tr>
         <tr>
-          <td colspan="2" style="padding:1.5pt 3pt;">
-            <div class="lbl">Agency/Office</div><div style="font-size:6.5pt;font-weight:600;min-height:9pt;">${v(dec.agency)}</div>
-          </td>
-          <td colspan="2" style="border-left:0.5pt solid #000;padding:1.5pt 3pt;">
-            <div class="lbl">Office Address</div><div style="font-size:6.5pt;font-weight:600;min-height:9pt;">${v(dec.office_addr)}</div>
-          </td>
+          <td style="font-size:5.5pt;padding-top:1pt;text-align:center;">(Family Name)</td>
+          <td style="font-size:5.5pt;padding-top:1pt;text-align:center;padding-left:6pt;">(First Name)</td>
+          <td style="font-size:5.5pt;padding-top:1pt;text-align:center;padding-left:4pt;">(M.I.)</td>
         </tr>
       </table>
     </td>
-    <td style="border:0.5pt solid #000;border-left:none;width:50%;padding:0;vertical-align:top;">
-      <table style="width:100%;border-collapse:collapse;">
-        <tr><td colspan="2" style="border-bottom:0.5pt solid #000;padding:1.5pt 3pt;font-size:6pt;font-weight:700;background:#f0f0f0;">SPOUSE:</td></tr>
+    <!-- POSITION / AGENCY right -->
+    <td style="border:0.5pt solid #000;border-left:none;width:45%;padding:4pt 5pt;vertical-align:top;">
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:2pt;">POSITION:</div>
+      <div style="border-bottom:0.5pt solid #000;min-height:10pt;font-size:7pt;margin-bottom:3pt;">${v(dec.position)}&nbsp;</div>
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:2pt;">AGENCY/OFFICE:</div>
+      <div style="border-bottom:0.5pt solid #000;min-height:10pt;font-size:7pt;margin-bottom:3pt;">${v(dec.agency)}&nbsp;</div>
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:2pt;">OFFICE ADDRESS:</div>
+      <div style="border-bottom:0.5pt solid #000;min-height:10pt;font-size:7pt;">${v(dec.office_addr)}&nbsp;</div>
+    </td>
+  </tr>
+  <tr>
+    <!-- SPOUSE left -->
+    <td style="border:0.5pt solid #000;border-top:none;width:55%;padding:4pt 5pt;vertical-align:top;">
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:4pt;">SPOUSE:</div>
+      <table style="border-collapse:collapse;width:100%;margin-bottom:4pt;">
         <tr>
-          <td style="border-bottom:0.5pt solid #000;padding:1.5pt 3pt;width:35%;">
-            <div class="lbl">(Family Name)</div><div class="val">${v(sp.lastname)}</div>
-          </td>
-          <td style="border-bottom:0.5pt solid #000;border-left:0.5pt solid #000;padding:1.5pt 3pt;width:35%;">
-            <div class="lbl">(First Name)</div><div class="val">${v(sp.firstname)}</div>
-          </td>
-          <td style="border-bottom:0.5pt solid #000;border-left:0.5pt solid #000;padding:1.5pt 3pt;width:10%;">
-            <div class="lbl">(M.I.)</div><div class="val">${v(sp.mi)}</div>
-          </td>
-          <td style="border-bottom:0.5pt solid #000;border-left:0.5pt solid #000;padding:1.5pt 3pt;">
-            <div class="lbl">Position</div><div class="val" style="font-size:6.5pt;">${v(sp.position)}</div>
-          </td>
+          <td style="border-bottom:0.5pt solid #000;padding-bottom:1pt;width:40%;font-size:7pt;">${v(sp.lastname)}&nbsp;</td>
+          <td style="border-bottom:0.5pt solid #000;padding-bottom:1pt;padding-left:6pt;width:40%;font-size:7pt;">${v(sp.firstname)}&nbsp;</td>
+          <td style="border-bottom:0.5pt solid #000;padding-bottom:1pt;padding-left:4pt;width:20%;font-size:7pt;">${v(sp.mi)}&nbsp;</td>
         </tr>
         <tr>
-          <td colspan="2" style="padding:1.5pt 3pt;">
-            <div class="lbl">Agency/Office</div><div style="font-size:6.5pt;font-weight:600;min-height:9pt;">${v(sp.agency)}</div>
-          </td>
-          <td colspan="2" style="border-left:0.5pt solid #000;padding:1.5pt 3pt;">
-            <div class="lbl">Office Address</div><div style="font-size:6.5pt;font-weight:600;min-height:9pt;">${v(sp.office_addr)}</div>
-          </td>
+          <td style="font-size:5.5pt;padding-top:1pt;text-align:center;">(Family Name)</td>
+          <td style="font-size:5.5pt;padding-top:1pt;text-align:center;padding-left:6pt;">(First Name)</td>
+          <td style="font-size:5.5pt;padding-top:1pt;text-align:center;padding-left:4pt;">(M.I.)</td>
         </tr>
       </table>
+    </td>
+    <!-- SPOUSE POSITION right -->
+    <td style="border:0.5pt solid #000;border-left:none;border-top:none;width:45%;padding:4pt 5pt;vertical-align:top;">
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:2pt;">POSITION:</div>
+      <div style="border-bottom:0.5pt solid #000;min-height:10pt;font-size:7pt;margin-bottom:3pt;">${v(sp.position)}&nbsp;</div>
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:2pt;">AGENCY/OFFICE:<sup style="font-size:5pt;">1</sup></div>
+      <div style="border-bottom:0.5pt solid #000;min-height:10pt;font-size:7pt;margin-bottom:3pt;">${v(sp.agency)}&nbsp;</div>
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:2pt;">OFFICE ADDRESS:</div>
+      <div style="border-bottom:0.5pt solid #000;min-height:10pt;font-size:7pt;">${v(sp.office_addr)}&nbsp;</div>
     </td>
   </tr>
 </table>
 
-<!-- ══ CHILDREN ══ -->
-<table style="margin-bottom:2pt;">
+<!-- JOINT/SEPARATE FILING -->
+<div style="font-size:6.5pt;font-weight:700;margin-bottom:3pt;line-height:1.6;">
+  SPOUSES, WHO ARE BOTH PUBLIC OFFICIALS OR EMPLOYEES, MAY FILE THE SALN JOINTLY OR SEPARATELY.<br>
+  THE DECLARANT SHALL CHECK THE APPROPRIATE BOX<br>
+  <span style="font-weight:400;font-style:italic;">
+    &nbsp;&nbsp;&nbsp;
+    <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(isJoint)}</span>
+    &nbsp;Joint Filing
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(isSeparate)}</span>
+    &nbsp;Separate Filing
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(isNA)}</span>
+    &nbsp;Not Applicable
+  </span>
+</div>
+
+<div style="font-size:6.5pt;font-weight:700;margin-bottom:6pt;line-height:1.6;">
+  IF WITH MULTIPLE MARRIAGES, INDICATE NAME(S) OF SPOUSES, OTHERWISE CHECK THE "NOT APPLICABLE" BOX.<br>
+  <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:220pt;font-size:7pt;font-weight:400;">${d.multi_spouse_na?'':v(d.multi_spouse)}&nbsp;</span>
+  &nbsp;&nbsp;&nbsp;
+  <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(d.multi_spouse_na)}</span>
+  &nbsp;<em style="font-weight:400;">Not Applicable</em>
+</div>
+
+<!-- DOUBLE RULE -->
+<div style="border-top:2pt double #000;border-bottom:0.5pt solid #000;height:3pt;margin-bottom:6pt;"></div>
+
+<!-- UNMARRIED CHILDREN -->
+<table style="margin-bottom:6pt;">
   <tr>
-    <th colspan="2" style="border:0.5pt solid #000;padding:2pt 5pt;font-size:6.5pt;font-weight:700;text-align:left;background:#f0f0f0;">
-      UNMARRIED CHILDREN BELOW EIGHTEEN (18) YEARS OF AGE LIVING IN DECLARANT'S HOUSEHOLD
-    </th>
+    <td colspan="2" style="border:0.5pt solid #000;padding:2pt 5pt;font-size:7pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;">
+      Unmarried Children Below Eighteen (18) Years of Age Living in Declarant's Household
+    </td>
   </tr>
   <tr>
-    ${H('NAME OF CHILD','width:75%;text-align:left;')}
-    ${H('AGE','width:25%;text-align:center;')}
+    ${H('NAME OF CHILD','width:76%;text-align:center;')}
+    ${H('AGE','width:24%;text-align:center;')}
   </tr>
   ${childRows}
 </table>
 
-<!-- ══ ASSETS HEADER ══ -->
-<table style="margin-bottom:0;">
-  <tr>
-    <td style="border:0.5pt solid #000;padding:2pt 5pt;font-size:7pt;font-weight:700;text-transform:uppercase;">
-      Assets, Liabilities and Net Worth
-      <span style="font-size:6pt;font-weight:400;">(Including those of the spouse and unmarried children below 18 years of age living in declarant's household)</span>
-    </td>
-  </tr>
-</table>
+<!-- DOUBLE RULE -->
+<div style="border-top:2pt double #000;border-bottom:0.5pt solid #000;height:3pt;margin-bottom:6pt;"></div>
 
-<!-- ══ REAL PROPERTIES ══ -->
+<!-- ASSETS HEADER -->
+<div style="font-size:8pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;margin-bottom:2pt;">Assets, Liabilities and Net Worth<sup style="font-size:5.5pt;">ii</sup></div>
+<div style="font-size:6pt;text-align:center;font-style:italic;margin-bottom:4pt;">(Including those of the spouse and unmarried children below eighteen (18) years of age living in declarant's household)<sup style="font-size:5pt;">iii</sup></div>
+
+<!-- REAL PROPERTIES -->
+<div style="font-size:7pt;font-weight:700;margin-bottom:2pt;">1.&nbsp;&nbsp;ASSETS</div>
+<div style="font-size:7pt;font-weight:700;margin-bottom:2pt;">&nbsp;&nbsp;&nbsp;&nbsp;a.&nbsp;&nbsp;Real Properties</div>
 <table style="margin-bottom:0;">
   <tr>
-    <td colspan="8" style="border:0.5pt solid #000;border-top:none;padding:1.5pt 4pt;font-size:6.5pt;font-weight:700;">
-      1. &nbsp; ASSETS &nbsp;&nbsp; a. &nbsp; Real Properties
-    </td>
-  </tr>
-  <tr>
-    ${H('DESCRIPTION<br><span style="font-weight:400;font-size:5pt;">(e.g. lot, house and lot, condominium)</span>','width:17%;')}
-    ${H('KIND<br><span style="font-weight:400;font-size:5pt;">(residential, commercial, agricultural)</span>','width:12%;')}
-    ${H('EXACT LOCATION<br><span style="font-weight:400;font-size:5pt;">(per Tax Declaration)</span>','width:14%;')}
-    ${H('ASSESSED VALUE<br><span style="font-weight:400;font-size:5pt;">(per Tax Dec.)</span>','width:9%;text-align:center;')}
-    ${H('CURRENT FAIR MARKET VALUE','width:9%;text-align:center;')}
-    <td style="border:0.5pt solid #000;padding:0;width:19%;background:#e0e0e0;vertical-align:top;">
-      <div style="text-align:center;font-size:5.5pt;font-weight:700;padding:1.5pt 2pt;border-bottom:0.5pt solid #000;">ACQUISITION</div>
+    ${H('DESCRIPTION<br><span style="font-weight:400;font-size:5pt;">(e.g. lot, house and<br>lot, condominium,<br>and improvements)</span>','width:18%;')}
+    ${H('KIND<br><span style="font-weight:400;font-size:5pt;">(e.g. residential,<br>commercial, industrial,<br>agricultural and mixed<br>use)</span>','width:12%;')}
+    ${H('EXACT<br>LOCATION','width:16%;')}
+    ${H('ASSESSED<br>VALUE','width:10%;')}
+    ${H('CURRENT FAIR<br>MARKET VALUE<br><span style="font-weight:400;font-size:5pt;">(As found in the Tax Declaration of<br>Real Property, if available)</span>','width:10%;')}
+    <td colspan="3" style="border:0.5pt solid #000;padding:0;width:28%;vertical-align:top;">
+      <div style="text-align:center;font-size:6pt;font-weight:700;padding:2pt;border-bottom:0.5pt solid #000;">ACQUISITION</div>
       <table style="width:100%;border-collapse:collapse;"><tr>
-        <td style="border-right:0.5pt solid #000;padding:1pt;font-size:5.5pt;font-weight:700;text-align:center;width:33%;">YEAR</td>
-        <td style="border-right:0.5pt solid #000;padding:1pt;font-size:5.5pt;font-weight:700;text-align:center;width:34%;">MODE</td>
-        <td style="padding:1pt;font-size:5.5pt;font-weight:700;text-align:center;width:33%;">COST</td>
+        <td style="border-right:0.5pt solid #000;padding:2pt 1pt;font-size:5.5pt;font-weight:700;text-align:center;width:33%;">YEAR</td>
+        <td style="border-right:0.5pt solid #000;padding:2pt 1pt;font-size:5.5pt;font-weight:700;text-align:center;width:33%;">MODE</td>
+        <td style="padding:2pt 1pt;font-size:5.5pt;font-weight:700;text-align:center;width:34%;">ACQUISITION<br>COST</td>
       </tr></table>
     </td>
   </tr>
   ${realRows}
-  <tr style="background:#f5f5f5;">
-    <td colspan="5" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:right;">Subtotal:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;">${fmtM(d.real_subtotal)}&nbsp;</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:right;">Subtotal:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;">${fmtM(d.real_subtotal)}&nbsp;</td>
+  <tr>
+    <td colspan="7" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:right;">Subtotal:</td>
+    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;border-bottom:2pt solid #000;">${fmtM(d.real_subtotal)}&nbsp;</td>
   </tr>
 </table>
 
-<!-- ══ PERSONAL PROPERTIES ══ -->
+<!-- PERSONAL PROPERTIES -->
+<div style="font-size:7pt;font-weight:700;margin-top:4pt;margin-bottom:2pt;">&nbsp;&nbsp;&nbsp;&nbsp;b.&nbsp;&nbsp;Personal Properties</div>
 <table style="margin-bottom:0;">
   <tr>
-    <td colspan="3" style="border:0.5pt solid #000;border-top:none;padding:1.5pt 4pt;font-size:6.5pt;font-weight:700;">
-      b. &nbsp; Personal Properties
-    </td>
-  </tr>
-  <tr>
-    ${H('DESCRIPTION','width:60%;')}
-    ${H('ACQUISITION YEAR','width:18%;text-align:center;')}
-    ${H('ACQUISITION COST/AMOUNT','width:22%;text-align:center;')}
+    ${H('DESCRIPTION','width:65%;')}
+    ${H('ACQUISITION YEAR','width:17%;')}
+    ${H('ACQUISITION<br>COST/ AMOUNT','width:18%;')}
   </tr>
   ${persRows}
-  <tr style="background:#f5f5f5;">
+  <tr>
     <td colspan="2" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:right;">Subtotal:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;">${fmtM(d.personal_subtotal)}&nbsp;</td>
+    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;border-bottom:2pt solid #000;">${fmtM(d.personal_subtotal)}&nbsp;</td>
   </tr>
-  <tr style="background:#dde8f0;">
-    <td colspan="2" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;text-transform:uppercase;">Total Assets:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;">${fmtM(d.total_assets)}&nbsp;</td>
+  <tr>
+    <td colspan="2" style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;text-transform:uppercase;">Total Assets:</td>
+    <td style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;border-bottom:2pt solid #000;">${fmtM(d.total_assets)}&nbsp;</td>
   </tr>
 </table>
 
-<!-- ══ LIABILITIES ══ -->
+<!-- page footer page 1 -->
+<div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:8pt;">
+  <div style="font-size:7.5pt;font-style:italic;">Page 1 of ___</div>
+  <div style="font-size:7pt;font-style:italic;border-top:0.5pt solid #000;padding-top:2pt;min-width:120pt;text-align:center;">Signature/Initial of Declarant</div>
+</div>
+
+<!-- PAGE BREAK -->
+<div style="page-break-after:always;"></div>
+
+<!-- PAGE 2 -->
+
+<!-- LIABILITIES -->
+<div style="font-size:7pt;font-weight:700;margin-bottom:2pt;">2.&nbsp;&nbsp;LIABILITIES</div>
 <table style="margin-bottom:0;">
   <tr>
-    <td colspan="3" style="border:0.5pt solid #000;border-top:none;padding:1.5pt 4pt;font-size:6.5pt;font-weight:700;text-transform:uppercase;">
-      Liabilities
-    </td>
-  </tr>
-  <tr>
-    ${H('NATURE','width:35%;')}
-    ${H('NAME OF CREDITORS','width:40%;')}
-    ${H('OUTSTANDING BALANCE','width:25%;text-align:center;')}
+    ${H('NATURE','width:34%;')}
+    ${H('NAME OF CREDITORS','width:41%;')}
+    ${H('OUTSTANDING BALANCE','width:25%;')}
   </tr>
   ${liabRows}
-  <tr style="background:#f5f5f5;">
-    <td colspan="2" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:right;text-transform:uppercase;">Total Liabilities:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;">${fmtM(d.total_liabilities)}&nbsp;</td>
+  <tr>
+    <td colspan="2" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;text-transform:uppercase;">Total Liabilities:</td>
+    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;border-bottom:2pt solid #000;">${fmtM(d.total_liabilities)}&nbsp;</td>
   </tr>
-  <tr style="background:#dde8f0;">
-    <td colspan="2" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-transform:uppercase;">Net Worth (Total Assets less Total Liabilities) =</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;">${fmtM(d.net_worth)}&nbsp;</td>
+  <tr>
+    <td colspan="2" style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7pt;font-weight:700;text-transform:uppercase;">Net Worth: Total Assets less Total Liabilities =</td>
+    <td style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;border-bottom:2.5pt double #000;">${fmtM(d.net_worth)}&nbsp;</td>
   </tr>
 </table>
 
-<!-- ══ BUSINESS INTERESTS ══ -->
-<table style="margin-bottom:0;margin-top:3pt;">
+<!-- BUSINESS INTERESTS -->
+<div style="margin-top:10pt;margin-bottom:2pt;">
+  <div class="section-title">Business Interests and Financial Connections</div>
+  <div style="font-size:6pt;text-align:center;font-style:italic;">(of Declarant / Declarant's spouse/ Unmarried Children Below Eighteen (18) years of Age Living in Declarant's Household)</div>
+</div>
+<div style="font-size:7pt;margin-bottom:3pt;">
+  <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(d.no_biz)}</span>
+  &nbsp;<em>I/ We do not have any business interest or financial connection.</em>
+</div>
+<table style="margin-bottom:10pt;">
   <tr>
-    <td colspan="4" style="border:0.5pt solid #000;padding:1.5pt 4pt;font-size:6.5pt;font-weight:700;text-transform:uppercase;">
-      Business Interests and Financial Connections
-      <span style="font-weight:400;font-size:5.5pt;">(of Declarant / Declarant's Spouse / Unmarried Children Below 18 in Declarant's Household)</span>
-    </td>
+    ${H('NAME OF ENTITY/BUSINESS<br>ENTERPRISE','width:27%;')}
+    ${H('BUSINESS ADDRESS','width:26%;')}
+    ${H('NATURE OF BUSINESS<br>INTEREST &amp;/OR FINANCIAL<br>CONNECTION','width:28%;')}
+    ${H('DATE OF ACQUISITION OF<br>INTEREST OR CONNECTION','width:19%;')}
   </tr>
-  ${d.no_biz
-    ? `<tr><td colspan="4" style="border:0.5pt solid #000;border-top:none;padding:3pt 5pt;font-size:6.5pt;"><span class="yn">☑</span> I/We do not have any business interest or financial connection.</td></tr>`
-    : `<tr><td colspan="4" style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:6pt;"><span class="yn">☐</span> I/We do not have any business interest or financial connection.</td></tr>
-       <tr>${H('NAME OF ENTITY/BUSINESS ENTERPRISE','width:28%;')}${H('BUSINESS ADDRESS','width:25%;')}${H('NATURE OF BUSINESS INTEREST / FINANCIAL CONNECTION','width:28%;')}${H('DATE ACQUIRED','width:19%;text-align:center;')}</tr>
-       ${bizRows}`}
+  ${bizRows}
 </table>
 
-<!-- ══ RELATIVES IN GOVT ══ -->
-<table style="margin-bottom:3pt;margin-top:3pt;">
+<!-- RELATIVES IN GOVT -->
+<div style="margin-bottom:2pt;">
+  <div class="section-title">Relatives in the Government Service</div>
+  <div style="font-size:6pt;text-align:center;font-style:italic;">(Within the Fourth Degree of Consanguinity or Affinity. Include also Bilas, Balae and Inso<sup>iv</sup>)</div>
+</div>
+<div style="font-size:7pt;margin-bottom:3pt;">
+  <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(d.no_rel)}</span>
+  &nbsp;<em>I/ We do not know of any relative/ s in the government service</em>
+</div>
+<table style="margin-bottom:10pt;">
   <tr>
-    <td colspan="4" style="border:0.5pt solid #000;padding:1.5pt 4pt;font-size:6.5pt;font-weight:700;text-transform:uppercase;">
-      Relatives in the Government Service
-      <span style="font-weight:400;font-size:5.5pt;">(Within the Fourth Degree of Consanguinity or Affinity. Include also Bilas, Balae and Inso.)</span>
-    </td>
+    ${H('NAME OF RELATIVE','width:24%;')}
+    ${H('RELATIONSHIP','width:16%;')}
+    ${H('POSITION','width:24%;')}
+    ${H('NAME OF AGENCY/OFFICE AND ADDRESS','width:36%;')}
   </tr>
-  ${d.no_rel
-    ? `<tr><td colspan="4" style="border:0.5pt solid #000;border-top:none;padding:3pt 5pt;font-size:6.5pt;"><span class="yn">☑</span> I/We do not know of any relative/s in the government service.</td></tr>`
-    : `<tr><td colspan="4" style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:6pt;"><span class="yn">☐</span> I/We do not know of any relative/s in the government service.</td></tr>
-       <tr>${H('NAME OF RELATIVE','width:25%;')}${H('RELATIONSHIP','width:15%;')}${H('POSITION','width:25%;')}${H('AGENCY/OFFICE AND ADDRESS','width:35%;')}</tr>
-       ${relRows}`}
+  ${relRows}
 </table>
 
-<!-- ══ DECLARATION ══ -->
-<table style="margin-bottom:3pt;">
-  <tr>
-    <td style="border:0.5pt solid #000;padding:3pt 5pt;font-size:6pt;line-height:1.6;">
-      I hereby certify that these are true and correct statements of my assets, liabilities, net worth, business interests and financial connections, including those of my spouse and unmarried children below eighteen (18) years of age living in my household, and that to the best of my knowledge, the above-enumerated are names of my relatives in the government within the fourth civil degree of consanguinity or affinity.
-    </td>
-  </tr>
-  <tr>
-    <td style="border:0.5pt solid #000;border-top:none;padding:3pt 5pt;font-size:6pt;line-height:1.6;">
-      I hereby authorize the Ombudsman or his/her duly authorized representative to obtain and secure from all appropriate government agencies, including the Bureau of Internal Revenue, such documents that may show my assets, liabilities, net worth, business interests and financial connections, to include those of my spouse and unmarried children below 18 years of age living with me in my household.
-    </td>
-  </tr>
-</table>
+<!-- CERTIFICATION TEXT -->
+<div style="font-size:7pt;line-height:1.8;text-align:justify;margin-bottom:8pt;padding:0 4pt;">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;I hereby certify that these&nbsp; are true and correct statements&nbsp; of my assets,&nbsp; liabilities, net worth, business interests&nbsp; and financial connections, including those&nbsp; of my spouse and unmarried children below eighteen (18)&nbsp; years of age living in my household,&nbsp; and that to the best of my knowledge, the above-enumerated are names&nbsp; of my relatives&nbsp; in the government&nbsp; within the fourth civil degree of consanguinity or affinity.
+</div>
+<div style="font-size:7pt;line-height:1.8;text-align:justify;margin-bottom:14pt;padding:0 4pt;">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;I hereby authorize the Ombudsman&nbsp; or his/her duly authorized representative to obtain and secure from all appropriate government agencies, including the Bureau of Internal Revenue such documents that may show my assets, liabilities, net worth, business interests and financial connections, to include those of my spouse and unmarried children below 18 years of age living with me&nbsp; in my household covering previous years to include the year&nbsp; I first&nbsp; assumed office in government.
+</div>
 
-<!-- ══ SIGNATURE / GOV ID AREA ══ -->
-<table style="margin-bottom:3pt;">
+<!-- DATE -->
+<div style="font-size:7pt;margin-bottom:18pt;">
+  Date:&nbsp;&nbsp;&nbsp;&nbsp;<span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:150pt;">&nbsp;</span>
+</div>
+
+<!-- SIGNATURE BLOCK -->
+<table style="margin-bottom:8pt;">
   <tr>
-    <td style="border:0.5pt solid #000;width:50%;padding:0;vertical-align:top;">
-      <table style="width:100%;border-collapse:collapse;">
-        <tr><td colspan="2" style="height:32pt;padding:2pt 4pt;font-size:6pt;color:#666;vertical-align:bottom;">(wet signature/e-signature/digital certificate)</td></tr>
-        <tr><td colspan="2" style="border-top:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:center;">Signature of Declarant</td></tr>
-        <tr>
-          <td style="border-top:0.5pt solid #000;padding:2pt 4pt;font-size:6pt;">
-            <div style="font-size:5.5pt;color:#666;">Government Issued ID:</div>
-            <div style="font-size:7pt;font-weight:700;border-bottom:0.4pt solid #999;min-height:11pt;">${v(d.gov_id)}&nbsp;</div>
-          </td>
-          <td style="border-top:0.5pt solid #000;border-left:0.5pt solid #000;padding:2pt 4pt;font-size:6pt;">
-            <div style="font-size:5.5pt;color:#666;">ID No.:</div>
-            <div style="font-size:7pt;font-weight:700;border-bottom:0.4pt solid #999;min-height:11pt;">${v(d.gov_id_no)}&nbsp;</div>
-          </td>
-        </tr>
-        <tr>
-          <td colspan="2" style="border-top:0.5pt solid #000;padding:2pt 4pt;font-size:6pt;">
-            <div style="font-size:5.5pt;color:#666;">Date Issued:</div>
-            <div style="font-size:7pt;font-weight:700;border-bottom:0.4pt solid #999;min-height:11pt;">${v(d.gov_id_issued)?fmtD(d.gov_id_issued):''}&nbsp;</div>
-          </td>
-        </tr>
-      </table>
+    <td style="border:none;width:50%;padding:0 8pt 0 0;vertical-align:bottom;">
+      <div style="border-top:0.5pt solid #000;padding-top:3pt;font-size:7pt;font-style:italic;text-align:center;">Signature of Declarant</div>
+      <div style="margin-top:6pt;font-size:7pt;">Government Issued ID:&nbsp; <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:120pt;">&nbsp;</span></div>
+      <div style="margin-top:4pt;font-size:7pt;">ID No.:&nbsp; <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:140pt;">${v(d.gov_id_no)}&nbsp;</span></div>
+      <div style="margin-top:4pt;font-size:7pt;">Date Issued:&nbsp; <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:130pt;">${v(d.gov_id_issued)?fmtD(d.gov_id_issued):''}&nbsp;</span></div>
     </td>
-    <td style="border:0.5pt solid #000;border-left:none;width:50%;padding:0;vertical-align:top;">
-      <table style="width:100%;border-collapse:collapse;">
-        <tr><td colspan="2" style="height:32pt;padding:2pt 4pt;font-size:6pt;color:#666;vertical-align:bottom;">(wet signature/e-signature/digital certificate)</td></tr>
-        <tr><td colspan="2" style="border-top:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:center;">Signature of Declarant</td></tr>
-        <tr>
-          <td style="border-top:0.5pt solid #000;padding:2pt 4pt;font-size:6pt;">
-            <div style="font-size:5.5pt;color:#666;">Government Issued ID:</div>
-            <div style="font-size:7pt;font-weight:700;border-bottom:0.4pt solid #999;min-height:11pt;">${v(d.gov_id)}&nbsp;</div>
-          </td>
-          <td style="border-top:0.5pt solid #000;border-left:0.5pt solid #000;padding:2pt 4pt;font-size:6pt;">
-            <div style="font-size:5.5pt;color:#666;">ID No.:</div>
-            <div style="font-size:7pt;font-weight:700;border-bottom:0.4pt solid #999;min-height:11pt;">${v(d.gov_id_no)}&nbsp;</div>
-          </td>
-        </tr>
-        <tr>
-          <td colspan="2" style="border-top:0.5pt solid #000;padding:2pt 4pt;font-size:6pt;">
-            <div style="font-size:5.5pt;color:#666;">Date Issued:</div>
-            <div style="font-size:7pt;font-weight:700;border-bottom:0.4pt solid #999;min-height:11pt;">${v(d.gov_id_issued)?fmtD(d.gov_id_issued):''}&nbsp;</div>
-          </td>
-        </tr>
-      </table>
+    <td style="border:none;width:50%;padding:0 0 0 8pt;vertical-align:bottom;">
+      <div style="border-top:0.5pt solid #000;padding-top:3pt;font-size:7pt;font-style:italic;text-align:center;">Signature of Declarant</div>
+      <div style="margin-top:6pt;font-size:7pt;">Government Issued ID:&nbsp; <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:120pt;">&nbsp;</span></div>
+      <div style="margin-top:4pt;font-size:7pt;">ID No.:&nbsp; <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:140pt;">&nbsp;</span></div>
+      <div style="margin-top:4pt;font-size:7pt;">Date Issued:&nbsp; <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:130pt;">&nbsp;</span></div>
     </td>
   </tr>
 </table>
 
-<!-- ══ OATH ══ -->
-<table>
-  <tr>
-    <td style="border:0.5pt solid #000;padding:3pt 5pt;font-size:6pt;line-height:1.8;">
-      SUBSCRIBED AND SWORN to before me this <span class="underline">&nbsp;</span> day of <span class="underline">&nbsp;</span>,
-      affiant exhibiting to me the above-stated government-issued identification card.
-      <br/><br/>
-      <div style="margin-top:4pt;border-top:0.5pt solid #000;width:40%;padding-top:2pt;font-size:6pt;text-align:center;">(wet signature/e-signature/digital certificate except for notary public)</div>
-      <div style="border-top:0.5pt solid #000;width:40%;padding-top:2pt;font-size:6.5pt;font-weight:700;text-align:center;margin-top:2pt;">Person Administering Oath</div>
-    </td>
-  </tr>
-</table>
+<!-- SUBSCRIBED AND SWORN -->
+<div style="font-size:7pt;line-height:1.8;margin-bottom:18pt;text-align:justify;">
+  &nbsp;&nbsp;&nbsp;<strong>SUBSCRIBED AND SWORN</strong> to before me this <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:22pt;text-align:center;">&nbsp;</span> day of <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:40pt;">&nbsp;</span>, affiant exhibiting to me the above-stated government-issued identification card.
+</div>
+
+<div style="margin-top:4pt;width:44%;text-align:center;margin-left:auto;margin-right:auto;">
+  <div style="border-top:0.5pt solid #000;padding-top:3pt;font-size:7pt;font-style:italic;">(Person Administering Oath)</div>
+</div>
+
+<!-- FOOTNOTES -->
+<div style="margin-top:18pt;border-top:0.5pt solid #000;padding-top:4pt;">
+  <div style="font-size:5.5pt;line-height:1.7;">
+    <sup>1</sup> Position, Agency, and Address shall only be declared if the spouse is a public official or employee.<br>
+    <sup>ii</sup> Additional sheets may be used by the declarant, if necessary.<br>
+    <sup>iii</sup> Capital or paraphernal assets, and liabilities of the declarant's spouse, and properties of children below 18 years of age and living in the declarant's household shall be disclosed using the additional sheets provided.<br>
+    <sup>iv</sup> <em>Balae</em> refers to the parent of one's son or daughter-in-law; <em>Bilas</em> refers to a brother-in-law's wife or sister-in-law's husband; <em>Inso</em> refers to the appellation for the wife of an elder brother or male cousin.
+  </div>
+</div>
+
+<!-- page footer page 2 -->
+<div style="text-align:center;margin-top:8pt;font-size:7.5pt;font-style:italic;">Page 2 of ___</div>
 
 </body></html>`;
 

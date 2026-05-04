@@ -3,6 +3,7 @@
  *  LGU ENRILE HRMS — Shared Print Utilities
  *  File: config/print-utilities.js
  *  Shared by Admin & Employee portals for consistent printing
+ *  IMPROVED VERSION - Enhanced Page 4 Layout
  * ============================================================
  */
 
@@ -70,6 +71,7 @@ function padArray(arr, minLength) {
 //  buildPDSPrintHTML — CS Form 212 (Revised 2025)
 //  Pixel-faithful 4-page HTML replica of the official Excel
 //  Matches the official CSC Excel form layout exactly
+//  IMPROVED VERSION with Enhanced Page 4
 // ============================================================
 function buildPDSPrintHTML(d, empRow) {
   'use strict';
@@ -729,6 +731,7 @@ function buildPDSPrintHTML(d, empRow) {
   };
 
   // ── PAGE 4 — Q34-40 + References + Declaration ────────────
+  // IMPROVED VERSION - Enhanced Layout
   const PAGE4 = () => {
     const charRefsPad = pad(charRefs.length ? charRefs : refs, 3);
 
@@ -863,122 +866,134 @@ function buildPDSPrintHTML(d, empRow) {
   </tbody>
 </table>
 
-<!-- ── REFERENCES (41) + DECLARATION (42) + GOV'T ID + PHOTO + THUMBMARK ── -->
-<table style="margin-bottom:0;margin-top:0;border-collapse:collapse;">
+<!-- ── IMPROVED PAGE 4 BOTTOM SECTION ── -->
+<table style="margin-top:3pt;border-collapse:collapse;">
   <tr>
+    <!-- LEFT COLUMN: References + Declaration -->
     <td style="width:67%;vertical-align:top;padding:0;">
       <!-- 41 REFERENCES -->
-      <table style="width:100%;border-collapse:collapse;margin-bottom:0;table-layout:fixed;">
-        <colgroup><col style="width:45%"><col style="width:35%"><col style="width:20%"></colgroup>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:0;">
         <tr>
-          <td class="all" style="padding:2pt 4pt;font-size:7pt;" colspan="3">
+          <td class="all" style="padding:2pt 4pt;font-size:6.5pt;font-weight:700;" colspan="3">
             41. &nbsp; REFERENCES (Person not related by consanguinity or affinity to applicant /appointee)
           </td>
         </tr>
         <tr>
-          <th class="hdr">NAME</th>
-          <th class="hdr">OFFICE / RESIDENTIAL ADDRESS</th>
-          <th class="hdr">CONTACT NO.<br>AND/OR EMAIL</th>
+          <th class="hdr" style="width:32%;font-size:6pt;">NAME</th>
+          <th class="hdr" style="width:42%;font-size:6pt;">OFFICE / RESIDENTIAL ADDRESS</th>
+          <th class="hdr" style="width:26%;font-size:6pt;">CONTACT NO.<br>AND/OR EMAIL</th>
         </tr>
-        ${charRefsPad.map(r => `<tr style="height:18pt;">
-          <td class="all" style="font-size:6.5pt;">${esc(r.name)}&nbsp;</td>
-          <td class="all" style="font-size:6.5pt;">${esc(r.address)}&nbsp;</td>
-          <td class="all" style="font-size:6.5pt;">${esc(r.tel)}&nbsp;</td>
+        ${charRefsPad.map(r => `<tr style="height:16pt;">
+          <td class="all" style="font-size:6.5pt;padding:1pt 2pt;vertical-align:middle;">${esc(r.name)}&nbsp;</td>
+          <td class="all" style="font-size:6.5pt;padding:1pt 2pt;vertical-align:middle;">${esc(r.address)}&nbsp;</td>
+          <td class="all" style="font-size:6.5pt;padding:1pt 2pt;vertical-align:middle;">${esc(r.tel)}&nbsp;</td>
         </tr>`).join('')}
       </table>
+      
       <!-- 42 DECLARATION -->
-      <table style="width:100%;border-collapse:collapse;margin-bottom:0;">
+      <table style="width:100%;border-collapse:collapse;margin-top:0;">
         <tr>
-          <td class="all" style="padding:6pt 8pt;font-size:7.5pt;line-height:1.7;vertical-align:top;text-align:justify;">
-            <span style="font-size:8pt;">42.</span> &nbsp;I declare under oath that I have personally accomplished this Personal Data Sheet which is a true, correct, and complete statement pursuant to the provisions of pertinent laws, rules, and regulations of the Republic of the Philippines. I authorize the agency head/authorized representative to verify/validate the contents stated herein. &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; I agree that any misrepresentation made in this document and its attachments shall cause the filing of administrative/criminal case/s against me.
+          <td class="all" style="padding:4pt 6pt;font-size:6.8pt;line-height:1.5;vertical-align:top;text-align:justify;">
+            <span style="font-size:7.5pt;font-weight:700;">42.</span> &nbsp;I declare under oath that I have personally accomplished this Personal Data Sheet which is a true, correct, and complete statement pursuant to the provisions of pertinent laws, rules, and regulations of the Republic of the Philippines. I authorize the agency head/authorized representative to verify/validate the contents stated herein. I agree that any misrepresentation made in this document and its attachments shall cause the filing of administrative/criminal case/s against me.
           </td>
         </tr>
       </table>
     </td>
+    
+    <!-- RIGHT COLUMN: Photo Box -->
     <td style="width:33%;vertical-align:top;padding:0 0 0 4pt;">
-      <!-- PHOTO BOX -->
-      <div style="text-align:center;padding:0 4pt 6pt 4pt;margin-top:28pt;">
-        <div style="border:1.5pt solid #000;width:3.51cm;height:4.43cm;margin:0 auto;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:4pt;">
-          <div style="font-size:7pt;line-height:1.4;">Passport-sized unfiltered<br>digital picture taken within<br>the last &nbsp;6 months<br>4.5 cm. X 3.5 cm</div>
+      <div style="display:flex;flex-direction:column;align-items:center;justify-content:flex-start;height:100%;">
+        <div style="border:1.5pt solid #000;width:128pt;height:162pt;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:8pt;text-align:center;">
+          <div style="font-size:7pt;line-height:1.5;color:#333;">
+            Passport-sized unfiltered<br>digital picture taken within<br>the last 6 months<br><strong>4.5 cm. X 3.5 cm</strong>
+          </div>
         </div>
-        <div style="margin-top:8pt;font-size:8pt;color:#c00;font-weight:400;">PHOTO</div>
+        <div style="margin-top:4pt;font-size:7.5pt;font-weight:700;color:#000;">PHOTO</div>
       </div>
     </td>
   </tr>
 </table>
 
-<!-- ── MARGIN BEFORE GOV'T ID ── -->
-<table style="margin-bottom:0;margin-top:5pt;border-collapse:collapse;width:100%;">
+<!-- ── GOV'T ID + SIGNATURE + THUMBMARK ROW ── -->
+<table style="margin-top:5pt;border-collapse:collapse;">
   <tr>
-    <td style="height:5pt;">&nbsp;</td>
-  </tr>
-</table>
-
-<!-- ── GOV'T ID + SIGNATURE + DATE + THUMBMARK ── -->
-<table style="margin-bottom:0;margin-top:2pt;margin-left:2pt;border-collapse:collapse;width:100%;table-layout:fixed;">
-  <tr>
-    <td style="width:37%;vertical-align:top;padding:0;border:1pt solid #000;">
-      <div style="font-size:7pt;padding:3pt 4pt;border-bottom:1pt solid #000;line-height:1.4;background:#c0c0c0;">
-        <strong>Government Issued ID</strong> <span style="font-size:6pt;font-style:italic;">(i.e.Passport, GSIS, SSS, PRC, Driver's License, etc.)</span><br>
-        <em><strong>PLEASE INDICATE ID Number and Date of Issuance</strong></em>
-      </div>
-      <div style="font-size:7pt;padding:3pt 4pt;border-bottom:1pt solid #000;height:16pt;line-height:10pt;overflow:hidden;">
-        Government Issued ID:&nbsp;<span style="font-weight:700;">${esc(pi.gov_id_type)}</span>
-      </div>
-      <div style="font-size:7pt;padding:3pt 4pt;border-bottom:1pt solid #000;height:16pt;line-height:10pt;overflow:hidden;">
-        ID/License/Passport No.:&nbsp;<span style="font-weight:700;">${esc(pi.gov_id_no)}</span>
-      </div>
-      <div style="font-size:7pt;padding:3pt 4pt;border-bottom:1pt solid #000;height:16pt;line-height:10pt;overflow:hidden;">
-        Date/Place of Issuance:&nbsp;<span style="font-weight:700;">${esc(pi.gov_id_issuance)}</span>
-      </div>
-    </td>
-    <td style="width:2%;vertical-align:top;padding:0;">&nbsp;</td>
-    <td style="width:33%;vertical-align:top;padding:0;">
-      <table style="width:100%;border-collapse:collapse;">
+    <!-- Government ID Section -->
+    <td style="width:37%;vertical-align:top;padding:0;">
+      <table style="width:100%;border-collapse:collapse;border:1pt solid #000;">
         <tr>
-          <td style="border:1pt solid #000;vertical-align:top;padding:5pt 4pt;height:55pt;">
-            &nbsp;
+          <td style="padding:2pt 4pt;font-size:6.5pt;font-weight:700;border-bottom:0.5pt solid #000;background:#e0e0e0;">
+            Government Issued ID <span style="font-size:5.5pt;font-style:italic;font-weight:400;">(i.e.Passport, GSIS, SSS, PRC, Driver's License, etc.)</span><br>
+            <span style="font-style:italic;">PLEASE INDICATE ID Number and Date of Issuance</span>
           </td>
         </tr>
         <tr>
-          <td style="border-left:1pt solid #000;border-right:1pt solid #000;border-bottom:1pt solid #000;background-color:#f0f0f0;text-align:center;padding:4pt 4pt;vertical-align:middle;">
-            <div style="font-size:7pt;">Signature (Sign inside the box)</div>
+          <td style="padding:2pt 4pt;font-size:6.5pt;border-bottom:0.5pt solid #000;height:14pt;">
+            Government Issued ID:&nbsp;<span style="font-weight:700;font-size:7pt;">${esc(pi.gov_id_type)}</span>
           </td>
         </tr>
         <tr>
-          <td style="border-left:1pt solid #000;border-right:1pt solid #000;border-bottom:1pt solid #000;vertical-align:top;padding:2pt 4pt;height:5pt;">
-            &nbsp;
+          <td style="padding:2pt 4pt;font-size:6.5pt;border-bottom:0.5pt solid #000;height:14pt;">
+            ID/License/Passport No.:&nbsp;<span style="font-weight:700;font-size:7pt;">${esc(pi.gov_id_no)}</span>
           </td>
         </tr>
         <tr>
-          <td style="border-left:1pt solid #000;border-right:1pt solid #000;border-bottom:1pt solid #000;background-color:#f0f0f0;text-align:center;padding:4pt 4pt;vertical-align:middle;">
-            <div style="font-size:7pt;">Date Accomplished</div>
-            <div style="font-weight:700;font-size:7pt;">${pi.date_accomplished ? fmtD(pi.date_accomplished) : ''}&nbsp;</div>
+          <td style="padding:2pt 4pt;font-size:6.5pt;height:14pt;">
+            Date/Place of Issuance:&nbsp;<span style="font-weight:700;font-size:7pt;">${esc(pi.gov_id_issuance)}</span>
           </td>
         </tr>
       </table>
     </td>
-    <td style="width:35%;vertical-align:top;padding:0 0 0 4pt;">
-      <!-- RIGHT THUMBMARK BOX -->
-      <div style="text-align:center;padding:4pt;">
-        <div style="border:1.5pt solid #000;width:3.51cm;height:4.43cm;margin:0 auto;"></div>
-        <div style="font-size:7pt;font-weight:700;font-style:italic;margin-top:4pt;">Right Thumbmark</div>
+    
+    <!-- Signature + Date Section -->
+    <td style="width:30%;vertical-align:top;padding:0 0 0 4pt;">
+      <table style="width:100%;border-collapse:collapse;border:1pt solid #000;">
+        <tr>
+          <td style="height:60pt;padding:4pt;vertical-align:top;border-bottom:0.5pt solid #000;">
+            &nbsp;
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:3pt 4pt;text-align:center;background:#f0f0f0;border-bottom:0.5pt solid #000;">
+            <div style="font-size:6.5pt;">Signature (Sign inside the box)</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="height:5pt;padding:2pt 4pt;border-bottom:0.5pt solid #000;">
+            &nbsp;
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:3pt 4pt;text-align:center;background:#f0f0f0;">
+            <div style="font-size:6.5pt;">Date Accomplished</div>
+            <div style="font-weight:700;font-size:7pt;margin-top:2pt;">${pi.date_accomplished ? fmtD(pi.date_accomplished) : ''}</div>
+          </td>
+        </tr>
+      </table>
+    </td>
+    
+    <!-- Right Thumbmark Section -->
+    <td style="width:33%;vertical-align:top;padding:0 0 0 4pt;">
+      <div style="display:flex;flex-direction:column;align-items:center;">
+        <div style="border:1.5pt solid #000;width:128pt;height:162pt;"></div>
+        <div style="margin-top:4pt;font-size:7pt;font-weight:700;font-style:italic;">Right Thumbmark</div>
       </div>
     </td>
   </tr>
 </table>
 
 <!-- ── SUBSCRIBED AND SWORN ── -->
-<table style="margin-top:2pt;">
+<table style="margin-top:4pt;border-collapse:collapse;">
   <tr>
-    <td class="all" style="padding:3pt 4pt;font-size:6.5pt;line-height:1.6;">
-      SUBSCRIBED AND SWORN to before me this <span style="display:inline-block;min-width:80pt;border-bottom:0.5pt solid #000;">&nbsp;</span>, affiant exhibiting his/her validly issued government ID as indicated above.
-      <div style="margin-top:18pt;display:inline-block;width:45%;text-align:center;">
-        <div style="border-top:0.5pt solid #000;padding-top:2pt;font-size:6pt;">Person Administering Oath</div>
+    <td class="all" style="padding:4pt 6pt;font-size:6.5pt;line-height:1.6;">
+      SUBSCRIBED AND SWORN to before me this <span style="display:inline-block;min-width:140pt;border-bottom:0.5pt solid #000;text-align:center;padding:0 4pt;">&nbsp;</span>, affiant exhibiting his/her validly issued government ID as indicated above.
+      <div style="margin-top:28pt;text-align:center;">
+        <div style="display:inline-block;width:300pt;border:1pt solid #000;height:60pt;"></div>
+        <div style="margin-top:4pt;font-size:6.5pt;font-weight:700;">Person Administering Oath</div>
       </div>
     </td>
   </tr>
 </table>
+
 <div class="pg-foot">CS FORM 212 (Revised 2025), Page 4 of 4</div>
 </div>`;
   };
@@ -998,6 +1013,7 @@ ${PAGE4()}
 </body>
 </html>`;
 }
+
 function printPDSFromData(pdsData, empData) {
   try {
     const html = buildPDSPrintHTML(pdsData, empData);

@@ -40,37 +40,46 @@ if ($action) {
     try {
         switch ($action) {
 
-            case 'stats':
-                $s = $pdo->query("
-                    SELECT
-                        COUNT(*) AS total,
-                        SUM(status='Pending')   AS pending,
-                        SUM(status='Approved')  AS approved,
-                        SUM(status='Denied')    AS denied,
-                        SUM(status='Cancelled') AS cancelled
-                    FROM leave_requests
-                ")->fetch();
-                echo json_encode(['success'=>true,'data'=>$s]);
-                break;
-            case 'pending_count':
-                $c = $pdo->query("SELECT COUNT(*) FROM leave_requests WHERE status='Pending'")->fetchColumn();
-                echo json_encode(['count'=>(int)$c]);
-                break;
+           case 'stats':
+    $s = $pdo->query("
+        SELECT
+            COUNT(*) AS total,
+            SUM(status='Pending')   AS pending,
+            SUM(status='Approved')  AS approved,
+            SUM(status='Denied')    AS denied,
+            SUM(status='Cancelled') AS cancelled
+        FROM leave_requests
+        WHERE is_deleted = 0
+    ")->fetch();
+    echo json_encode(['success'=>true,'data'=>$s]);
+    break;
 
+           case 'pending_count':
+    $c = $pdo->query("SELECT COUNT(*) FROM leave_requests WHERE status='Pending' AND is_deleted = 0")->fetchColumn();
+    echo json_encode(['count'=>(int)$c]);
+    break;
             case 'list':
                 $where  = [];
                 $params = [];
 
+                // Always exclude deleted requests
+                $where[] = 'lr.is_deleted = 0';
+
                 $tab = $_GET['tab'] ?? 'all';
                 $status = $_GET['status'] ?? '';
-                
+
+                // By default, exclude 'Pending Dept Head' from Admin/HR view unless a status filter is set
+                if (empty($status) && $tab === 'all') {
+                  $where[] = "lr.status != 'Pending Dept Head'";
+                }
+
                 // If dropdown status is selected, use it; otherwise use tab
                 if (!empty($status)) {
-                    $where[]  = 'lr.status = ?';
-                    $params[] = $status;
+                  $where[]  = 'lr.status = ?';
+                  $params[] = $status;
                 } elseif ($tab !== 'all') {
-                    $where[]  = 'lr.status = ?';
-                    $params[] = ucfirst($tab);
+                  $where[]  = 'lr.status = ?';
+                  $params[] = ucfirst($tab);
                 }
                 
                 if (!empty($_GET['search'])) {
@@ -84,59 +93,62 @@ if ($action) {
 
                 $wSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
 
+
                 $sortMap = [
-                    'name'   => 'e.last_name, e.first_name',
-                    'type'   => 'lt.name',
-                    'from'   => 'lr.date_from',
-                    'to'     => 'lr.date_to',
-                    'days'   => 'lr.days_requested',
-                    'filed'  => 'lr.filed_at',
-                    'status' => 'lr.status',
+                  'name'   => 'e.last_name, e.first_name',
+                  'type'   => 'lt.name',
+                  'from'   => 'lr.date_from',
+                  'to'     => 'lr.date_to',
+                  'days'   => 'lr.days_requested',
+                  'filed'  => 'lr.filed_at',
+                  'status' => 'lr.status',
                 ];
                 $sortCol = $sortMap[$_GET['sort'] ?? ''] ?? 'lr.filed_at';
                 $sortDir = strtoupper($_GET['dir'] ?? 'DESC') === 'ASC' ? 'ASC' : 'DESC';
 
-                // Pending requests always float to the top when no status filter is active
-                $pendingFirst = (empty($status) && $tab === 'all')
-                    ? "(lr.status = 'Pending') DESC, "
-                    : '';
+                // Always float pending requests to the top when viewing all and no status filter
+                if (empty($status) && $tab === 'all' && empty($_GET['sort'])) {
+                  $orderBy = "ORDER BY (lr.status = 'Pending') DESC, lr.filed_at DESC";
+                } else {
+                  $orderBy = "ORDER BY $sortCol $sortDir";
+                }
 
                 $page     = max(1, (int)($_GET['page'] ?? 1));
                 $pageSize = 8;
                 $offset   = ($page - 1) * $pageSize;
 
                 $cntStmt = $pdo->prepare("
-                    SELECT COUNT(*)
-                    FROM leave_requests lr
-                    JOIN employees   e  ON lr.employee_id   = e.employee_id
-                    JOIN leave_types lt ON lr.leave_type_id = lt.leave_type_id
-                    LEFT JOIN departments d ON e.department_id = d.department_id
-                    $wSql
+                  SELECT COUNT(*)
+                  FROM leave_requests lr
+                  JOIN employees   e  ON lr.employee_id   = e.employee_id
+                  JOIN leave_types lt ON lr.leave_type_id = lt.leave_type_id
+                  LEFT JOIN departments d ON e.department_id = d.department_id
+                  $wSql
                 ");
                 $cntStmt->execute($params);
                 $total = (int)$cntStmt->fetchColumn();
 
                 $stmt = $pdo->prepare("
-                    SELECT lr.request_id, lr.status, lr.date_from, lr.date_to,
-                           lr.days_requested, lr.reason, lr.admin_remarks,
-                           lr.filed_at, lr.updated_at,
-                           lr.reviewed_by, lr.reviewed_at,
-                           e.employee_id, e.first_name, e.last_name, e.position_title,
-                           lt.leave_type_id, lt.name AS leave_type,
-                           d.name AS department
-                    FROM leave_requests lr
-                    JOIN employees   e  ON lr.employee_id   = e.employee_id
-                    JOIN leave_types lt ON lr.leave_type_id = lt.leave_type_id
-                    LEFT JOIN departments d ON e.department_id = d.department_id
-                    $wSql
-                    ORDER BY {$pendingFirst}$sortCol $sortDir
-                    LIMIT $pageSize OFFSET $offset
+                  SELECT lr.request_id, lr.status, lr.date_from, lr.date_to,
+                       lr.days_requested, lr.reason, lr.admin_remarks,
+                       lr.filed_at, lr.updated_at,
+                       lr.reviewed_by, lr.reviewed_at,
+                       e.employee_id, e.first_name, e.last_name, e.position_title,
+                       lt.leave_type_id, lt.name AS leave_type,
+                       d.name AS department
+                  FROM leave_requests lr
+                  JOIN employees   e  ON lr.employee_id   = e.employee_id
+                  JOIN leave_types lt ON lr.leave_type_id = lt.leave_type_id
+                  LEFT JOIN departments d ON e.department_id = d.department_id
+                  $wSql
+                  $orderBy
+                  LIMIT $pageSize OFFSET $offset
                 ");
                 $stmt->execute($params);
                 $rows = $stmt->fetchAll();
 
                 $counts = $pdo->query("
-                    SELECT status, COUNT(*) AS cnt FROM leave_requests GROUP BY status
+                  SELECT status, COUNT(*) AS cnt FROM leave_requests WHERE is_deleted = 0 GROUP BY status
                 ")->fetchAll();
                 $tabCounts = ['all'=>0,'pending'=>0,'approved'=>0,'denied'=>0,'cancelled'=>0];
                 foreach ($counts as $c) {
@@ -293,6 +305,22 @@ if ($action) {
             case 'departments':
                 $depts = $pdo->query("SELECT name FROM departments WHERE is_active=1 ORDER BY name")->fetchAll(PDO::FETCH_COLUMN);
                 echo json_encode(['success'=>true,'data'=>$depts]);
+                break;
+
+            case 'delete':
+                $id = (int)($_POST['id'] ?? 0);
+                if (!$id) {
+                    echo json_encode(['success'=>false,'message'=>'Invalid request ID.']);
+                    break;
+                }
+                // Soft delete: set is_deleted = 1
+                $stmt = $pdo->prepare("UPDATE leave_requests SET is_deleted = 1, updated_at = NOW() WHERE request_id = ?");
+                $stmt->execute([$id]);
+                if ($stmt->rowCount() > 0) {
+                    echo json_encode(['success'=>true,'message'=>'Leave request deleted.']);
+                } else {
+                    echo json_encode(['success'=>false,'message'=>'Delete failed or already deleted.']);
+                }
                 break;
 
             default:
@@ -589,6 +617,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .logout-icon { font-size: 1rem; }
 
   </style>
+
 </head>
 <body>
   <aside class="sidebar" id="sidebar">
@@ -816,8 +845,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
               <div style="display:flex;align-items:center;justify-content:center;gap:8px;">
                 <div class="csf-logo-box"><img src="../images/Enrile.png" alt="LGU" onerror="this.outerHTML='<div style=&quot;width:46px;height:46px;border-radius:50%;border:1px solid #000;display:flex;align-items:center;justify-content:center;font-size:.48rem;text-align:center;line-height:1.2;&quot;>LGU<br>Enrile</div>'"/></div>
                 <div style="text-align:center;line-height:1.55;">
-                  <div style="font-size:.68rem;">Republic of the Philippines</div>
-                  <div style="font-size:.74rem;font-weight:700;text-transform:uppercase;">Local Government Unit of Enrile</div>
+                  <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;">Local Government Unit of Enrile</div>
                   <div style="font-size:.62rem;">Tuguegarao-Santiago National Highway, Barangay 02, Enrile, Cagayan</div>
                 </div>
               </div>
@@ -1099,7 +1127,6 @@ let CSRF_TOKEN = '';
 
 // Initialize CSRF token from meta tag with multiple fallbacks
 function initCSRFTokenAdmin() {
-  // Try meta tag first
   let token = document.querySelector('meta[name="csrf-token"]')?.content;
   if (token) {
     CSRF_TOKEN = token;
@@ -1150,6 +1177,7 @@ if (!CSRF_TOKEN) {
   function typeBadge(t){const[bg,col]=(TYPE_BADGES[t]||'#f1f5f9|#475569').split('|');return `<span class="badge" style="background:${bg};color:${col};">${t}</span>`;}
   function statusBadge(s){const map={Pending:'b-pending',Approved:'b-approved',Denied:'b-denied',Cancelled:'b-cancelled'};const ico={Pending:'⏳',Approved:'✅',Denied:'✗',Cancelled:'—'};return `<span class="badge ${map[s]||'b-pending'}">${ico[s]||''} ${s}</span>`;}
 
+
   async function loadRequests(page=currentPage){
     currentPage=page;
     const p=new URLSearchParams({action:'list',tab:currentTab,page:currentPage,sort:sortKey,dir:sortAsc?'ASC':'DESC',
@@ -1168,6 +1196,7 @@ if (!CSRF_TOKEN) {
     }catch(e){showToast('❌ Failed to load.','error');}
   }
 
+  // Move loadStats to global scope
   async function loadStats(){
     try{
       const res=await fetch('leave_requests.php?action=stats');
@@ -1195,33 +1224,74 @@ if (!CSRF_TOKEN) {
     loadRequests(1);
   }
 
-  function renderTable(rows){
-    const tbody=document.getElementById('leaveBody');
-    const empty=document.getElementById('emptyState');
-    if(!rows.length){tbody.innerHTML='';empty.style.display='block';return;}
-    empty.style.display='none';
-    tbody.innerHTML=rows.map(r=>{
-      const name=`${r.first_name} ${r.last_name}`;
-      const c=aColor(r.first_name+r.last_name);
-      const av=ini(name);
-      const isPending=r.status==='Pending';
-      window['_r'+r.request_id] = r.reason||'';
-      const actions=isPending
-        ?`<div class="row-actions"><button class="view-btn" onclick="viewRequest(${r.request_id})">View</button></div>`
-        :`<div class="row-actions"><button class="view-btn" onclick="viewRequest(${r.request_id})">View</button></div>`;
-      return `<tr>
-        <td><div class="emp-cell"><div class="emp-avatar" style="background:${c};">${av}</div><div><div class="emp-name">${name}</div><div class="emp-dept">${r.department||'—'}</div></div></div></td>
-        <td>${typeBadge(r.leave_type)}</td>
-        <td style="font-size:0.80rem;color:var(--gray-600);">${fmt(r.date_from)}</td>
-        <td style="font-size:0.80rem;color:var(--gray-600);">${fmt(r.date_to)}</td>
-        <td><span class="days-pill">${r.days_requested} day${r.days_requested!=1?'s':''}</span></td>
-        <td class="rc-col" data-id="${r.request_id}">${rcBuild(r.reason,r.request_id)}</td>
-        <td style="font-size:0.78rem;color:var(--gray-400);">${fmt(r.filed_at)}</td>
-        <td>${statusBadge(r.status)}</td>
-        <td style="text-align:center;">${actions}</td>
-      </tr>`;
-    }).join('');
+
+function renderTable(rows){
+  const tbody=document.getElementById('leaveBody');
+  const empty=document.getElementById('emptyState');
+  if(!rows.length){tbody.innerHTML='';empty.style.display='block';return;}
+  empty.style.display='none';
+  tbody.innerHTML=rows.map(r=>{
+    const name=`${r.first_name} ${r.last_name}`;
+    const c=aColor(r.first_name+r.last_name);
+    const av=ini(name);
+    window['_r'+r.request_id] = r.reason||'';
+    // Always show both View and Delete buttons
+    const actions = `<div class="row-actions">
+      <button class="view-btn" onclick="viewRequest(${r.request_id})">View</button>
+      <button class="act-btn deny" style="margin-left:4px;" onclick="confirmDelete(${r.request_id}, '${name.replace(/'/g, "&#39;")}')">Delete</button>
+    </div>`;
+    return `<tr>
+      <td><div class="emp-cell"><div class="emp-avatar" style="background:${c};">${av}</div><div><div class="emp-name">${name}</div><div class="emp-dept">${r.department||'—'}</div></div></div></td>
+      <td>${typeBadge(r.leave_type)}</td>
+      <td style="font-size:0.80rem;color:var(--gray-600);">${fmt(r.date_from)}</td>
+      <td style="font-size:0.80rem;color:var(--gray-600);">${fmt(r.date_to)}</td>
+      <td><span class="days-pill">${r.days_requested} day${r.days_requested!=1?'s':''}</span></td>
+      <td class="rc-col" data-id="${r.request_id}">${rcBuild(r.reason,r.request_id)}</td>
+      <td style="font-size:0.78rem;color:var(--gray-400);">${fmt(r.filed_at)}</td>
+      <td>${statusBadge(r.status)}</td>
+      <td style="text-align:center;">${actions}</td>
+    </tr>`;
+  }).join('');
+}
+
+// Delete logic for leave requests (must be global)
+let deleteTargetId = null;
+let deleteTargetName = '';
+
+function confirmDelete(id, name) {
+  deleteTargetId = id;
+  deleteTargetName = name;
+  if (confirm(`Delete leave request for ${name}? This action cannot be undone.\nThe request will be removed from the list.`)) {
+    doDeleteRequest();
   }
+}
+
+async function doDeleteRequest() {
+  if (!deleteTargetId) return;
+  const body = new FormData();
+  body.append('action', 'delete');
+  body.append('id', deleteTargetId);
+  try {
+    if (!CSRF_TOKEN) CSRF_TOKEN = initCSRFTokenAdmin();
+    const res = await fetch('leave_requests.php', {
+      method: 'POST',
+      headers: { 'X-CSRF-TOKEN': CSRF_TOKEN },
+      body
+    });
+    const json = await res.json();
+    if (json.success) {
+      showToast('✅ Leave request deleted.', 'success');
+      loadStats();
+      loadRequests(currentPage);
+    } else {
+      showToast('❌ ' + (json.message || 'Delete failed.'), 'error');
+    }
+  } catch (e) {
+    showToast('❌ Delete failed.', 'error');
+  }
+  deleteTargetId = null;
+  deleteTargetName = '';
+}
 
   function renderTabCounts(tc){
     ['all','pending','approved','denied','cancelled'].forEach(t=>{
@@ -1393,7 +1463,7 @@ if (!CSRF_TOKEN) {
         // Extract the actual specified leave type from detailPrefix
         // Format: "Leave Type: [specified_type] ☑"
         if (detailPrefix && detailPrefix.indexOf('Leave Type:') >= 0) {
-          var specType = detailPrefix.replace(/^Leave Type:\s*/i, '').replace(/\s*☑\s*$/i, '').trim();
+          var specType = detailPrefix.replace(/^Leave Type:\s*Abroad\s*/i, '').replace(/\s*☑\s*$/i, '').trim();
           othersEl2.textContent = specType || leaveTypeName;
         } else {
           othersEl2.textContent = leaveTypeName;
@@ -1491,20 +1561,32 @@ if (!CSRF_TOKEN) {
     set('cf-printed-at', new Date().toLocaleString());
 
     // 7B — recommendation based on status
+    // 7A — CERTIFICATION OF LEAVE CREDITS: Always HRMO
+    var hrmoName = 'AIREEN G. BERAN, HRMO';
+    var certOfficer = document.getElementById('cf-authorized-officer');
+    if (certOfficer) {
+      certOfficer.textContent = hrmoName;
+      certOfficer.style.textTransform = 'uppercase';
+    }
+
+    // 7B — Recommendation: Dept Head input
     var cbApprove = document.getElementById('cb-rec-approve');
     var cbDeny    = document.getElementById('cb-rec-deny');
     var denyReason = document.getElementById('cf-deny-reason');
     if (cbApprove) cbApprove.className = 'csf-chk' + (statusNorm === 'approved' ? ' checked' : '');
     if (cbDeny)    cbDeny.className    = 'csf-chk' + (statusNorm === 'denied'  ? ' checked' : '');
-    if (denyReason) denyReason.textContent = (statusNorm === 'denied' && r.admin_remarks) ? r.admin_remarks : '';
+    if (denyReason) denyReason.textContent = (statusNorm === 'denied' && r.dept_head_remarks) ? r.dept_head_remarks : '';
 
-    // 7B — Department Head as Authorized Officer
+    // 7B — Authorized Officer: Dept Head
     var deptHeadName = r.dept_head_name || '(Authorized Officer)';
-    var authOfficerEls = document.querySelectorAll('#cf-authorized-officer, #cf-7b-authorized-officer');
-    authOfficerEls.forEach(function(el) {
-      el.textContent = deptHeadName;
-      el.style.textTransform = 'uppercase';
-    });
+    var authOfficer7b = document.getElementById('cf-7b-authorized-officer');
+    if (authOfficer7b) {
+      authOfficer7b.textContent = deptHeadName;
+      authOfficer7b.style.textTransform = 'uppercase';
+    }
+
+    // 7D — Disapproved due to: HR/Admin input
+    // (Already handled below in fillDisapproveLines with r.admin_remarks)
 
     // 7C/7D
     function fillDisapproveLines(text) {
@@ -1575,11 +1657,11 @@ if (!CSRF_TOKEN) {
       /* ── Form page (page 1) ── */
       '.csf-paper{padding:0;}',
       '.csf-header-row{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;margin-bottom:4pt;}',
-      '.csf-header-left{font-size:6pt;line-height:1.5;}',
+      '.csf-header-left{font-size:.62rem;line-height:1.5;}',
       '.csf-header-center{display:flex;align-items:center;gap:8pt;justify-content:center;}',
       '.csf-logo-box{width:40pt;height:40pt;display:flex;align-items:center;justify-content:center;flex-shrink:0;}',
       '.csf-logo-box img{width:40pt;height:40pt;object-fit:contain;border-radius:50%;}',
-      '.csf-header-right{text-align:right;font-size:6pt;}',
+      '.csf-header-right{text-align:right;font-size:.62rem;}',
       '.csf-stamp-box{border:1px solid #999;padding:3pt 6pt;font-size:5.5pt;display:inline-block;margin-top:2pt;min-width:70pt;text-align:center;}',
       '.csf-title{text-align:center;font-size:11pt;font-weight:700;letter-spacing:.05em;margin:3pt 0 5pt;text-transform:uppercase;}',
       '.csf-tbl{width:100%;border-collapse:collapse;}',
@@ -1588,7 +1670,7 @@ if (!CSRF_TOKEN) {
       '.csf-field-label{font-size:5.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.02em;color:#333;margin-bottom:1pt;}',
       '.csf-field-val{font-size:7.5pt;font-weight:600;min-height:10pt;}',
       '.csf-name-cell{padding:2pt 4pt;}',
-      '.csf-name-sub{font-size:5pt;text-align:center;color:#555;margin-top:1pt;}',
+      '.csf-name-sub{font-size:.5pt;text-align:center;color:#555;margin-top:1pt;}',
       '.csf-checklist{display:flex;flex-direction:column;gap:1pt;}',
       '.csf-check-row{display:flex;align-items:flex-start;gap:3pt;font-size:6.2pt;line-height:1.35;margin-bottom:.5pt;}',
       '.csf-chk{display:inline-block;width:8pt;height:8pt;border:1px solid #000;flex-shrink:0;margin-top:.5pt;background:#fff;position:relative;}',
@@ -1613,7 +1695,7 @@ if (!CSRF_TOKEN) {
       '.csf-field-label{font-size:5.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.02em;color:#222;margin-bottom:1pt;}',
       '.csf-field-val{font-size:8pt;font-weight:600;min-height:11pt;}',
       '.csf-name-cell{padding:2pt 4pt;}',
-      '.csf-name-sub{font-size:5pt;text-align:center;color:#555;margin-top:1pt;}',
+      '.csf-name-sub{font-size:.5pt;text-align:center;color:#555;margin-top:1pt;}',
       '.csf-logo-box{width:42pt;height:42pt;display:flex;align-items:center;justify-content:center;flex-shrink:0;}',
       '.csf-logo-box img{width:42pt;height:42pt;object-fit:contain;border-radius:50%;}',
       '.csf-stamp-box{border:1px solid #888;padding:3pt 5pt;font-size:5pt;text-align:center;min-width:60pt;display:inline-block;line-height:1.4;}',
@@ -1702,6 +1784,7 @@ if (!CSRF_TOKEN) {
       '<div class="instr-item"><div class="instr-item-hd">14. Terminal leave*</div>',
       '<p>Proof of employee\'s resignation or retirement or separation from the service.</p></div>',
 
+
       '<div class="instr-item"><div class="instr-item-hd">15. Adoption Leave</div><ul>',
       '<li>Application for adoption leave shall be filed with an authenticated copy of the Pre-Adoptive Placement Authority issued by the Department of Social Welfare and Development (DSWD).</li>',
       '</ul></div>',
@@ -1726,8 +1809,10 @@ if (!CSRF_TOKEN) {
     );
     w.document.close();
     w.focus();
+
     setTimeout(function() { w.print(); }, 500);
   }
+  
 
   function openAdd(){
     ['fEmployee','fLeaveType','fFrom','fTo','fReason'].forEach(id=>{const el=document.getElementById(id);if(el){el.value='';el.classList.remove('err');}});
@@ -1915,7 +2000,7 @@ async function pollAdminNotifications() {
       const cnt = document.getElementById('adminNotifCount');
       if (cnt) {
         if (unread > 0) { cnt.textContent = unread; cnt.classList.add('show'); }
-        else            { cnt.textContent = '';     cnt.classList.remove('show'); }
+        else            { cnt.textContent = '';      cnt.classList.remove('show'); }
       }
       return;
     }
@@ -1930,10 +2015,10 @@ async function pollAdminNotifications() {
         list.innerHTML = notifs.map(n => {
           const isRead = read.includes(n.nid);
           return `<a class="notif-item ${isRead?'':'unread'}" href="${n.link}" data-nid="${n.nid}" onclick="markNotifRead(this.getAttribute('data-nid'));applyReadState();">
-            <div class="notif-ico" style="background:${n.color}22;">${n.icon}</div>
+            <div class="notif-ico" style="background:<?=htmlspecialchars($n['color'])?>22;"><?=$n['icon']?></div>
             <div class="notif-body">
-              <div class="notif-title">${n.title}</div>
-              <div class="notif-text">${n.body}</div>
+              <div class="notif-title"><?=htmlspecialchars($n['title'])?></div>
+              <div class="notif-text"><?=htmlspecialchars($n['body'])?></div>
               ${n.time ? '<div class="notif-time">'+adminFmtTime(n.time)+'</div>' : ''}
             </div>
           </a>`;
@@ -2153,7 +2238,7 @@ function toggleSidebar(){document.getElementById('sidebar').classList.toggle('op
         .cw-inp:focus{border-color:#2563eb;background:#fff;box-shadow:0 0 0 3px rgba(37,99,235,.1);}
         .cw-inp:disabled{background:#f3f4f6;color:#94a3b8;cursor:not-allowed;}
         .cw-inp::placeholder{color:#94a3b8;}
-        .cw-sendbtn{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#2563eb,#1e40af);color:#fff;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:.95rem;flex-shrink:0;transition:all .2s;box-shadow:0 4px 12px rgba(37,99,235,.35);font-weight:600;position:relative;overflow:hidden;}
+        .cw-sendbtn{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#2563eb,#1e40af);color:#fff;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:.95rem;font-weight:600;position:relative;overflow:hidden;}
         .cw-sendbtn::before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 30% 30%,rgba(255,255,255,.3),transparent);opacity:0;}
         .cw-sendbtn:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(37,99,235,.45);}
         .cw-sendbtn:active{transform:none;box-shadow:0 2px 8px rgba(37,99,235,.25);}
@@ -2186,19 +2271,19 @@ function toggleSidebar(){document.getElementById('sidebar').classList.toggle('op
           .cw-hd{padding:14px 14px;}
           .cw-hd-title{font-size:.92rem;}
           .cw-hd-sub{font-size:.60rem;}
-          .cw-hd-icon{width:36px;height:36px;font-size:1rem;}
+          .cw-hd-icon{width:36px;height:36px;font-size:.95rem;}
           .cw-hd-close{width:30px;height:30px;font-size:.85rem;}
           .cw-chat-hd{padding:10px 12px;gap:8px;}
           .cw-chat-av{width:32px;height:32px;font-size:.60rem;}
-          .cw-chat-name{font-size:.79rem;}
+          .cw-chat-name{font-size:.80rem;}
           .cw-chat-sub{font-size:.58rem;}
           .cw-msgs{padding:11px 9px;gap:6px;}
           .cw-mav{width:22px;height:22px;font-size:.50rem;}
-          .cw-bubble{padding:9px 12px;font-size:.77rem;}
+          .cw-bubble{padding:9px 12px;font-size:.77rem;line-height:1.4;}
           .cw-inp-row{padding:9px 10px;gap:8px;}
           .cw-inp{font-size:.78rem;padding:8px 12px;}
           .cw-sendbtn{width:36px;height:36px;font-size:.88rem;}
-          .cw-edit-bar{padding:7px 10px;font-size:.70rem;}
+          .cw-edit-bar{padding:7px 10px;font-size:.70rem;gap:6px;}
           .cw-act-btn{width:26px;height:26px;font-size:.70rem;}
           .cw-srch input{font-size:.67rem;padding:5px 9px;}
         }
@@ -2239,7 +2324,7 @@ function toggleSidebar(){document.getElementById('sidebar').classList.toggle('op
           .cw-online{width:10px;height:10px;}
           .cw-msgs{padding:10px 8px;gap:6px;flex:1;overflow-y:auto;}
           .cw-mrow{gap:5px;margin-bottom:1px;}
-          .cw-mav{width:20px;height:20px;font-size:.48rem;}
+          .cw-mav{width:20px;height:20px;font-size:.44rem;}
           .cw-msg-wrap{max-width:85%;}
           .cw-bubble{padding:8px 11px;font-size:.75rem;line-height:1.4;}
           .cw-mt{font-size:.55rem;margin-top:3px;}
@@ -2254,32 +2339,30 @@ function toggleSidebar(){document.getElementById('sidebar').classList.toggle('op
     
         /* Standard Phones (480px and below) */
         @media (max-width:480px){
-          .cw-clist{max-height:42vh;padding:6px;}
-          .cw-ci{width:64px;padding:6px 3px;}
-          .cw-av{width:38px;height:38px;font-size:.64rem;}
-          .cw-cn{font-size:.60rem;max-width:60px;}
-          .cw-msgs{padding:8px 6px;gap:5px;}
-          .cw-bubble{padding:7px 10px;font-size:.73rem;}
-          .cw-mav{width:18px;height:18px;font-size:.44rem;}
-          .cw-inp-row{padding:7px 8px;min-height:46px;}
-          .cw-inp{padding:7px 10px;font-size:.74rem;min-height:34px;}
-          .cw-sendbtn{width:36px;height:36px;font-size:.82rem;min-width:36px;min-height:36px;}
-          .cw-chat-hd{padding:9px 11px;}
-          .cw-chat-av{width:30px;height:30px;font-size:.56rem;}
-          .cw-chat-name{font-size:.76rem;}
-          .cw-chat-sub{font-size:.55rem;}
-          .cw-hd-icon{width:32px;height:32px;font-size:.90rem;}
-          .cw-hd-title{font-size:.86rem;}
-          .cw-msg-wrap{max-width:88%;}
-          .cw-nosel-ic{font-size:2rem;}
+          .cw-clist{max-height:42vh;padding:5px;}
+          .cw-ci{width:58px;padding:5px 2px;}
+          .cw-av{width:34px;height:34px;font-size:.58rem;}
+          .cw-cn{font-size:.60rem;max-width:54px;}
+          .cw-bubble{padding:6px 9px;font-size:.70rem;line-height:1.3;}
+          .cw-mt{font-size:.53rem;margin-top:2px;}
+          .cw-inp{font-size:.72rem;padding:6px 10px;}
+          .cw-sendbtn{width:34px;height:34px;font-size:.80rem;min-width:34px;min-height:34px;}
+          .cw-chat-hd{padding:8px 10px;gap:6px;}
+          .cw-chat-av{width:28px;height:28px;font-size:.52rem;}
+          .cw-chat-name{font-size:.72rem;}
+          .cw-chat-sub{font-size:.52rem;}
+          .cw-nosel{padding:12px;}
+          .cw-msg-wrap{max-width:90%;}
+          .cw-hd{padding:10px 12px;}
+          .cw-hd-close{width:28px;height:28px;font-size:.82rem;}
         }
     
         /* Extra Small Phones (380px and below) */
         @media (max-width:380px){
           .cw-clist{max-height:40vh;padding:5px;}
-          .cw-ci{width:58px;padding:5px 2px;}
-          .cw-av{width:34px;height:34px;font-size:.58rem;}
-          .cw-cn{font-size:.56rem;max-width:54px;}
+          .cw-ci{width:54px;padding:5px 2px;}
+          .cw-av{width:32px;height:32px;font-size:.54rem;}
+          .cw-cn{font-size:.56rem;max-width:50px;}
           .cw-bubble{padding:6px 9px;font-size:.70rem;line-height:1.3;}
           .cw-mt{font-size:.53rem;margin-top:2px;}
           .cw-inp{font-size:.72rem;padding:6px 10px;}
@@ -2491,7 +2574,7 @@ function toggleSidebar(){document.getElementById('sidebar').classList.toggle('op
     document.getElementById('cwHdSub').textContent=name;
     var delBtn=document.getElementById('cwChatDelBtn');
     if(delBtn)delBtn.style.display='inline-flex';
-    document.getElementById('cwMsgs').innerHTML='<div style="text-align:center;padding:24px;font-size:.73rem;color:#94a3b8;">Loading...</div>';
+    document.getElementById('cwMsgs').innerHTML='<div style="text-align:center;padding:24px;font-size:.73rem;color:#94a3b8;line-height:1.7;">Loading...</div>';
     cwLoadMsgs(true);
     document.getElementById('cwInp').focus();
     clearInterval(cwPoll);cwPoll=setInterval(function(){cwLoadMsgs(false);},3000);
@@ -2564,9 +2647,9 @@ function toggleSidebar(){document.getElementById('sidebar').classList.toggle('op
 
     var actions='';
     if(mine&&!unsent){
-      actions='<div class="cw-msg-actions">'+
-        '<button class="cw-act-btn" onclick="cwStartEdit('+m.message_id+',this)" title="Edit">&#x270F;&#xFE0F;</button>'+
-        '<button class="cw-act-btn del" onclick="cwUnsend('+m.message_id+')" title="Unsend">&#x1F5D1;&#xFE0F;</button>'+
+      actions='<div class="row-actions">'+
+        '<button class="view-btn" onclick="viewRequest('+m.message_id+')">View</button>'+
+        '<button class="act-btn deny" style="margin-left:4px;" onclick="confirmDelete('+m.message_id+', \''+name.replace(/'/g, "&#39;")+'\')">Delete</button>'+
       '</div>';
     }
 

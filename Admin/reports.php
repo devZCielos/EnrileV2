@@ -1,6 +1,6 @@
 <?php
 // ============================================================
-//  LGU ENRILE HRMS — Reports Page
+//  LGU ENRILE HRMS — Reports Page  (Enhanced)
 //  File: Admin/reports.php
 // ============================================================
 session_start();
@@ -18,6 +18,7 @@ if ($action) {
     try {
         switch ($action) {
 
+            // ── OVERVIEW STATS ─────────────────────────────────────────
             case 'overview':
                 $employees = $pdo->query("
                     SELECT COUNT(*) AS total,
@@ -37,35 +38,195 @@ if ($action) {
                     SELECT COUNT(*) AS total,
                         SUM(status = 'Pending')  AS pending,
                         SUM(status = 'Approved') AS approved,
-                        SUM(status = 'Rejected') AS rejected,
-                        SUM(days_requested) AS total_days_taken
+                        SUM(status = 'Denied')   AS rejected,
+                        SUM(days_requested)      AS total_days_taken
                     FROM leave_requests
                     WHERE YEAR(filed_at) = YEAR(CURDATE())
                 ")->fetch();
 
-                $contracts = $pdo->query("
-                    SELECT COUNT(*) AS total,
-                        SUM(status = 'Active')  AS active,
-                        SUM(status = 'Expired') AS expired,
-                        SUM(status = 'Active' AND end_date IS NOT NULL
-                            AND DATEDIFF(end_date, CURDATE()) BETWEEN 0 AND 30) AS expiring_soon
-                    FROM contracts
-                ")->fetch();
+                $departments = $pdo->query("SELECT COUNT(*) FROM departments WHERE is_active=1")->fetchColumn();
 
-                $departments = $pdo->query("SELECT COUNT(*) FROM departments")->fetchColumn();
-
-                echo json_encode(['success'=>true,'employees'=>$employees,'leave'=>$leave,
-                                  'contracts'=>$contracts,'departments'=>$departments]);
+                echo json_encode(['success'=>true,'employees'=>$employees,'leave'=>$leave,'departments'=>$departments]);
                 break;
 
+            // ── EMPLOYEE ROSTER REPORT ─────────────────────────────────
+            case 'employee_roster':
+                $dept   = $_GET['dept']   ?? '';
+                $type   = $_GET['type']   ?? '';
+                $status = $_GET['status'] ?? '';
+                $search = $_GET['search'] ?? '';
+
+                $where  = ['1=1'];
+                $params = [];
+
+                if ($dept)   { $where[] = 'e.department_id = ?';   $params[] = $dept; }
+                if ($type)   { $where[] = 'e.employment_type = ?'; $params[] = $type; }
+                if ($status) { $where[] = 'e.employment_status = ?'; $params[] = $status; }
+                if ($search) {
+                    $where[] = "(CONCAT(e.first_name,' ',e.last_name) LIKE ? OR e.employee_code LIKE ? OR e.position_title LIKE ?)";
+                    $s = "%$search%";
+                    $params[] = $s; $params[] = $s; $params[] = $s;
+                }
+
+                $wSql = 'WHERE ' . implode(' AND ', $where);
+                $stmt = $pdo->prepare("
+                    SELECT e.employee_id, e.employee_code,
+                        CONCAT(e.first_name,' ',COALESCE(e.middle_name,''),' ',e.last_name) AS full_name,
+                        e.first_name, e.last_name,
+                        e.gender, e.position_title,
+                        e.employment_type, e.employment_status,
+                        COALESCE(d.name,'—') AS department,
+                        e.date_hired,
+                        e.contact_number, e.email_address
+                    FROM employees e
+                    LEFT JOIN departments d ON e.department_id = d.department_id
+                    $wSql
+                    ORDER BY e.last_name, e.first_name
+                ");
+                $stmt->execute($params);
+                $rows = $stmt->fetchAll();
+
+                // Summary counts
+                $summary_stmt = $pdo->prepare("
+                    SELECT
+                        COUNT(*) AS total,
+                        SUM(e.employment_type='Permanent')   AS permanent,
+                        SUM(e.employment_type='Job Order')   AS job_order,
+                        SUM(e.employment_type='Casual')      AS casual,
+                        SUM(e.employment_type='Contractual') AS contractual,
+                        SUM(e.employment_status='Active')    AS active,
+                        SUM(e.employment_status='Inactive')  AS inactive
+                    FROM employees e
+                    LEFT JOIN departments d ON e.department_id = d.department_id
+                    $wSql
+                ");
+                $summary_stmt->execute($params);
+                $summary = $summary_stmt->fetch();
+
+                echo json_encode(['success'=>true,'data'=>$rows,'summary'=>$summary]);
+                break;
+
+            // ── DEPARTMENTS LIST ───────────────────────────────────────
+            case 'departments_list':
+                $stmt = $pdo->query("SELECT department_id, name FROM departments WHERE is_active=1 ORDER BY name");
+                echo json_encode(['success'=>true,'data'=>$stmt->fetchAll()]);
+                break;
+
+            // ── LEAVE REQUESTS REPORT ──────────────────────────────────
+            case 'leave_report':
+                $dept       = $_GET['dept']      ?? '';
+                $status     = $_GET['status']    ?? 'Approved';
+                $leave_type = $_GET['leave_type'] ?? '';
+                $period     = $_GET['period']    ?? 'year';  // week, month, year
+                $year       = (int)($_GET['year'] ?? date('Y'));
+                $month      = (int)($_GET['month'] ?? date('n'));
+                $search     = $_GET['search']    ?? '';
+
+                $where  = ['1=1'];
+                $params = [];
+
+                // Period filter
+                if ($period === 'week') {
+                    $where[] = 'lr.filed_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)';
+                } elseif ($period === 'month') {
+                    $where[] = 'YEAR(lr.filed_at) = ? AND MONTH(lr.filed_at) = ?';
+                    $params[] = $year; $params[] = $month;
+                } elseif ($period === 'year') {
+                    $where[] = 'YEAR(lr.filed_at) = ?';
+                    $params[] = $year;
+                }
+                // custom range
+                if ($_GET['date_from'] ?? '') { $where[] = 'lr.filed_at >= ?'; $params[] = $_GET['date_from']; }
+                if ($_GET['date_to']   ?? '') { $where[] = 'lr.filed_at <= ?'; $params[] = $_GET['date_to'].' 23:59:59'; }
+
+                if ($dept)       { $where[] = 'e.department_id = ?';   $params[] = $dept; }
+                if ($status)     { $where[] = 'lr.status = ?';          $params[] = $status; }
+                if ($leave_type) { $where[] = 'lr.leave_type_id = ?';  $params[] = $leave_type; }
+                if ($search) {
+                    $where[] = "(CONCAT(e.first_name,' ',e.last_name) LIKE ? OR e.employee_code LIKE ?)";
+                    $s = "%$search%";
+                    $params[] = $s; $params[] = $s;
+                }
+
+                $wSql = 'WHERE ' . implode(' AND ', $where);
+                $stmt = $pdo->prepare("
+                    SELECT
+                        lr.request_id,
+                        e.employee_code,
+                        CONCAT(e.first_name,' ',e.last_name) AS employee_name,
+                        COALESCE(d.name,'—')                  AS department,
+                        e.employment_type,
+                        lt.name                               AS leave_type,
+                        lt.code                               AS leave_code,
+                        lr.date_from,
+                        lr.date_to,
+                        lr.days_requested,
+                        lr.status,
+                        lr.filed_at,
+                        lr.reviewed_at,
+                        CONCAT(ua.email)                      AS reviewed_by_email,
+                        COALESCE(
+                            (SELECT CONCAT(e2.first_name,' ',e2.last_name)
+                             FROM employees e2
+                             WHERE e2.user_id = lr.reviewed_by LIMIT 1),
+                            ua.email, '—'
+                        )                                     AS approved_by,
+                        COALESCE(
+                            (SELECT lb.remaining_days
+                             FROM leave_balances lb
+                             WHERE lb.employee_id = e.employee_id
+                               AND lb.leave_type_id = lr.leave_type_id
+                               AND lb.calendar_year = YEAR(lr.filed_at)
+                             LIMIT 1), 0
+                        )                                     AS credits_left,
+                        lr.admin_remarks
+                    FROM leave_requests lr
+                    JOIN employees   e  ON lr.employee_id   = e.employee_id
+                    JOIN leave_types lt ON lr.leave_type_id = lt.leave_type_id
+                    LEFT JOIN departments   d  ON e.department_id  = d.department_id
+                    LEFT JOIN user_accounts ua ON lr.reviewed_by   = ua.user_id
+                    $wSql
+                    ORDER BY lr.filed_at DESC
+                ");
+                $stmt->execute($params);
+                $rows = $stmt->fetchAll();
+
+                // Summary
+                $sum_stmt = $pdo->prepare("
+                    SELECT COUNT(*) AS total,
+                        SUM(lr.days_requested) AS total_days,
+                        SUM(lr.status='Approved') AS approved,
+                        SUM(lr.status='Denied')   AS denied,
+                        SUM(lr.status='Pending')  AS pending,
+                        SUM(lr.status='Cancelled') AS cancelled
+                    FROM leave_requests lr
+                    JOIN employees e ON lr.employee_id = e.employee_id
+                    LEFT JOIN departments d ON e.department_id = d.department_id
+                    $wSql
+                ");
+                $sum_stmt->execute($params);
+                $summary = $sum_stmt->fetch();
+
+                echo json_encode(['success'=>true,'data'=>$rows,'summary'=>$summary]);
+                break;
+
+            // ── LEAVE TYPES LIST ───────────────────────────────────────
+            case 'leave_types_list':
+                $stmt = $pdo->query("SELECT leave_type_id, name, code FROM leave_types WHERE is_active=1 ORDER BY name");
+                echo json_encode(['success'=>true,'data'=>$stmt->fetchAll()]);
+                break;
+
+            // ── DEPT BAR CHART ─────────────────────────────────────────
             case 'by_department':
                 $stmt = $pdo->query("
                     SELECT COALESCE(d.name,'Unassigned') AS department,
                         COUNT(*) AS total,
-                        SUM(e.employment_status='Active')   AS active,
-                        SUM(e.employment_status='Inactive') AS inactive,
-                        SUM(e.gender='Male')   AS male,
-                        SUM(e.gender='Female') AS female
+                        SUM(e.employment_type='Permanent')   AS permanent,
+                        SUM(e.employment_type='Job Order')   AS job_order,
+                        SUM(e.employment_type='Casual')      AS casual,
+                        SUM(e.employment_type='Contractual') AS contractual,
+                        SUM(e.employment_status='Active')    AS active,
+                        SUM(e.employment_status='Inactive')  AS inactive
                     FROM employees e
                     LEFT JOIN departments d ON e.department_id=d.department_id
                     GROUP BY d.department_id, d.name ORDER BY total DESC
@@ -81,96 +242,19 @@ if ($action) {
                 echo json_encode(['success'=>true,'data'=>$stmt->fetchAll()]);
                 break;
 
-            case 'leave_by_type':
-                $year = (int)($_GET['year'] ?? date('Y'));
-                $stmt = $pdo->prepare("
-                    SELECT lt.name AS leave_type,
-                        COUNT(lr.leave_request_id) AS requests,
-                        SUM(lr.total_days) AS total_days,
-                        SUM(lr.status='Approved') AS approved,
-                        SUM(lr.status='Rejected') AS rejected,
-                        SUM(lr.status='Pending')  AS pending
-                    FROM leave_types lt
-                    LEFT JOIN leave_requests lr ON lt.leave_type_id=lr.leave_type_id
-                        AND YEAR(lr.date_filed)=?
-                    GROUP BY lt.leave_type_id, lt.name ORDER BY total_days DESC
-                ");
-                $stmt->execute([$year]);
-                echo json_encode(['success'=>true,'data'=>$stmt->fetchAll()]);
-                break;
-
             case 'leave_monthly':
                 $year = (int)($_GET['year'] ?? date('Y'));
                 $stmt = $pdo->prepare("
-                    SELECT MONTH(date_filed) AS month_num, MONTHNAME(date_filed) AS month_name,
-                        COUNT(*) AS requests, SUM(total_days) AS days,
-                        SUM(status='Approved') AS approved, SUM(status='Rejected') AS rejected
-                    FROM leave_requests WHERE YEAR(date_filed)=?
-                    GROUP BY MONTH(date_filed), MONTHNAME(date_filed) ORDER BY month_num
+                    SELECT MONTH(filed_at) AS month_num, MONTHNAME(filed_at) AS month_name,
+                        COUNT(*) AS requests, SUM(days_requested) AS days,
+                        SUM(status='Approved') AS approved, SUM(status='Denied') AS rejected
+                    FROM leave_requests WHERE YEAR(filed_at)=?
+                    GROUP BY MONTH(filed_at), MONTHNAME(filed_at) ORDER BY month_num
                 ");
                 $stmt->execute([$year]);
                 echo json_encode(['success'=>true,'data'=>$stmt->fetchAll()]);
                 break;
 
-            case 'top_leave':
-                $year = (int)($_GET['year'] ?? date('Y'));
-                $stmt = $pdo->prepare("
-                    SELECT CONCAT(e.first_name,' ',e.last_name) AS employee,
-                        e.employee_code, COALESCE(d.name,'—') AS department,
-                        COUNT(lr.leave_request_id) AS requests, SUM(lr.total_days) AS total_days
-                    FROM leave_requests lr
-                    JOIN employees e ON lr.employee_id=e.employee_id
-                    LEFT JOIN departments d ON e.department_id=d.department_id
-                    WHERE YEAR(lr.date_filed)=? AND lr.status='Approved'
-                    GROUP BY lr.employee_id ORDER BY total_days DESC LIMIT 10
-                ");
-                $stmt->execute([$year]);
-                echo json_encode(['success'=>true,'data'=>$stmt->fetchAll()]);
-                break;
-
-            case 'contracts_expiring':
-                $days = (int)($_GET['days'] ?? 30);
-                $stmt = $pdo->prepare("
-                    SELECT CONCAT(e.first_name,' ',e.last_name) AS employee,
-                        e.employee_code, COALESCE(d.name,'—') AS department,
-                        c.contract_type, c.position_title, c.end_date,
-                        DATEDIFF(c.end_date, CURDATE()) AS days_remaining
-                    FROM contracts c
-                    JOIN employees e ON c.employee_id=e.employee_id
-                    LEFT JOIN departments d ON c.department_id=d.department_id
-                    WHERE c.status='Active' AND c.end_date IS NOT NULL
-                        AND DATEDIFF(c.end_date, CURDATE()) BETWEEN 0 AND ?
-                    ORDER BY c.end_date ASC
-                ");
-                $stmt->execute([$days]);
-                echo json_encode(['success'=>true,'data'=>$stmt->fetchAll()]);
-                break;
-
-            case 'headcount':
-                $stmt = $pdo->query("
-                    SELECT YEAR(date_hired) AS yr, COUNT(*) AS hired
-                    FROM employees WHERE date_hired IS NOT NULL
-                    GROUP BY YEAR(date_hired) ORDER BY yr ASC LIMIT 10
-                ");
-                echo json_encode(['success'=>true,'data'=>$stmt->fetchAll()]);
-                break;
-
-            case 'balance_summary':
-                $year = (int)($_GET['year'] ?? date('Y'));
-                $stmt = $pdo->prepare("
-                    SELECT lt.name AS leave_type,
-                        SUM(lb.total_credits)   AS total_credits,
-                        SUM(lb.used_days)        AS used_days,
-                        SUM(lb.remaining_days)   AS remaining_days,
-                        COUNT(DISTINCT lb.employee_id) AS employees
-                    FROM leave_balances lb
-                    JOIN leave_types lt ON lb.leave_type_id=lt.leave_type_id
-                    WHERE lb.calendar_year=?
-                    GROUP BY lt.leave_type_id, lt.name ORDER BY used_days DESC
-                ");
-                $stmt->execute([$year]);
-                echo json_encode(['success'=>true,'data'=>$stmt->fetchAll()]);
-                break;
             default:
                 echo json_encode(['success'=>false,'message'=>'Unknown action.']);
         }
@@ -184,8 +268,8 @@ $adminName   = ucwords($_SESSION['user_name'] ?? 'Administrator');
 $roleLabels  = ['admin'=>'Super Admin','hr_staff'=>'HR Staff','dept_head'=>'Department Head'];
 $roleLabel   = $roleLabels[$_SESSION['user_role']] ?? 'Admin';
 $currentYear = date('Y');
+$currentMonth= date('n');
 ?>
-
 <?php
 // ── Notifications (topbar bell) ──────────────────────────────────────────
 $notifCount = 0; $notifications = [];
@@ -198,13 +282,6 @@ if (isset($pdo)) { try {
     foreach ($pendingReqs as $r) { $notifications[]=['icon'=>'📋','color'=>'#f59e0b','title'=>'Leave Request',
         'body'=>htmlspecialchars($r['emp_name']).' filed '.(int)$r['days_requested'].' day(s) of '.htmlspecialchars($r['leave_type']),
         'time'=>$r['filed_at'],'link'=>'leave_requests.php']; }
-    try { $expC=$pdo->query("SELECT CONCAT(e.first_name,' ',e.last_name) AS emp_name,
-        DATEDIFF(c.end_date,CURDATE()) AS dl FROM contracts c JOIN employees e ON e.employee_id=c.employee_id
-        WHERE c.status='Active' AND c.end_date IS NOT NULL AND DATEDIFF(c.end_date,CURDATE()) BETWEEN 0 AND 30
-        ORDER BY c.end_date ASC LIMIT 5")->fetchAll(PDO::FETCH_ASSOC);
-        foreach($expC as $c){$dl=(int)$c['dl'];$notifications[]=['icon'=>'📝','color'=>'#ef4444','title'=>'Contract Expiring',
-        'body'=>htmlspecialchars($c['emp_name'])."'s contract expires in $dl day".($dl===1?'':'s'),'time'=>null,'link'=>'contracts.php'];}
-    } catch(Exception $ex){}
     $notifCount=count($notifications);
 } catch(Exception $ex){ $notifCount=0; } }
 if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time()-strtotime($dt);if($d<60)return 'Just now';if($d<3600)return (int)($d/60).'m ago';if($d<86400)return (int)($d/3600).'h ago';if($d<172800)return 'Yesterday';return date('M j',strtotime($dt));}}
@@ -218,9 +295,6 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="../css/admin.css"/>
   <style>
-    /* ══════════════════════════════════════════════
-       CSS VARIABLES & RESET  (matches other pages)
-    ══════════════════════════════════════════════ */
     :root {
       --primary:      #2563eb;
       --primary-dark: #1e40af;
@@ -244,9 +318,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     * { box-sizing:border-box; margin:0; padding:0; }
     body { font-family:'Nunito',sans-serif; background:var(--gray-100); color:var(--secondary); display:flex; min-height:100vh; }
 
-    /* ══════════════════════════════════════════════
-       SIDEBAR  (identical to all other pages)
-    ══════════════════════════════════════════════ */
+    /* ── SIDEBAR ── */
     .sidebar { width:var(--sidebar-w); background:linear-gradient(180deg,#2563eb 0%,#1e40af 55%,#22c55e 100%); display:flex; flex-direction:column; position:fixed; top:0; left:0; height:100vh; z-index:200; transition:transform 0.3s; box-shadow:4px 0 28px rgba(0,0,0,0.20); }
     .sidebar-brand { padding:22px 20px 18px; display:flex; align-items:center; gap:12px; border-bottom:1px solid rgba(255,255,255,0.15); }
     .brand-logo { width:44px; height:44px; border-radius:50%; object-fit:cover; border:2.5px solid rgba(255,255,255,0.70); box-shadow:0 2px 8px rgba(0,0,0,0.20); }
@@ -266,13 +338,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .user-info { flex:1; min-width:0; }
     .user-info strong { display:block; font-size:0.82rem; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .user-info span { font-size:0.68rem; color:rgba(255,255,255,0.52); }
-    .logout-btn { display:flex; align-items:center; gap:9px; margin:8px 10px 2px; padding:10px 14px; border-radius:10px; background:rgba(239,68,68,0.12); border:1.5px solid rgba(239,68,68,0.28); color:#fca5a5; font-size:0.845rem; font-weight:700; text-decoration:none; transition:all .2s; cursor:pointer; }
-    .logout-btn:hover { background:rgba(239,68,68,0.26); border-color:rgba(239,68,68,0.55); color:#fff; transform:translateY(-1px); }
-    .logout-icon { font-size:1rem; }
 
-    /* ══════════════════════════════════════════════
-       MAIN LAYOUT  (identical to all other pages)
-    ══════════════════════════════════════════════ */
+    /* ── MAIN LAYOUT ── */
     .main { margin-left:var(--sidebar-w); flex:1; display:flex; flex-direction:column; }
     .topbar { height:var(--topbar-h); background:linear-gradient(135deg,#2563eb 0%,#1e40af 50%,#22c55e 100%); display:flex; align-items:center; padding:0 28px; gap:16px; position:sticky; top:0; z-index:100; box-shadow:0 2px 16px rgba(37,99,235,0.30); }
     .menu-toggle { display:none; background:none; border:none; font-size:1.4rem; cursor:pointer; color:rgba(255,255,255,0.85); padding:4px; }
@@ -284,17 +351,18 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .topbar-btn:hover { background:rgba(255,255,255,0.28); }
     .notif-badge { position:absolute; top:-2px; right:-2px; width:16px; height:16px; background:#ef4444; border-radius:50%; font-size:0.58rem; color:white; font-weight:800; display:flex; align-items:center; justify-content:center; border:2px solid rgba(255,255,255,0.3); }
     .content { padding:24px 28px; flex:1; }
-
-    /* Print button lives in topbar */
     .btn-print { display:flex; align-items:center; gap:7px; padding:8px 16px; background:rgba(255,255,255,0.15); border:1.5px solid rgba(255,255,255,0.28); border-radius:var(--radius-sm); font-family:'Nunito',sans-serif; font-size:0.84rem; font-weight:700; color:#fff; cursor:pointer; transition:all 0.2s; white-space:nowrap; }
     .btn-print:hover { background:rgba(255,255,255,0.28); transform:translateY(-1px); }
-    .btn-print:hover { background:rgba(255,255,255,0.28); }
 
-    /* ══════════════════════════════════════════════
-       STAT CARDS  (same pattern as leave_requests)
-    ══════════════════════════════════════════════ */
-    .stat-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:16px; margin-bottom:22px; }
-    .stat-card { background:var(--white); border-radius:var(--radius); padding:18px 20px; border:1.5px solid var(--gray-200); box-shadow:var(--shadow-sm); position:relative; overflow:hidden; transition:transform 0.2s,box-shadow 0.2s; animation:fadeIn 0.4s ease both; }
+    /* ── REPORT TABS ── */
+    .report-tabs { display:flex; gap:4px; background:var(--white); border-radius:var(--radius); padding:6px; border:1.5px solid var(--gray-200); box-shadow:var(--shadow-sm); margin-bottom:20px; flex-wrap:wrap; }
+    .rtab { flex:1; min-width:140px; padding:10px 16px; border:none; border-radius:var(--radius-sm); font-family:'Nunito',sans-serif; font-size:0.85rem; font-weight:700; color:var(--gray-400); cursor:pointer; transition:all 0.25s; display:flex; align-items:center; justify-content:center; gap:7px; background:transparent; }
+    .rtab:hover { background:var(--gray-100); color:var(--gray-600); }
+    .rtab.active { background:linear-gradient(135deg,var(--primary),var(--primary-dark)); color:#fff; box-shadow:0 2px 10px rgba(37,99,235,0.25); }
+
+    /* ── STAT CARDS ── */
+    .stat-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; margin-bottom:20px; }
+    .stat-card { background:var(--white); border-radius:var(--radius); padding:16px 18px; border:1.5px solid var(--gray-200); box-shadow:var(--shadow-sm); position:relative; overflow:hidden; transition:transform 0.2s,box-shadow 0.2s; animation:fadeIn 0.4s ease both; }
     .stat-card:hover { transform:translateY(-3px); box-shadow:var(--shadow-md); }
     .stat-card::before { content:''; position:absolute; top:0; left:0; right:0; height:4px; border-radius:var(--radius) var(--radius) 0 0; }
     .stat-card.blue::before   { background:linear-gradient(90deg,#2563eb,#60a5fa); }
@@ -303,128 +371,119 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .stat-card.red::before    { background:linear-gradient(90deg,#ef4444,#fca5a5); }
     .stat-card.purple::before { background:linear-gradient(90deg,#a855f7,#d8b4fe); }
     .stat-card.sky::before    { background:linear-gradient(90deg,#0ea5e9,#7dd3fc); }
-    .stat-card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
-    .stat-icon { width:44px; height:44px; border-radius:11px; display:flex; align-items:center; justify-content:center; font-size:1.2rem; }
+    .stat-card.teal::before   { background:linear-gradient(90deg,#14b8a6,#5eead4); }
+    .stat-card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+    .stat-icon { width:40px; height:40px; border-radius:11px; display:flex; align-items:center; justify-content:center; font-size:1.1rem; }
     .stat-card.blue   .stat-icon { background:#dbeafe; }
     .stat-card.green  .stat-icon { background:#dcfce7; }
     .stat-card.orange .stat-icon { background:#fef3c7; }
     .stat-card.red    .stat-icon { background:#fee2e2; }
     .stat-card.purple .stat-icon { background:#f3e8ff; }
     .stat-card.sky    .stat-icon { background:#e0f2fe; }
-    .stat-value { font-size:2rem; font-weight:800; color:var(--gray-800); line-height:1; margin-bottom:3px; }
-    .stat-label { font-size:0.78rem; color:var(--gray-400); font-weight:600; }
-    .stat-sub   { font-size:0.70rem; color:var(--gray-400); margin-top:6px; }
+    .stat-card.teal   .stat-icon { background:#ccfbf1; }
+    .stat-value { font-size:1.8rem; font-weight:800; color:var(--gray-800); line-height:1; margin-bottom:3px; }
+    .stat-label { font-size:0.76rem; color:var(--gray-400); font-weight:600; }
+    .stat-sub   { font-size:0.68rem; color:var(--gray-400); margin-top:5px; }
 
-    /* ══════════════════════════════════════════════
-       PANELS  (white cards with gray-50 header)
-    ══════════════════════════════════════════════ */
-    .reports-wrap { display:flex; flex-direction:column; gap:20px; }
-    .two-col { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+    /* ── FILTER BAR ── */
+    .filter-bar { background:var(--white); border-radius:var(--radius); padding:16px 20px; border:1.5px solid var(--gray-200); box-shadow:var(--shadow-sm); margin-bottom:18px; display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+    .filter-group { display:flex; flex-direction:column; gap:4px; min-width:150px; flex:1; }
+    .filter-label { font-size:0.70rem; font-weight:800; color:var(--gray-400); text-transform:uppercase; letter-spacing:0.07em; }
+    .filter-control { padding:8px 12px; border:1.5px solid var(--gray-200); border-radius:var(--radius-sm); font-family:'Nunito',sans-serif; font-size:0.82rem; font-weight:600; color:var(--gray-800); background:var(--white); outline:none; cursor:pointer; transition:border-color 0.2s; }
+    .filter-control:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,0.10); }
+    .filter-actions { display:flex; gap:8px; align-items:flex-end; flex-shrink:0; }
+    .btn-filter { padding:8px 20px; border:none; border-radius:var(--radius-sm); font-family:'Nunito',sans-serif; font-size:0.84rem; font-weight:700; cursor:pointer; transition:all 0.2s; }
+    .btn-apply { background:linear-gradient(135deg,var(--primary),var(--primary-dark)); color:#fff; box-shadow:0 2px 8px rgba(37,99,235,0.25); }
+    .btn-apply:hover { transform:translateY(-1px); box-shadow:0 4px 14px rgba(37,99,235,0.35); }
+    .btn-reset { background:var(--gray-100); color:var(--gray-600); border:1.5px solid var(--gray-200); }
+    .btn-reset:hover { background:var(--gray-200); }
 
-    .panel { background:var(--white); border-radius:var(--radius); border:1.5px solid var(--gray-200); box-shadow:var(--shadow-sm); overflow:hidden; animation:fadeIn 0.4s ease both; }
+    /* ── PANEL ── */
+    .panel { background:var(--white); border-radius:var(--radius); border:1.5px solid var(--gray-200); box-shadow:var(--shadow-sm); overflow:hidden; animation:fadeIn 0.4s ease both; margin-bottom:20px; }
     .panel-head { display:flex; justify-content:space-between; align-items:center; padding:14px 20px; border-bottom:1.5px solid var(--gray-100); background:var(--gray-50); flex-wrap:wrap; gap:10px; }
     .panel-head h3 { font-size:0.93rem; font-weight:800; color:var(--gray-800); margin:0; font-family:'Playfair Display',serif; }
+    .panel-head-actions { display:flex; gap:8px; align-items:center; }
     .panel-body { padding:18px 20px; }
     .panel-body.no-pad { padding:0; }
 
-    /* ══════════════════════════════════════════════
-       YEAR SELECT & TABS
-    ══════════════════════════════════════════════ */
-    .year-select { padding:6px 12px; border:1.5px solid var(--gray-200); border-radius:var(--radius-sm); font-family:'Nunito',sans-serif; font-size:0.82rem; font-weight:700; color:var(--gray-600); background:var(--white); outline:none; cursor:pointer; transition:border-color 0.2s; }
-    .year-select:focus { border-color:var(--primary); }
-
-    .tabs { display:flex; background:var(--white); border-radius:var(--radius-sm); border:1.5px solid var(--gray-200); overflow:hidden; width:fit-content; }
-    .tab-btn { padding:6px 16px; border:none; background:transparent; font-family:'Nunito',sans-serif; font-size:0.80rem; font-weight:700; color:var(--gray-400); cursor:pointer; transition:all 0.2s; border-right:1px solid var(--gray-200); white-space:nowrap; }
-    .tab-btn:last-child { border-right:none; }
-    .tab-btn.active { background:linear-gradient(135deg,var(--primary),var(--primary-dark)); color:white; }
-
-    /* ══════════════════════════════════════════════
-       BAR CHART
-    ══════════════════════════════════════════════ */
-    .bar-chart { display:flex; flex-direction:column; gap:11px; }
-    .bar-row { display:flex; align-items:center; gap:10px; }
-    .bar-label { font-size:0.78rem; color:var(--gray-600); font-weight:600; width:140px; flex-shrink:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .bar-track { flex:1; background:var(--gray-100); border-radius:8px; height:22px; overflow:hidden; }
-    .bar-fill  { height:100%; border-radius:8px; transition:width 0.7s cubic-bezier(0.4,0,0.2,1); min-width:2px; }
-    .bar-val   { font-size:0.78rem; font-weight:800; color:var(--gray-600); width:36px; text-align:right; flex-shrink:0; }
-
-    /* ══════════════════════════════════════════════
-       SPARKLINE BAR CHART
-    ══════════════════════════════════════════════ */
-    .sparkline-wrap { display:flex; align-items:flex-end; gap:5px; height:130px; padding-bottom:22px; position:relative; }
-    .spark-col { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; gap:3px; height:100%; position:relative; padding-bottom:18px; }
-    .spark-val { font-size:0.63rem; font-weight:700; white-space:nowrap; }
-    .spark-bar { width:75%; border-radius:3px 3px 0 0; transition:height 0.5s ease; min-height:3px; }
-    .spark-lbl { position:absolute; bottom:0; left:50%; transform:translateX(-50%); font-size:0.63rem; color:var(--gray-400); white-space:nowrap; }
-
-    /* ══════════════════════════════════════════════
-       SVG DONUT
-    ══════════════════════════════════════════════ */
-    .donut-wrap { display:flex; align-items:center; gap:24px; flex-wrap:wrap; }
-    .donut-legend { display:flex; flex-direction:column; gap:9px; flex:1; }
-    .donut-item { display:flex; align-items:center; gap:8px; font-size:0.82rem; color:var(--gray-600); }
-    .donut-dot  { width:11px; height:11px; border-radius:3px; flex-shrink:0; }
-    .donut-pct  { margin-left:auto; padding-left:12px; font-size:0.82rem; font-weight:800; color:var(--gray-800); }
-
-    /* ══════════════════════════════════════════════
-       TABLES
-    ══════════════════════════════════════════════ */
+    /* ── TABLES ── */
+    .rep-table-wrap { overflow-x:auto; }
     .rep-table { width:100%; border-collapse:collapse; font-size:0.83rem; }
     .rep-table thead tr { background:var(--gray-50); }
-    .rep-table thead th { padding:10px 16px; text-align:left; font-size:0.69rem; font-weight:800; color:var(--gray-400); text-transform:uppercase; letter-spacing:0.07em; border-bottom:1.5px solid var(--gray-200); white-space:nowrap; }
+    .rep-table thead th { padding:10px 14px; text-align:left; font-size:0.67rem; font-weight:800; color:var(--gray-400); text-transform:uppercase; letter-spacing:0.07em; border-bottom:1.5px solid var(--gray-200); white-space:nowrap; }
+    .rep-table thead th.num { text-align:right; }
     .rep-table tbody tr { border-bottom:1px solid var(--gray-100); transition:background 0.15s; }
     .rep-table tbody tr:last-child { border-bottom:none; }
     .rep-table tbody tr:hover { background:#f0f6ff; }
-    .rep-table td { padding:11px 16px; color:var(--gray-800); vertical-align:middle; }
+    .rep-table td { padding:10px 14px; color:var(--gray-800); vertical-align:middle; }
     .rep-table td.num { font-weight:700; text-align:right; }
 
-    /* ══════════════════════════════════════════════
-       BADGES
-    ══════════════════════════════════════════════ */
-    .badge { display:inline-flex; align-items:center; padding:3px 10px; border-radius:20px; font-size:0.70rem; font-weight:700; white-space:nowrap; }
+    /* ── BADGES ── */
+    .badge { display:inline-flex; align-items:center; padding:3px 9px; border-radius:20px; font-size:0.68rem; font-weight:700; white-space:nowrap; }
     .badge-green  { background:#dcfce7; color:#166534; }
     .badge-red    { background:#fee2e2; color:#991b1b; }
     .badge-amber  { background:#fef3c7; color:#92400e; }
     .badge-blue   { background:#dbeafe; color:#1e40af; }
     .badge-purple { background:#f3e8ff; color:#6b21a8; }
     .badge-gray   { background:var(--gray-100); color:var(--gray-600); }
+    .badge-teal   { background:#ccfbf1; color:#0f766e; }
+    .badge-sky    { background:#e0f2fe; color:#0369a1; }
 
-    /* ══════════════════════════════════════════════
-       DAYS PILL (same style as contracts page)
-    ══════════════════════════════════════════════ */
-    .days-pill { display:inline-block; padding:3px 10px; border-radius:20px; font-size:0.72rem; font-weight:800; }
-    .dp-safe   { background:#dcfce7; color:#166534; }
-    .dp-warn   { background:#fef3c7; color:#92400e; }
-    .dp-danger { background:#fee2e2; color:#991b1b; }
+    /* ── BAR CHART ── */
+    .bar-chart { display:flex; flex-direction:column; gap:10px; }
+    .bar-row { display:flex; align-items:center; gap:10px; }
+    .bar-label { font-size:0.76rem; color:var(--gray-600); font-weight:600; width:150px; flex-shrink:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .bar-track { flex:1; background:var(--gray-100); border-radius:8px; height:22px; overflow:hidden; }
+    .bar-fill  { height:100%; border-radius:8px; transition:width 0.7s cubic-bezier(0.4,0,0.2,1); min-width:2px; }
+    .bar-val   { font-size:0.76rem; font-weight:800; color:var(--gray-600); width:36px; text-align:right; flex-shrink:0; }
 
-    /* ══════════════════════════════════════════════
-       MEDAL RANK
-    ══════════════════════════════════════════════ */
-    .rank-num { font-size:0.78rem; font-weight:800; color:var(--gray-400); }
+    /* ── SPARKLINE ── */
+    .sparkline-wrap { display:flex; align-items:flex-end; gap:4px; height:130px; padding-bottom:22px; position:relative; }
+    .spark-col { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; gap:2px; height:100%; position:relative; padding-bottom:18px; }
+    .spark-val { font-size:0.60rem; font-weight:700; }
+    .spark-bar { width:75%; border-radius:3px 3px 0 0; transition:height 0.5s ease; min-height:3px; }
+    .spark-lbl { position:absolute; bottom:0; left:50%; transform:translateX(-50%); font-size:0.60rem; color:var(--gray-400); white-space:nowrap; }
 
-    /* ══════════════════════════════════════════════
-       EMPTY STATE
-    ══════════════════════════════════════════════ */
-    .empty-rep { text-align:center; padding:32px 20px; color:var(--gray-400); font-size:0.875rem; font-weight:600; }
+    /* ── DONUT ── */
+    .donut-wrap { display:flex; align-items:center; gap:22px; flex-wrap:wrap; }
+    .donut-legend { display:flex; flex-direction:column; gap:8px; flex:1; }
+    .donut-item { display:flex; align-items:center; gap:8px; font-size:0.80rem; color:var(--gray-600); }
+    .donut-dot  { width:11px; height:11px; border-radius:3px; flex-shrink:0; }
+    .donut-pct  { margin-left:auto; padding-left:10px; font-size:0.80rem; font-weight:800; color:var(--gray-800); }
 
-    /* ══════════════════════════════════════════════
-       TOAST
-    ══════════════════════════════════════════════ */
-    .toast { position:fixed; bottom:28px; right:28px; padding:12px 20px; border-radius:var(--radius-sm); font-size:0.84rem; font-weight:700; box-shadow:var(--shadow-lg); z-index:900; color:white; animation:fadeIn 0.3s ease both; max-width:340px; }
+    /* ── TWO-COL ── */
+    .two-col { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:20px; }
+
+    /* ── LOADING / EMPTY ── */
+    .empty-rep { text-align:center; padding:30px 20px; color:var(--gray-400); font-size:0.875rem; font-weight:600; }
+    .loading-row td { text-align:center; padding:24px; color:var(--gray-400); font-size:0.84rem; }
+
+    /* ── YEAR/PERIOD CONTROLS ── */
+    .ctrl-select { padding:6px 10px; border:1.5px solid var(--gray-200); border-radius:var(--radius-sm); font-family:'Nunito',sans-serif; font-size:0.80rem; font-weight:700; color:var(--gray-600); background:var(--white); outline:none; cursor:pointer; }
+    .ctrl-select:focus { border-color:var(--primary); }
+
+    /* ── SECTION VIEWS ── */
+    .report-section { display:none; }
+    .report-section.active { display:block; }
+
+    /* ── RESULT SUMMARY BAR ── */
+    .result-bar { display:flex; gap:18px; padding:12px 18px; background:linear-gradient(135deg,#eff6ff,#f0fdf4); border-radius:var(--radius-sm); border:1.5px solid #bfdbfe; margin-bottom:16px; flex-wrap:wrap; align-items:center; }
+    .result-item { display:flex; flex-direction:column; align-items:center; }
+    .result-val  { font-size:1.3rem; font-weight:800; color:var(--gray-800); line-height:1; }
+    .result-lbl  { font-size:0.66rem; font-weight:700; color:var(--gray-400); text-transform:uppercase; letter-spacing:0.07em; }
+
+    /* ── TOAST ── */
+    .toast { position:fixed; bottom:28px; right:28px; padding:12px 20px; border-radius:var(--radius-sm); font-size:0.84rem; font-weight:700; box-shadow:var(--shadow-lg); z-index:900; color:white; animation:fadeIn 0.3s ease both; }
     .toast.success { background:linear-gradient(135deg,#22c55e,#16a34a); }
     .toast.error   { background:linear-gradient(135deg,#ef4444,#dc2626); }
 
     @keyframes fadeIn { from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:translateY(0);} }
 
-    /* ══════════════════════════════════════════════
-       RESPONSIVE
-    ══════════════════════════════════════════════ */
+    /* ── RESPONSIVE ── */
     .overlay-mob { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:150; }
     .overlay-mob.show { display:block; }
-
-    @media(max-width:1100px) { .stat-cards { grid-template-columns:repeat(3,1fr); } }
-    @media(max-width:900px)  { .two-col { grid-template-columns:1fr; } }
-    @media(max-width:768px)  {
+    @media(max-width:900px) { .two-col { grid-template-columns:1fr; } }
+    @media(max-width:768px) {
       .sidebar { transform:translateX(-100%); }
       .sidebar.open { transform:translateX(0); }
       .main { margin-left:0; }
@@ -432,26 +491,86 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
       .content { padding:14px 12px; }
       .topbar { padding:0 14px; }
       .stat-cards { grid-template-columns:repeat(2,1fr); gap:10px; }
+      .filter-bar { gap:10px; }
+      .filter-group { min-width:130px; }
     }
-    @media(max-width:480px)  {
+    @media(max-width:480px) {
       .stat-cards { grid-template-columns:1fr 1fr; }
-      .content { padding:12px 10px; }
-      .topbar { padding:0 12px; }
-      .topbar-title p { display:none; }
       .btn-print span { display:none; }
-      .toast { bottom:16px; right:16px; left:16px; max-width:100%; }
+      .rtab { font-size:0.76rem; padding:8px 10px; gap:4px; }
     }
 
-    /* ══════════════════════════════════════════════
-       PRINT
-    ══════════════════════════════════════════════ */
+    /* ══════════════════════════════════════
+       PRINT STYLES
+    ══════════════════════════════════════ */
     @media print {
-      .sidebar, .topbar, .btn-print, .overlay-mob { display:none !important; }
+      .sidebar, .topbar, .btn-print, .overlay-mob,
+      .report-tabs, .filter-bar, .panel-head-actions,
+      .btn-filter, .no-print { display:none !important; }
       .main { margin:0 !important; }
-      .panel { box-shadow:none !important; border:1px solid var(--gray-200) !important; break-inside:avoid; }
-      .stat-card { box-shadow:none !important; }
-      .year-select, .tabs { display:none !important; }
+      body { background:#fff !important; }
+      .content { padding:0 !important; }
+      .report-section { display:block !important; }
+      .panel { box-shadow:none !important; border:1px solid #ddd !important; break-inside:avoid; margin-bottom:16px; }
+      .stat-card { box-shadow:none !important; break-inside:avoid; }
+      .stat-cards { gap:10px; }
+      .rep-table thead th { background:#f1f5f9 !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+      .rep-table tbody tr:hover { background:none !important; }
+      .badge { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+      .two-col { grid-template-columns:1fr 1fr; }
+      .print-header { display:block !important; }
+
+      /* Force the active tab section to print */
+      #overviewSection,
+      #employeeSection,
+      #leaveSection {
+        display:block !important;
+      }
     }
+
+    /* Print-only header */
+    .print-header { display:none; text-align:center; margin-bottom:20px; padding-bottom:12px; border-bottom:2px solid #e2e8f0; }
+    .print-header h2 { font-family:'Playfair Display',serif; font-size:1.3rem; color:#1e293b; margin-bottom:4px; }
+    .print-header p  { font-size:0.80rem; color:#64748b; }
+
+    /* Notification/profile (reuse from other pages) */
+    .tb-profile-wrap{position:relative;display:inline-block;}
+    .tb-profile-btn{width:38px;height:38px;border-radius:50%;background:rgba(255,255,255,.20);border:2px solid rgba(255,255,255,.55);display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;flex-shrink:0;transition:all .2s;font-size:.80rem;font-weight:800;color:#fff;}
+    .tb-profile-btn:hover{background:rgba(255,255,255,.35);border-color:#fff;}
+    .tb-dropdown{display:none;position:absolute;top:calc(100% + 10px);right:0;background:#fff;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.18);min-width:200px;z-index:9999;overflow:hidden;}
+    .tb-dropdown.open{display:block;}
+    .tb-dd-header{padding:12px 16px 8px;border-bottom:1px solid #f1f5f9;background:#f8fafc;}
+    .tb-dd-name{font-size:.86rem;font-weight:800;color:#1e293b;}
+    .tb-dd-role{font-size:.70rem;color:#94a3b8;margin-top:1px;}
+    .tb-dd-item{display:flex;align-items:center;gap:10px;padding:10px 16px;font-size:.83rem;font-weight:600;color:#475569;cursor:pointer;transition:background .15s;text-decoration:none;border:none;background:none;width:100%;font-family:'Nunito',sans-serif;}
+    .tb-dd-item:hover{background:#f1f5f9;color:#1e293b;}
+    .tb-dd-item.danger{color:#dc2626;}
+    .tb-dd-item.danger:hover{background:#fef2f2;}
+    .tb-dd-divider{height:1px;background:#f1f5f9;margin:3px 0;}
+    .notif-wrap{position:relative;display:inline-block;}
+    .notif-btn{position:relative;width:38px;height:38px;border-radius:50%;border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:1rem;color:#fff;transition:all .2s;}
+    .notif-btn:hover{background:rgba(255,255,255,.28);}
+    .notif-count{position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;background:#ef4444;border-radius:20px;font-size:.58rem;color:#fff;font-weight:800;display:none;align-items:center;justify-content:center;border:2px solid transparent;padding:0 4px;}
+    .notif-count.show{display:flex;}
+    .notif-panel{display:none;position:absolute;top:calc(100% + 10px);right:0;background:#fff;border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.18);width:320px;max-height:460px;z-index:9999;overflow:hidden;flex-direction:column;}
+    .notif-panel.open{display:flex;}
+    .notif-hd{padding:12px 14px 8px;border-bottom:1px solid #f1f5f9;display:flex;align-items:center;justify-content:space-between;background:#f8fafc;}
+    .notif-hd-title{font-size:.86rem;font-weight:800;color:#1e293b;}
+    .notif-mark-all{font-size:.70rem;font-weight:700;color:#2563eb;cursor:pointer;border:none;background:none;font-family:inherit;}
+    .notif-list{overflow-y:auto;flex:1;}
+    .notif-item{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;border-bottom:1px solid #f8fafc;cursor:pointer;transition:background .15s;text-decoration:none;}
+    .notif-item:hover{background:#f8fafc;}
+    .notif-item.unread{background:#eff6ff;}
+    .notif-ico{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.95rem;flex-shrink:0;}
+    .notif-body{flex:1;min-width:0;}
+    .notif-title{font-size:.78rem;font-weight:800;color:#1e293b;margin-bottom:2px;}
+    .notif-text{font-size:.72rem;color:#475569;line-height:1.4;}
+    .notif-time{font-size:.64rem;color:#94a3b8;margin-top:2px;}
+    .notif-empty{text-align:center;padding:32px 16px;color:#94a3b8;}
+    .notif-empty .ne-icon{font-size:2rem;margin-bottom:6px;}
+    .notif-empty p{font-size:.80rem;font-weight:600;}
+    .notif-footer{padding:9px 14px;border-top:1px solid #f1f5f9;text-align:center;}
+    .notif-footer a{font-size:.76rem;font-weight:700;color:#2563eb;text-decoration:none;}
   </style>
 </head>
 <body>
@@ -502,57 +621,73 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
     <div class="topbar-title">
       <h1>Reports</h1>
-      <p>HR analytics and workforce summaries</p>
+      <p>HR analytics, employee roster &amp; leave summaries</p>
     </div>
     <div class="topbar-actions">
-              <div class="notif-wrap" id="adminNotifWrap">
-          <button class="notif-btn" onclick="toggleNotifPanel()" title="Notifications">
-            🔔<span class="notif-count <?= $notifCount > 0 ? 'show' : '' ?>" id="adminNotifCount"><?= $notifCount ?: '' ?></span>
-          </button>
-          <div class="notif-panel" id="adminNotifPanel">
-            <div class="notif-hd">
-              <div><div class="notif-hd-title">🔔 Notifications</div>
-              <div class="notif-hd-count"><?= $notifCount ?> item<?= $notifCount!==1?'s':'' ?></div></div>
-              <button class="notif-mark-all" onclick="clearNotifications()">Mark all read</button>
-            </div>
-            <div class="notif-list" id="adminNotifList">
-              <?php if(empty($notifications)):?>
-              <div class="notif-empty"><div class="ne-icon">🔔</div><p>All caught up!</p></div>
-              <?php else: foreach($notifications as $n):?>
-              <a class="notif-item unread" href="<?=htmlspecialchars($n['link'])?>" data-nid="<?=md5(($n['title']??'').($n['body']??'').($n['time']??''))?>" onclick="markNotifRead(this.getAttribute('data-nid'));applyReadState();">
-                <div class="notif-ico" style="background:<?=htmlspecialchars($n['color'])?>22;"><?=$n['icon']?></div>
-                <div class="notif-body">
-                  <div class="notif-title"><?=htmlspecialchars($n['title'])?></div>
-                  <div class="notif-text"><?=htmlspecialchars($n['body'])?></div>
-                  <?php if($n['time']):?><div class="notif-time"><?=timeAgo($n['time'])?></div><?php endif;?>
-                </div>
-              </a>
-              <?php endforeach; endif;?>
-            </div>
-            <div class="notif-footer"><a href="leave_requests.php">View all leave requests →</a></div>
+      <!-- Notifications -->
+      <div class="notif-wrap" id="adminNotifWrap">
+        <button class="notif-btn" onclick="toggleNotifPanel()" title="Notifications">
+          🔔<span class="notif-count <?= $notifCount > 0 ? 'show' : '' ?>" id="adminNotifCount"><?= $notifCount ?: '' ?></span>
+        </button>
+        <div class="notif-panel" id="adminNotifPanel">
+          <div class="notif-hd">
+            <div class="notif-hd-title">🔔 Notifications</div>
+            <button class="notif-mark-all" onclick="clearNotifications()">Mark all read</button>
           </div>
+          <div class="notif-list" id="adminNotifList">
+            <?php if(empty($notifications)):?>
+            <div class="notif-empty"><div class="ne-icon">🔔</div><p>All caught up!</p></div>
+            <?php else: foreach($notifications as $n):?>
+            <a class="notif-item unread" href="<?=htmlspecialchars($n['link'])?>" data-nid="<?=md5(($n['title']??'').($n['body']??'').($n['time']??''))?>">
+              <div class="notif-ico" style="background:<?=htmlspecialchars($n['color'])?>22;"><?=$n['icon']?></div>
+              <div class="notif-body">
+                <div class="notif-title"><?=htmlspecialchars($n['title'])?></div>
+                <div class="notif-text"><?=htmlspecialchars($n['body'])?></div>
+                <?php if($n['time']):?><div class="notif-time"><?=timeAgo($n['time'])?></div><?php endif;?>
+              </div>
+            </a>
+            <?php endforeach; endif;?>
+          </div>
+          <div class="notif-footer"><a href="leave_requests.php">View all leave requests →</a></div>
         </div>
-        <button class="topbar-btn" onclick="cwToggle()" style="position:relative;">💬<span id="cwBadge" style="position:absolute;top:-2px;right:-2px;width:16px;height:16px;background:#ef4444;border-radius:50%;font-size:.55rem;color:#fff;font-weight:800;display:none;align-items:center;justify-content:center;border:2px solid rgba(255,255,255,.3);"></span></button>
-      <button class="btn-print" onclick="window.print()">🖨️ <span>Print Report</span></button>
+      </div>
+      <!-- Profile -->
       <div class="tb-profile-wrap" id="tbProfileWrap">
-        <div class="tb-profile-btn" onclick="toggleProfileDropdown()" title="Account"><?= strtoupper(substr($adminName,0,2)) ?></div>
+        <div class="tb-profile-btn" onclick="toggleProfileDropdown()"><?= strtoupper(substr($adminName,0,2)) ?></div>
         <div class="tb-dropdown" id="tbDropdown">
           <div class="tb-dd-header">
             <div class="tb-dd-name"><?= htmlspecialchars($adminName) ?></div>
             <div class="tb-dd-role"><?= htmlspecialchars($roleLabel) ?></div>
           </div>
-          <a href="switch_to_employee.php" class="tb-dd-item" style="color:#d97706;">🔄 Switch to Employee Account</a>
+          <a href="switch_to_employee.php" class="tb-dd-item" style="color:#d97706;">🔄 Switch to Employee</a>
           <div class="tb-dd-divider"></div>
           <a href="../Landingpage/logout.php" class="tb-dd-item danger" onclick="return confirm('Log out?')">🚪 Logout</a>
         </div>
       </div>
+      <!-- Print -->
+      <button class="btn-print" onclick="printReport()">🖨️ <span>Print Report</span></button>
     </div>
   </div>
 
   <div class="content">
-    <div class="reports-wrap">
 
-      <!-- ══ OVERVIEW STAT CARDS ══ -->
+    <!-- ══ REPORT TABS ══ -->
+    <div class="report-tabs no-print">
+      <button class="rtab active" id="tab-overview"  onclick="switchTab('overview')">📊 Overview</button>
+      <button class="rtab"        id="tab-employees" onclick="switchTab('employees')">👥 Employee Roster</button>
+      <button class="rtab"        id="tab-leaves"    onclick="switchTab('leaves')">📋 Leave Requests</button>
+    </div>
+
+    <!-- ══════════════════════════════════════════
+         SECTION 1: OVERVIEW
+    ══════════════════════════════════════════ -->
+    <div class="report-section active" id="overviewSection">
+      <div class="print-header">
+        <h2>LGU Enrile HR Management System</h2>
+        <p>Overview Report — Generated: <?= date('F j, Y g:i A') ?></p>
+      </div>
+
+      <!-- Overview Stat Cards -->
       <div class="stat-cards">
         <div class="stat-card blue">
           <div class="stat-card-header"><div class="stat-icon">👥</div></div>
@@ -566,213 +701,314 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           <div class="stat-label">Active Employees</div>
           <div class="stat-sub" id="ovActiveSub">Loading…</div>
         </div>
+        <div class="stat-card orange">
+          <div class="stat-card-header"><div class="stat-icon">🏛️</div></div>
+          <div class="stat-value" id="ovPermanent">—</div>
+          <div class="stat-label">Permanent</div>
+          <div class="stat-sub">Regular positions</div>
+        </div>
+        <div class="stat-card purple">
+          <div class="stat-card-header"><div class="stat-icon">📋</div></div>
+          <div class="stat-value" id="ovJO">—</div>
+          <div class="stat-label">Job Order</div>
+          <div class="stat-sub" id="ovJOSub">Loading…</div>
+        </div>
         <div class="stat-card sky">
+          <div class="stat-card-header"><div class="stat-icon">📄</div></div>
+          <div class="stat-value" id="ovCasual">—</div>
+          <div class="stat-label">Casual</div>
+          <div class="stat-sub">Casual employees</div>
+        </div>
+        <div class="stat-card teal">
+          <div class="stat-card-header"><div class="stat-icon">🔄</div></div>
+          <div class="stat-value" id="ovCOS">—</div>
+          <div class="stat-label">COS / Contractual</div>
+          <div class="stat-sub">Contract of Service</div>
+        </div>
+        <div class="stat-card red">
+          <div class="stat-card-header"><div class="stat-icon">📋</div></div>
+          <div class="stat-value" id="ovLeaveApproved">—</div>
+          <div class="stat-label">Approved Leaves <?= $currentYear ?></div>
+          <div class="stat-sub" id="ovLeaveSub">Loading…</div>
+        </div>
+        <div class="stat-card blue" style="--card-top:#8b5cf6">
           <div class="stat-card-header"><div class="stat-icon">🏢</div></div>
           <div class="stat-value" id="ovDepts">—</div>
           <div class="stat-label">Departments</div>
-          <div class="stat-sub">Organizational units</div>
-        </div>
-        <div class="stat-card orange">
-          <div class="stat-card-header"><div class="stat-icon">📋</div></div>
-          <div class="stat-value" id="ovLeaveReq">—</div>
-          <div class="stat-label">Leave Requests <?= $currentYear ?></div>
-          <div class="stat-sub" id="ovLeaveSub">Loading…</div>
-        </div>
-        <div class="stat-card red">
-          <div class="stat-card-header"><div class="stat-icon">⚠️</div></div>
-          <div class="stat-value" id="ovExpiring">—</div>
-          <div class="stat-label">Expiring Contracts</div>
-          <div class="stat-sub">Within 30 days</div>
-        </div>
-        <div class="stat-card purple">
-          <div class="stat-card-header"><div class="stat-icon">📝</div></div>
-          <div class="stat-value" id="ovContracts">—</div>
-          <div class="stat-label">Active Contracts</div>
-          <div class="stat-sub" id="ovContractSub">Loading…</div>
+          <div class="stat-sub">Active units</div>
         </div>
       </div>
 
-      <!-- ══ ROW 1: By Department + Employment Type ══ -->
+      <!-- By Department + Employment Type -->
       <div class="two-col">
-
         <div class="panel">
-          <div class="panel-head">
-            <h3>👥 Employees by Department</h3>
-          </div>
+          <div class="panel-head"><h3>👥 Employees by Department</h3></div>
           <div class="panel-body">
-            <div class="bar-chart" id="deptChart">
-              <p class="empty-rep">Loading…</p>
-            </div>
+            <div class="bar-chart" id="deptChart"><p class="empty-rep">Loading…</p></div>
           </div>
         </div>
-
         <div class="panel">
-          <div class="panel-head">
-            <h3>📋 Employment Type Breakdown</h3>
-          </div>
+          <div class="panel-head"><h3>📋 Employment Type Breakdown</h3></div>
           <div class="panel-body">
-            <div class="donut-wrap" id="typeDonut">
-              <p class="empty-rep">Loading…</p>
-            </div>
+            <div class="donut-wrap" id="typeDonut"><p class="empty-rep">Loading…</p></div>
           </div>
         </div>
-
       </div>
 
-      <!-- ══ ROW 2: Leave by Month ══ -->
+      <!-- Monthly Leave Chart -->
       <div class="panel">
         <div class="panel-head">
           <h3>📅 Leave Requests by Month</h3>
-          <select class="year-select" id="leaveMonthYear" onchange="loadLeaveMonthly()">
-            <?php for ($y = $currentYear; $y >= $currentYear - 4; $y--): ?>
-              <option value="<?= $y ?>"><?= $y ?></option>
+          <select class="ctrl-select" id="leaveMonthYear" onchange="loadLeaveMonthly()">
+            <?php for($y=$currentYear;$y>=$currentYear-4;$y--): ?>
+              <option value="<?=$y?>"><?=$y?></option>
             <?php endfor; ?>
           </select>
         </div>
         <div class="panel-body">
-          <div class="sparkline-wrap" id="monthlyChart">
-            <p class="empty-rep" style="width:100%">Loading…</p>
-          </div>
+          <div class="sparkline-wrap" id="monthlyChart"><p class="empty-rep" style="width:100%">Loading…</p></div>
+        </div>
+      </div>
+    </div><!-- /overviewSection -->
+
+    <!-- ══════════════════════════════════════════
+         SECTION 2: EMPLOYEE ROSTER
+    ══════════════════════════════════════════ -->
+    <div class="report-section" id="employeeSection">
+      <div class="print-header">
+        <h2>LGU Enrile — Employee Roster</h2>
+        <p id="empPrintMeta">Generated: <?= date('F j, Y g:i A') ?></p>
+      </div>
+
+      <!-- Filter Bar -->
+      <div class="filter-bar no-print">
+        <div class="filter-group">
+          <div class="filter-label">Department</div>
+          <select class="filter-control" id="empDept">
+            <option value="">All Departments</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <div class="filter-label">Employment Type</div>
+          <select class="filter-control" id="empType">
+            <option value="">All Types</option>
+            <option value="Permanent">Permanent</option>
+            <option value="Job Order">Job Order</option>
+            <option value="Casual">Casual</option>
+            <option value="Contractual">COS / Contractual</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <div class="filter-label">Status</div>
+          <select class="filter-control" id="empStatus">
+            <option value="">All Status</option>
+            <option value="Active">Active</option>
+            <option value="On Leave">On Leave</option>
+            <option value="Inactive">Inactive</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <div class="filter-label">Search</div>
+          <input type="text" class="filter-control" id="empSearch" placeholder="Name, Code, Position…" onkeydown="if(event.key==='Enter') loadEmployeeRoster()">
+        </div>
+        <div class="filter-actions">
+          <button class="btn-filter btn-apply" onclick="loadEmployeeRoster()">🔍 Filter</button>
+          <button class="btn-filter btn-reset" onclick="resetEmpFilters()">↺ Reset</button>
         </div>
       </div>
 
-      <!-- ══ ROW 3: Leave by Type + Balance Summary ══ -->
-      <div class="two-col">
-
-        <div class="panel">
-          <div class="panel-head">
-            <h3>🏖️ Leave by Type</h3>
-            <select class="year-select" id="leaveTypeYear" onchange="loadLeaveByType()">
-              <?php for ($y = $currentYear; $y >= $currentYear - 4; $y--): ?>
-                <option value="<?= $y ?>"><?= $y ?></option>
-              <?php endfor; ?>
-            </select>
-          </div>
-          <div class="panel-body no-pad">
-            <table class="rep-table" id="leaveTypeTable">
-              <thead>
-                <tr>
-                  <th>Leave Type</th>
-                  <th style="text-align:right">Requests</th>
-                  <th style="text-align:right">Days Taken</th>
-                  <th style="text-align:right">Approved</th>
-                </tr>
-              </thead>
-              <tbody><tr><td colspan="4" class="empty-rep">Loading…</td></tr></tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="panel">
-          <div class="panel-head">
-            <h3>⚖️ Leave Balance Summary</h3>
-            <select class="year-select" id="balYear" onchange="loadBalanceSummary()">
-              <?php for ($y = $currentYear; $y >= $currentYear - 4; $y--): ?>
-                <option value="<?= $y ?>"><?= $y ?></option>
-              <?php endfor; ?>
-            </select>
-          </div>
-          <div class="panel-body no-pad">
-            <table class="rep-table" id="balSummaryTable">
-              <thead>
-                <tr>
-                  <th>Leave Type</th>
-                  <th style="text-align:right">Credits</th>
-                  <th style="text-align:right">Used</th>
-                  <th style="text-align:right">Remaining</th>
-                </tr>
-              </thead>
-              <tbody><tr><td colspan="4" class="empty-rep">Loading…</td></tr></tbody>
-            </table>
-          </div>
-        </div>
-
+      <!-- Summary Badges -->
+      <div class="result-bar" id="empResultBar" style="display:none">
+        <div class="result-item"><span class="result-val" id="empSumTotal">0</span><span class="result-lbl">Total</span></div>
+        <div style="width:1px;background:#bfdbfe;align-self:stretch;"></div>
+        <div class="result-item"><span class="result-val" id="empSumPerm">0</span><span class="result-lbl">Permanent</span></div>
+        <div class="result-item"><span class="result-val" id="empSumJO">0</span><span class="result-lbl">Job Order</span></div>
+        <div class="result-item"><span class="result-val" id="empSumCasual">0</span><span class="result-lbl">Casual</span></div>
+        <div class="result-item"><span class="result-val" id="empSumCOS">0</span><span class="result-lbl">COS</span></div>
+        <div style="width:1px;background:#bfdbfe;align-self:stretch;"></div>
+        <div class="result-item"><span class="result-val" id="empSumActive" style="color:#22c55e">0</span><span class="result-lbl">Active</span></div>
+        <div class="result-item"><span class="result-val" id="empSumInactive" style="color:#ef4444">0</span><span class="result-lbl">Inactive</span></div>
       </div>
 
-      <!-- ══ ROW 4: Top Leave Takers ══ -->
+      <!-- Employee Table -->
       <div class="panel">
         <div class="panel-head">
-          <h3>🏆 Top Leave Takers</h3>
-          <select class="year-select" id="topLeaveYear" onchange="loadTopLeave()">
-            <?php for ($y = $currentYear; $y >= $currentYear - 4; $y--): ?>
-              <option value="<?= $y ?>"><?= $y ?></option>
+          <h3>👥 Employee Roster</h3>
+          <div class="panel-head-actions no-print">
+            <span id="empCount" style="font-size:0.78rem;color:var(--gray-400);font-weight:700"></span>
+          </div>
+        </div>
+        <div class="panel-body no-pad">
+          <div class="rep-table-wrap">
+            <table class="rep-table" id="empTable">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Employee Code</th>
+                  <th>Full Name</th>
+                  <th>Department</th>
+                  <th>Position</th>
+                  <th>Type</th>
+                  <th>Status</th>
+                  <th>Gender</th>
+                  <th>Date Hired</th>
+                  <th>Contact</th>
+                </tr>
+              </thead>
+              <tbody id="empTbody">
+                <tr><td colspan="10" class="loading-row">Click <strong>Filter</strong> or wait for default load…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div><!-- /employeeSection -->
+
+    <!-- ══════════════════════════════════════════
+         SECTION 3: LEAVE REQUESTS REPORT
+    ══════════════════════════════════════════ -->
+    <div class="report-section" id="leavesSection">
+      <div class="print-header">
+        <h2>LGU Enrile — Leave Requests Report</h2>
+        <p id="leavePrintMeta">Generated: <?= date('F j, Y g:i A') ?></p>
+      </div>
+
+      <!-- Filter Bar -->
+      <div class="filter-bar no-print">
+        <!-- Period selector -->
+        <div class="filter-group" style="min-width:120px">
+          <div class="filter-label">Period</div>
+          <select class="filter-control" id="lvPeriod" onchange="togglePeriodControls()">
+            <option value="week">This Week</option>
+            <option value="month">By Month</option>
+            <option value="year" selected>By Year</option>
+            <option value="custom">Custom Range</option>
+          </select>
+        </div>
+        <div class="filter-group" id="lvYearGroup">
+          <div class="filter-label">Year</div>
+          <select class="filter-control" id="lvYear">
+            <?php for($y=$currentYear;$y>=$currentYear-4;$y--): ?>
+              <option value="<?=$y?>"><?=$y?></option>
             <?php endfor; ?>
           </select>
         </div>
-        <div class="panel-body no-pad">
-          <table class="rep-table" id="topLeaveTable">
-            <thead>
-              <tr>
-                <th style="width:40px">#</th>
-                <th>Employee</th>
-                <th>Department</th>
-                <th style="text-align:right">Requests</th>
-                <th style="text-align:right">Days Taken</th>
-              </tr>
-            </thead>
-            <tbody><tr><td colspan="5" class="empty-rep">Loading…</td></tr></tbody>
-          </table>
+        <div class="filter-group" id="lvMonthGroup" style="display:none">
+          <div class="filter-label">Month</div>
+          <select class="filter-control" id="lvMonth">
+            <?php $months=['January','February','March','April','May','June','July','August','September','October','November','December'];
+            foreach($months as $i=>$m): ?>
+              <option value="<?=$i+1?>" <?=$i+1==$currentMonth?'selected':''?>><?=$m?></option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+        <div class="filter-group" id="lvDateFromGroup" style="display:none">
+          <div class="filter-label">Date From</div>
+          <input type="date" class="filter-control" id="lvDateFrom">
+        </div>
+        <div class="filter-group" id="lvDateToGroup" style="display:none">
+          <div class="filter-label">Date To</div>
+          <input type="date" class="filter-control" id="lvDateTo">
+        </div>
+        <div class="filter-group">
+          <div class="filter-label">Department</div>
+          <select class="filter-control" id="lvDept">
+            <option value="">All Departments</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <div class="filter-label">Status</div>
+          <select class="filter-control" id="lvStatus">
+            <option value="Approved" selected>Approved</option>
+            <option value="Pending">Pending</option>
+            <option value="Denied">Denied</option>
+            <option value="Cancelled">Cancelled</option>
+            <option value="">All Status</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <div class="filter-label">Leave Type</div>
+          <select class="filter-control" id="lvType">
+            <option value="">All Types</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <div class="filter-label">Search Employee</div>
+          <input type="text" class="filter-control" id="lvSearch" placeholder="Name or Code…" onkeydown="if(event.key==='Enter') loadLeaveReport()">
+        </div>
+        <div class="filter-actions">
+          <button class="btn-filter btn-apply" onclick="loadLeaveReport()">🔍 Filter</button>
+          <button class="btn-filter btn-reset" onclick="resetLeaveFilters()">↺ Reset</button>
         </div>
       </div>
 
-      <!-- ══ ROW 5: Contracts Expiring ══ -->
+      <!-- Leave Summary Badges -->
+      <div class="result-bar" id="lvResultBar" style="display:none">
+        <div class="result-item"><span class="result-val" id="lvSumTotal">0</span><span class="result-lbl">Total</span></div>
+        <div style="width:1px;background:#bfdbfe;align-self:stretch;"></div>
+        <div class="result-item"><span class="result-val" id="lvSumApproved" style="color:#22c55e">0</span><span class="result-lbl">Approved</span></div>
+        <div class="result-item"><span class="result-val" id="lvSumPending" style="color:#f59e0b">0</span><span class="result-lbl">Pending</span></div>
+        <div class="result-item"><span class="result-val" id="lvSumDenied" style="color:#ef4444">0</span><span class="result-lbl">Denied</span></div>
+        <div class="result-item"><span class="result-val" id="lvSumDays" style="color:#2563eb">0</span><span class="result-lbl">Total Days</span></div>
+      </div>
+
+      <!-- Leave Table -->
       <div class="panel">
         <div class="panel-head">
-          <h3>⚠️ Contracts Expiring Soon</h3>
-          <div class="tabs" id="expiryTabs">
-            <button class="tab-btn active" onclick="loadExpiringContracts(30,this)">30 days</button>
-            <button class="tab-btn" onclick="loadExpiringContracts(60,this)">60 days</button>
-            <button class="tab-btn" onclick="loadExpiringContracts(90,this)">90 days</button>
+          <h3>📋 Leave Requests</h3>
+          <div class="panel-head-actions no-print">
+            <span id="lvCount" style="font-size:0.78rem;color:var(--gray-400);font-weight:700"></span>
           </div>
         </div>
         <div class="panel-body no-pad">
-          <table class="rep-table" id="expiryTable">
-            <thead>
-              <tr>
-                <th>Employee</th>
-                <th>Department</th>
-                <th>Position</th>
-                <th>Type</th>
-                <th style="text-align:right">End Date</th>
-                <th style="text-align:right">Days Left</th>
-              </tr>
-            </thead>
-            <tbody><tr><td colspan="6" class="empty-rep">Loading…</td></tr></tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- ══ ROW 6: Headcount Trend ══ -->
-      <div class="panel">
-        <div class="panel-head">
-          <h3>📈 Headcount Trend — Hired per Year</h3>
-        </div>
-        <div class="panel-body">
-          <div class="sparkline-wrap" id="headcountChart">
-            <p class="empty-rep" style="width:100%">Loading…</p>
+          <div class="rep-table-wrap">
+            <table class="rep-table" id="lvTable">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Employee</th>
+                  <th>Department</th>
+                  <th>Type</th>
+                  <th>Leave Type</th>
+                  <th>Date From</th>
+                  <th>Date To</th>
+                  <th class="num">Days</th>
+                  <th>Status</th>
+                  <th>Filed</th>
+                  <th>Approved Date</th>
+                  <th class="num">Credits Left</th>
+                  <th>Approved By</th>
+                </tr>
+              </thead>
+              <tbody id="lvTbody">
+                <tr><td colspan="13" class="loading-row">Use the filters above and click <strong>Filter</strong> to load data.</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
+    </div><!-- /leavesSection -->
 
-    </div><!-- /reports-wrap -->
   </div><!-- /content -->
 </div><!-- /main -->
 
 <script>
 var API    = './reports.php';
 var COLORS = ['#2563eb','#22c55e','#f59e0b','#ef4444','#0ea5e9','#a855f7','#14b8a6','#f97316','#ec4899','#84cc16'];
+var depts  = [];
+var leaveTypes = [];
 
-/* ── Init ──────────────────────────────────────────────────── */
-(async function init() {
+// ────────────────────────────────────────────────────────────
+//  INIT
+// ────────────────────────────────────────────────────────────
+(function init() {
+  loadDropdowns();
   loadOverview();
   loadDeptChart();
   loadTypeDonut();
   loadLeaveMonthly();
-  loadLeaveByType();
-  loadTopLeave();
-  loadBalanceSummary();
-  loadExpiringContracts(30, document.querySelector('#expiryTabs .tab-btn'));
-  loadHeadcount();
+  // Default-load employee roster
+  setTimeout(function(){ loadEmployeeRoster(); }, 300);
 })();
 
 async function fetchJSON(url) {
@@ -783,1121 +1019,406 @@ function fmt(d) {
   if (!d) return '—';
   return new Date(d).toLocaleDateString('en-PH',{year:'numeric',month:'short',day:'numeric'});
 }
+function fmtDT(d) {
+  if (!d) return '—';
+  return new Date(d).toLocaleDateString('en-PH',{year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+}
 
-/* ── Overview ──────────────────────────────────────────────── */
+// ────────────────────────────────────────────────────────────
+//  LOAD DROPDOWNS (departments, leave types)
+// ────────────────────────────────────────────────────────────
+async function loadDropdowns() {
+  try {
+    var dj = await fetchJSON('?action=departments_list');
+    if (dj.success) {
+      depts = dj.data;
+      ['empDept','lvDept'].forEach(function(id) {
+        var sel = document.getElementById(id);
+        depts.forEach(function(d) {
+          var opt = document.createElement('option');
+          opt.value = d.department_id;
+          opt.textContent = d.name;
+          sel.appendChild(opt);
+        });
+      });
+    }
+    var lj = await fetchJSON('?action=leave_types_list');
+    if (lj.success) {
+      leaveTypes = lj.data;
+      var sel = document.getElementById('lvType');
+      leaveTypes.forEach(function(lt) {
+        var opt = document.createElement('option');
+        opt.value = lt.leave_type_id;
+        opt.textContent = lt.name + ' (' + lt.code + ')';
+        sel.appendChild(opt);
+      });
+    }
+  } catch(e) { console.error('loadDropdowns', e); }
+}
+
+// ────────────────────────────────────────────────────────────
+//  TAB SWITCHING
+// ────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  ['overview','employees','leaves'].forEach(function(t) {
+    document.getElementById('tab-' + (t==='employees'?'employees':t==='leaves'?'leaves':'overview')).classList.remove('active');
+    var sectionId = t === 'overview' ? 'overviewSection' : t === 'employees' ? 'employeeSection' : 'leavesSection';
+    document.getElementById(sectionId).classList.remove('active');
+  });
+  var tabId = tab === 'overview' ? 'tab-overview' : tab === 'employees' ? 'tab-employees' : 'tab-leaves';
+  var secId = tab === 'overview' ? 'overviewSection' : tab === 'employees' ? 'employeeSection' : 'leavesSection';
+  document.getElementById(tabId).classList.add('active');
+  document.getElementById(secId).classList.add('active');
+}
+
+// ────────────────────────────────────────────────────────────
+//  PRINT
+// ────────────────────────────────────────────────────────────
+function printReport() {
+  window.print();
+}
+
+// ────────────────────────────────────────────────────────────
+//  OVERVIEW: Load Stats
+// ────────────────────────────────────────────────────────────
 async function loadOverview() {
   try {
-    var json = await fetchJSON('?action=overview');
-    if (!json.success) return;
-    var e = json.employees, l = json.leave, c = json.contracts;
+    var j = await fetchJSON('?action=overview');
+    if (!j.success) return;
+    var e = j.employees, l = j.leave;
     document.getElementById('ovTotalEmp').textContent    = e.total || 0;
     document.getElementById('ovActive').textContent      = e.active || 0;
-    document.getElementById('ovDepts').textContent       = json.departments || 0;
-    document.getElementById('ovLeaveReq').textContent    = l.total || 0;
-    document.getElementById('ovExpiring').textContent    = c.expiring_soon || 0;
-    document.getElementById('ovContracts').textContent   = c.active || 0;
-    document.getElementById('ovEmpSub').textContent      = (e.male||0) + ' male · ' + (e.female||0) + ' female';
-    document.getElementById('ovActiveSub').textContent   = (e.permanent||0) + ' perm · ' + (e.contractual||0) + ' contract';
-    document.getElementById('ovLeaveSub').textContent    = (l.approved||0) + ' approved · ' + (l.pending||0) + ' pending';
-    document.getElementById('ovContractSub').textContent = (c.expired||0) + ' expired';
-  } catch(err) { console.error('overview', err); }
+    document.getElementById('ovPermanent').textContent   = e.permanent || 0;
+    document.getElementById('ovJO').textContent          = e.job_order || 0;
+    document.getElementById('ovCasual').textContent      = e.casual || 0;
+    document.getElementById('ovCOS').textContent         = e.contractual || 0;
+    document.getElementById('ovLeaveApproved').textContent = l.approved || 0;
+    document.getElementById('ovDepts').textContent       = j.departments || 0;
+    document.getElementById('ovEmpSub').textContent      = (e.male||0)+' male · '+(e.female||0)+' female';
+    document.getElementById('ovActiveSub').textContent   = (e.on_leave||0)+' on leave · '+(e.inactive||0)+' inactive';
+    document.getElementById('ovJOSub').textContent       = 'COS: '+(e.contractual||0);
+    document.getElementById('ovLeaveSub').textContent    = (l.pending||0)+' pending · '+(l.total||0)+' total';
+  } catch(e) { console.error('overview', e); }
 }
 
-/* ── Dept bar chart ────────────────────────────────────────── */
+// ────────────────────────────────────────────────────────────
+//  OVERVIEW: Department Bar Chart
+// ────────────────────────────────────────────────────────────
 async function loadDeptChart() {
   try {
-    var json = await fetchJSON('?action=by_department');
-    var el   = document.getElementById('deptChart');
-    if (!json.success || !json.data.length) { el.innerHTML = '<p class="empty-rep">No department data.</p>'; return; }
-    var max = Math.max.apply(null, json.data.map(function(r){ return parseInt(r.total); }));
-    el.innerHTML = json.data.map(function(r, i) {
-      var pct = max > 0 ? Math.round(r.total / max * 100) : 0;
-      return '<div class="bar-row">' +
-        '<div class="bar-label" title="' + r.department + '">' + r.department + '</div>' +
-        '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:' + COLORS[i % COLORS.length] + '"></div></div>' +
-        '<div class="bar-val">' + r.total + '</div>' +
+    var j  = await fetchJSON('?action=by_department');
+    var el = document.getElementById('deptChart');
+    if (!j.success || !j.data.length) { el.innerHTML='<p class="empty-rep">No data.</p>'; return; }
+    var max = Math.max.apply(null, j.data.map(function(r){ return parseInt(r.total); }));
+    el.innerHTML = j.data.map(function(r,i) {
+      var pct = max>0 ? Math.round(r.total/max*100) : 0;
+      return '<div class="bar-row">'+
+        '<div class="bar-label" title="'+r.department+'">'+r.department+'</div>'+
+        '<div class="bar-track"><div class="bar-fill" style="width:'+pct+'%;background:'+COLORS[i%COLORS.length]+'"></div></div>'+
+        '<div class="bar-val">'+r.total+'</div>'+
       '</div>';
     }).join('');
-  } catch(err) { console.error('deptChart', err); }
+  } catch(e) { console.error('deptChart', e); }
 }
 
-/* ── Donut chart ───────────────────────────────────────────── */
+// ────────────────────────────────────────────────────────────
+//  OVERVIEW: Donut Chart
+// ────────────────────────────────────────────────────────────
 async function loadTypeDonut() {
   try {
-    var json = await fetchJSON('?action=by_type');
-    var el   = document.getElementById('typeDonut');
-    if (!json.success || !json.data.length) { el.innerHTML = '<p class="empty-rep">No data.</p>'; return; }
-    var total = json.data.reduce(function(s,r){ return s + parseInt(r.value); }, 0);
-    var R = 50, cx = 60, cy = 60, C = 2 * Math.PI * R, offset = 0;
-    var slices = json.data.map(function(r, i) {
-      var pct  = total > 0 ? parseInt(r.value) / total : 0;
-      var dash = pct * C, gap = C - dash;
-      var s = '<circle cx="' + cx + '" cy="' + cy + '" r="' + R + '" fill="none"' +
-              ' stroke="' + COLORS[i % COLORS.length] + '" stroke-width="20"' +
-              ' stroke-dasharray="' + dash.toFixed(2) + ' ' + gap.toFixed(2) + '"' +
-              ' stroke-dashoffset="' + (-(offset * C)).toFixed(2) + '"' +
-              ' transform="rotate(-90 ' + cx + ' ' + cy + ')"/>';
-      offset += pct;
+    var j  = await fetchJSON('?action=by_type');
+    var el = document.getElementById('typeDonut');
+    if (!j.success || !j.data.length) { el.innerHTML='<p class="empty-rep">No data.</p>'; return; }
+    var total = j.data.reduce(function(s,r){ return s+parseInt(r.value); },0);
+    var R=50, cx=60, cy=60, C=2*Math.PI*R, offset=0;
+    var slices = j.data.map(function(r,i) {
+      var pct=total>0?parseInt(r.value)/total:0;
+      var dash=pct*C, gap=C-dash;
+      var s='<circle cx="'+cx+'" cy="'+cy+'" r="'+R+'" fill="none"'+
+        ' stroke="'+COLORS[i%COLORS.length]+'" stroke-width="20"'+
+        ' stroke-dasharray="'+dash.toFixed(2)+' '+gap.toFixed(2)+'"'+
+        ' stroke-dashoffset="'+(-(offset*C)).toFixed(2)+'"'+
+        ' transform="rotate(-90 '+cx+' '+cy+')"/>';
+      offset+=pct;
       return s;
     }).join('');
-    var svg = '<svg width="120" height="120" viewBox="0 0 120 120" style="flex-shrink:0">' +
-      '<circle cx="60" cy="60" r="50" fill="none" stroke="var(--gray-100)" stroke-width="20"/>' +
-      slices +
-      '<text x="60" y="57" text-anchor="middle" font-size="16" font-weight="800" fill="var(--gray-800)" font-family="Nunito,sans-serif">' + total + '</text>' +
-      '<text x="60" y="70" text-anchor="middle" font-size="9" fill="var(--gray-400)" font-family="Nunito,sans-serif">TOTAL</text>' +
+    var svg='<svg width="120" height="120" viewBox="0 0 120 120" style="flex-shrink:0">'+
+      '<circle cx="60" cy="60" r="50" fill="none" stroke="var(--gray-100)" stroke-width="20"/>'+
+      slices+
+      '<text x="60" y="57" text-anchor="middle" font-size="16" font-weight="800" fill="var(--gray-800)" font-family="Nunito,sans-serif">'+total+'</text>'+
+      '<text x="60" y="70" text-anchor="middle" font-size="9" fill="var(--gray-400)" font-family="Nunito,sans-serif">TOTAL</text>'+
     '</svg>';
-    var legend = '<div class="donut-legend">' + json.data.map(function(r, i) {
-      var pct = total > 0 ? Math.round(parseInt(r.value) / total * 100) : 0;
-      return '<div class="donut-item">' +
-        '<div class="donut-dot" style="background:' + COLORS[i % COLORS.length] + '"></div>' +
-        '<span>' + r.label + '</span>' +
-        '<span class="donut-pct">' + r.value + ' <span style="font-size:0.68rem;color:var(--gray-400);font-weight:600">(' + pct + '%)</span></span>' +
+    var legend='<div class="donut-legend">'+j.data.map(function(r,i){
+      var pct=total>0?Math.round(parseInt(r.value)/total*100):0;
+      // Rename Contractual -> COS/Contractual
+      var label = r.label === 'Contractual' ? 'COS/Contractual' : r.label;
+      return '<div class="donut-item">'+
+        '<div class="donut-dot" style="background:'+COLORS[i%COLORS.length]+'"></div>'+
+        '<span>'+label+'</span>'+
+        '<span class="donut-pct">'+r.value+' <span style="font-size:.66rem;color:var(--gray-400);font-weight:600">('+pct+'%)</span></span>'+
       '</div>';
-    }).join('') + '</div>';
+    }).join('')+'</div>';
     el.innerHTML = svg + legend;
-  } catch(err) { console.error('typeDonut', err); }
+  } catch(e) { console.error('typeDonut', e); }
 }
 
-/* ── Monthly leave sparkline ───────────────────────────────── */
+// ────────────────────────────────────────────────────────────
+//  OVERVIEW: Monthly Leave Sparkline
+// ────────────────────────────────────────────────────────────
 async function loadLeaveMonthly() {
   var year = document.getElementById('leaveMonthYear').value;
+  var wrap = document.getElementById('monthlyChart');
   try {
-    var json = await fetchJSON('?action=leave_monthly&year=' + year);
-    var wrap = document.getElementById('monthlyChart');
-    if (!json.success || !json.data.length) {
-      wrap.innerHTML = '<p class="empty-rep" style="width:100%">No leave data for ' + year + '.</p>';
-      return;
+    var j = await fetchJSON('?action=leave_monthly&year='+year);
+    if (!j.success || !j.data.length) {
+      wrap.innerHTML='<p class="empty-rep" style="width:100%">No leave data for '+year+'.</p>'; return;
     }
-    var months  = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    var dataMap = {};
-    json.data.forEach(function(r){ dataMap[parseInt(r.month_num)] = r; });
-    var maxDays = 1;
-    json.data.forEach(function(r){ if (parseInt(r.days||0) > maxDays) maxDays = parseInt(r.days); });
-    wrap.innerHTML = months.map(function(m, i) {
-      var r    = dataMap[i + 1];
-      var days = r ? (parseInt(r.days) || 0) : 0;
-      var pct  = maxDays > 0 ? Math.round(days / maxDays * 100) : 0;
-      return '<div class="spark-col">' +
-        '<div class="spark-val" style="color:var(--primary)">' + (days || '') + '</div>' +
-        '<div class="spark-bar" style="height:' + Math.max(pct, days > 0 ? 5 : 1) + '%;background:' + (days > 0 ? 'var(--primary)' : 'var(--gray-200)') + '"></div>' +
-        '<span class="spark-lbl">' + m + '</span>' +
+    var months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var dataMap={};
+    j.data.forEach(function(r){ dataMap[parseInt(r.month_num)]=r; });
+    var maxD=1;
+    j.data.forEach(function(r){ if(parseInt(r.days||0)>maxD) maxD=parseInt(r.days); });
+    wrap.innerHTML = months.map(function(m,i) {
+      var r=dataMap[i+1];
+      var days=r?(parseInt(r.days)||0):0;
+      var pct=maxD>0?Math.round(days/maxD*100):0;
+      return '<div class="spark-col">'+
+        '<div class="spark-val" style="color:var(--primary)">'+(days||'')+'</div>'+
+        '<div class="spark-bar" style="height:'+Math.max(pct,days>0?5:1)+'%;background:'+(days>0?'var(--primary)':'var(--gray-200)')+'"></div>'+
+        '<span class="spark-lbl">'+m+'</span>'+
       '</div>';
     }).join('');
-  } catch(err) { console.error('leaveMonthly', err); }
+  } catch(e) { console.error('leaveMonthly', e); }
 }
 
-/* ── Leave by type table ───────────────────────────────────── */
-async function loadLeaveByType() {
-  var year  = document.getElementById('leaveTypeYear').value;
-  var tbody = document.querySelector('#leaveTypeTable tbody');
+// ────────────────────────────────────────────────────────────
+//  EMPLOYEE ROSTER
+// ────────────────────────────────────────────────────────────
+async function loadEmployeeRoster() {
+  var tbody  = document.getElementById('empTbody');
+  var dept   = document.getElementById('empDept').value;
+  var type   = document.getElementById('empType').value;
+  var status = document.getElementById('empStatus').value;
+  var search = document.getElementById('empSearch').value.trim();
+
+  tbody.innerHTML = '<tr><td colspan="10" class="loading-row">⏳ Loading employees…</td></tr>';
+
+  var params = '?action=employee_roster';
+  if (dept)   params += '&dept='   + encodeURIComponent(dept);
+  if (type)   params += '&type='   + encodeURIComponent(type);
+  if (status) params += '&status=' + encodeURIComponent(status);
+  if (search) params += '&search=' + encodeURIComponent(search);
+
   try {
-    var json = await fetchJSON('?action=leave_by_type&year=' + year);
-    if (!json.success || !json.data.length) {
-      tbody.innerHTML = '<tr><td colspan="4" class="empty-rep">No leave data for ' + year + '.</td></tr>';
+    var j = await fetchJSON(params);
+    if (!j.success) { tbody.innerHTML='<tr><td colspan="10" class="loading-row">Error loading data.</td></tr>'; return; }
+
+    // Update summary
+    var s = j.summary;
+    document.getElementById('empSumTotal').textContent   = s.total   || 0;
+    document.getElementById('empSumPerm').textContent    = s.permanent || 0;
+    document.getElementById('empSumJO').textContent      = s.job_order || 0;
+    document.getElementById('empSumCasual').textContent  = s.casual   || 0;
+    document.getElementById('empSumCOS').textContent     = s.contractual || 0;
+    document.getElementById('empSumActive').textContent  = s.active   || 0;
+    document.getElementById('empSumInactive').textContent= s.inactive || 0;
+    document.getElementById('empResultBar').style.display = 'flex';
+    document.getElementById('empCount').textContent = (j.data.length) + ' records';
+
+    // Update print meta
+    var filters = [];
+    if (dept)   filters.push('Dept: '+document.getElementById('empDept').options[document.getElementById('empDept').selectedIndex].text);
+    if (type)   filters.push('Type: '+type);
+    if (status) filters.push('Status: '+status);
+    if (search) filters.push('Search: "'+search+'"');
+    document.getElementById('empPrintMeta').textContent =
+      'Generated: ' + new Date().toLocaleString('en-PH') +
+      (filters.length ? ' | Filters: ' + filters.join(', ') : ' | All Employees');
+
+    if (!j.data.length) {
+      tbody.innerHTML='<tr><td colspan="10" class="loading-row">No employees found matching the filters.</td></tr>';
       return;
     }
-    tbody.innerHTML = json.data.map(function(r) {
-      return '<tr>' +
-        '<td style="font-weight:600">' + r.leave_type + '</td>' +
-        '<td class="num">' + (r.requests || 0) + '</td>' +
-        '<td class="num">' + (parseFloat(r.total_days)||0).toFixed(1) + '</td>' +
-        '<td class="num"><span class="badge badge-green">' + (r.approved || 0) + '</span></td>' +
+
+    var typeBadge = { 'Permanent':'badge-blue', 'Job Order':'badge-purple', 'Casual':'badge-amber', 'Contractual':'badge-teal' };
+    var statusBadge = { 'Active':'badge-green', 'Inactive':'badge-red', 'On Leave':'badge-amber', 'Resigned':'badge-gray', 'Retired':'badge-gray' };
+
+    tbody.innerHTML = j.data.map(function(r, i) {
+      var tb = typeBadge[r.employment_type] || 'badge-gray';
+      var sb = statusBadge[r.employment_status] || 'badge-gray';
+      var empType = r.employment_type === 'Contractual' ? 'COS/Contractual' : r.employment_type;
+      return '<tr>'+
+        '<td style="color:var(--gray-400);font-size:.75rem;font-weight:700">'+(i+1)+'</td>'+
+        '<td style="font-family:monospace;font-size:.80rem;color:var(--gray-600)">'+r.employee_code+'</td>'+
+        '<td><div style="font-weight:700;color:var(--gray-800)">'+r.full_name.replace(/\s+/g,' ').trim()+'</div></td>'+
+        '<td style="font-size:.80rem;color:var(--gray-600)">'+r.department+'</td>'+
+        '<td style="font-size:.79rem;color:var(--gray-600);max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+r.position_title+'">'+r.position_title+'</td>'+
+        '<td><span class="badge '+tb+'">'+empType+'</span></td>'+
+        '<td><span class="badge '+sb+'">'+r.employment_status+'</span></td>'+
+        '<td style="font-size:.80rem">'+r.gender+'</td>'+
+        '<td style="font-size:.80rem;white-space:nowrap">'+fmt(r.date_hired)+'</td>'+
+        '<td style="font-size:.76rem;color:var(--gray-600)">'+( r.contact_number||r.email_address||'—')+'</td>'+
       '</tr>';
     }).join('');
-  } catch(err) { console.error('leaveByType', err); }
-}
-
-/* ── Balance summary table ─────────────────────────────────── */
-async function loadBalanceSummary() {
-  var year  = document.getElementById('balYear').value;
-  var tbody = document.querySelector('#balSummaryTable tbody');
-  try {
-    var json = await fetchJSON('?action=balance_summary&year=' + year);
-    if (!json.success || !json.data.length) {
-      tbody.innerHTML = '<tr><td colspan="4" class="empty-rep">No balance data for ' + year + '.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = json.data.map(function(r) {
-      return '<tr>' +
-        '<td style="font-weight:600">' + r.leave_type + '</td>' +
-        '<td class="num">' + (parseFloat(r.total_credits)||0).toFixed(1) + '</td>' +
-        '<td class="num" style="color:#ef4444;font-weight:700">' + (parseFloat(r.used_days)||0).toFixed(1) + '</td>' +
-        '<td class="num" style="color:#22c55e;font-weight:700">' + (parseFloat(r.remaining_days)||0).toFixed(1) + '</td>' +
-      '</tr>';
-    }).join('');
-  } catch(err) { console.error('balanceSummary', err); }
-}
-
-/* ── Top leave takers ──────────────────────────────────────── */
-async function loadTopLeave() {
-  var year  = document.getElementById('topLeaveYear').value;
-  var tbody = document.querySelector('#topLeaveTable tbody');
-  try {
-    var json = await fetchJSON('?action=top_leave&year=' + year);
-    if (!json.success || !json.data.length) {
-      tbody.innerHTML = '<tr><td colspan="5" class="empty-rep">No approved leave data for ' + year + '.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = json.data.map(function(r, i) {
-      var medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '<span class="rank-num">' + (i+1) + '</span>';
-      return '<tr>' +
-        '<td style="text-align:center">' + medal + '</td>' +
-        '<td><div style="font-weight:700;color:var(--gray-800)">' + r.employee + '</div>' +
-            '<div style="font-size:0.70rem;color:var(--gray-400)">' + (r.employee_code||'') + '</div></td>' +
-        '<td><span class="badge badge-blue">' + r.department + '</span></td>' +
-        '<td class="num">' + r.requests + '</td>' +
-        '<td class="num"><strong style="color:var(--primary);font-size:0.93rem">' + (parseFloat(r.total_days)||0).toFixed(1) + '</strong></td>' +
-      '</tr>';
-    }).join('');
-  } catch(err) { console.error('topLeave', err); }
-}
-
-/* ── Contracts expiring ────────────────────────────────────── */
-async function loadExpiringContracts(days, btn) {
-  document.querySelectorAll('#expiryTabs .tab-btn').forEach(function(b){ b.classList.remove('active'); });
-  if (btn) btn.classList.add('active');
-  var tbody = document.querySelector('#expiryTable tbody');
-  try {
-    var json = await fetchJSON('?action=contracts_expiring&days=' + days);
-    if (!json.success || !json.data.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty-rep">✅ No contracts expiring within ' + days + ' days.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = json.data.map(function(r) {
-      var d   = parseInt(r.days_remaining);
-      var cls = d <= 7 ? 'dp-danger' : d <= 30 ? 'dp-warn' : 'dp-safe';
-      return '<tr>' +
-        '<td><div style="font-weight:700;color:var(--gray-800)">' + r.employee + '</div>' +
-            '<div style="font-size:0.70rem;color:var(--gray-400)">' + (r.employee_code||'') + '</div></td>' +
-        '<td>' + r.department + '</td>' +
-        '<td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.80rem;color:var(--gray-600)" title="' + r.position_title + '">' + r.position_title + '</td>' +
-        '<td><span class="badge badge-gray">' + r.contract_type + '</span></td>' +
-        '<td class="num" style="font-size:0.80rem">' + fmt(r.end_date) + '</td>' +
-        '<td class="num"><span class="days-pill ' + cls + '">' + d + 'd</span></td>' +
-      '</tr>';
-    }).join('');
-  } catch(err) { console.error('expiringContracts', err); }
-}
-
-/* ── Headcount sparkline ───────────────────────────────────── */
-async function loadHeadcount() {
-  var wrap = document.getElementById('headcountChart');
-  try {
-    var json = await fetchJSON('?action=headcount');
-    if (!json.success || !json.data.length) {
-      wrap.innerHTML = '<p class="empty-rep" style="width:100%">No headcount data.</p>';
-      return;
-    }
-    var maxH = Math.max.apply(null, json.data.map(function(r){ return parseInt(r.hired); }));
-    wrap.innerHTML = json.data.map(function(r) {
-      var pct = maxH > 0 ? Math.round(parseInt(r.hired) / maxH * 100) : 0;
-      return '<div class="spark-col">' +
-        '<div class="spark-val" style="color:var(--accent)">' + r.hired + '</div>' +
-        '<div class="spark-bar" style="height:' + Math.max(pct,4) + '%;background:var(--accent)"></div>' +
-        '<span class="spark-lbl">' + r.yr + '</span>' +
-      '</div>';
-    }).join('');
-  } catch(err) { console.error('headcount', err); }
-}
-
-
-
-/* ── Sidebar toggle ────────────────────────────────────────── */
-function showToast(msg, type) {
-  var t=document.createElement('div');
-  t.style.cssText='position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:9px;font-size:.84rem;font-weight:700;color:#fff;z-index:9999;animation:fadeIn .3s ease;box-shadow:0 4px 18px rgba(0,0,0,.18);';
-  t.style.background=type==='success'?'#22c55e':'#ef4444';
-  t.textContent=msg;
-  document.body.appendChild(t);
-  setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(function(){t.remove();},300);},3500);
-}
-
-
-function toggleProfileDropdown(){
-  const dd=document.getElementById('tbDropdown');if(dd)dd.classList.toggle('open');
-}
-document.addEventListener('click',function(e){
-  const w=document.getElementById('tbProfileWrap');
-  if(w&&!w.contains(e.target)){const dd=document.getElementById('tbDropdown');if(dd)dd.classList.remove('open');}
-});
-
-
-// ── Notification system (localStorage-persisted read state) ────────────────
-const NOTIF_STORAGE_KEY = 'hrms_admin_read_notifs';
-
-function getReadNotifs() {
-  try { return JSON.parse(localStorage.getItem(NOTIF_STORAGE_KEY) || '[]'); }
-  catch(e) { return []; }
-}
-function saveReadNotifs(ids) {
-  try {
-    // Keep only last 200 to avoid bloat
-    localStorage.setItem(NOTIF_STORAGE_KEY, JSON.stringify(ids.slice(-200)));
-  } catch(e) {}
-}
-function markNotifRead(id) {
-  const read = getReadNotifs();
-  if (!read.includes(id)) { read.push(id); saveReadNotifs(read); }
-}
-function markAllNotifsRead() {
-  const ids = Array.from(document.querySelectorAll('.notif-item[data-nid]'))
-                   .map(el => el.getAttribute('data-nid'));
-  const read = getReadNotifs();
-  ids.forEach(id => { if (!read.includes(id)) read.push(id); });
-  saveReadNotifs(read);
-}
-
-function applyReadState() {
-  const read = getReadNotifs();
-  let unread = 0;
-  document.querySelectorAll('.notif-item[data-nid]').forEach(el => {
-    const id = el.getAttribute('data-nid');
-    if (read.includes(id)) {
-      el.classList.remove('unread');
-    } else {
-      unread++;
-    }
-  });
-  const cnt = document.getElementById('adminNotifCount');
-  if (cnt) {
-    if (unread > 0) { cnt.textContent = unread; cnt.classList.add('show'); }
-    else            { cnt.textContent = '';      cnt.classList.remove('show'); }
+  } catch(e) {
+    tbody.innerHTML='<tr><td colspan="10" class="loading-row">Error: '+e.message+'</td></tr>';
+    console.error('loadEmployeeRoster', e);
   }
 }
 
-function toggleNotifPanel() {
-  const p  = document.getElementById('adminNotifPanel');
-  const dd = document.getElementById('tbDropdown');
-  if (dd) dd.classList.remove('open');
-  if (p) {
-    p.classList.toggle('open');
-    // Re-apply read state every time panel opens (syncs across tabs)
-    if (p.classList.contains('open')) applyReadState();
-  }
+function resetEmpFilters() {
+  document.getElementById('empDept').value   = '';
+  document.getElementById('empType').value   = '';
+  document.getElementById('empStatus').value = '';
+  document.getElementById('empSearch').value = '';
+  loadEmployeeRoster();
 }
 
-function clearNotifications() {
-  // Save all notification IDs as read in localStorage
-  const ids = Array.from(document.querySelectorAll('.notif-item[data-nid]'))
-                   .map(el => el.getAttribute('data-nid'));
-  const read = getReadNotifs();
-  ids.forEach(id => { if (id && !read.includes(id)) read.push(id); });
-  saveReadNotifs(read);
-  // Update DOM
-  document.querySelectorAll('.notif-item.unread').forEach(el => el.classList.remove('unread'));
-  const cnt = document.getElementById('adminNotifCount');
-  if (cnt) { cnt.classList.remove('show'); cnt.textContent = ''; }
-  const p = document.getElementById('adminNotifPanel');
-  if (p) p.classList.remove('open');
+// ────────────────────────────────────────────────────────────
+//  LEAVE REPORT
+// ────────────────────────────────────────────────────────────
+function togglePeriodControls() {
+  var period = document.getElementById('lvPeriod').value;
+  document.getElementById('lvYearGroup').style.display   = (period==='year'||period==='month') ? '' : 'none';
+  document.getElementById('lvMonthGroup').style.display  = (period==='month') ? '' : 'none';
+  document.getElementById('lvDateFromGroup').style.display = (period==='custom') ? '' : 'none';
+  document.getElementById('lvDateToGroup').style.display   = (period==='custom') ? '' : 'none';
 }
 
-document.addEventListener('click', function(e) {
-  const w = document.getElementById('adminNotifWrap');
-  if (w && !w.contains(e.target)) {
-    const p = document.getElementById('adminNotifPanel');
-    if (p) p.classList.remove('open');
-  }
-});
+async function loadLeaveReport() {
+  var tbody  = document.getElementById('lvTbody');
+  var period = document.getElementById('lvPeriod').value;
+  var year   = document.getElementById('lvYear').value;
+  var month  = document.getElementById('lvMonth').value;
+  var dept   = document.getElementById('lvDept').value;
+  var status = document.getElementById('lvStatus').value;
+  var type   = document.getElementById('lvType').value;
+  var search = document.getElementById('lvSearch').value.trim();
+  var dfrom  = document.getElementById('lvDateFrom').value;
+  var dto    = document.getElementById('lvDateTo').value;
 
-// Apply read state on page load
-document.addEventListener('DOMContentLoaded', applyReadState);
+  tbody.innerHTML = '<tr><td colspan="13" class="loading-row">⏳ Loading leave requests…</td></tr>';
 
-// ── Poll admin notifications every 60 seconds ──────────────────────────────
-async function pollAdminNotifications() {
+  var params = '?action=leave_report&period=' + period;
+  if (year)   params += '&year='      + year;
+  if (month)  params += '&month='     + month;
+  if (dept)   params += '&dept='      + encodeURIComponent(dept);
+  if (status) params += '&status='    + encodeURIComponent(status);
+  if (type)   params += '&leave_type='+ encodeURIComponent(type);
+  if (search) params += '&search='    + encodeURIComponent(search);
+  if (dfrom)  params += '&date_from=' + encodeURIComponent(dfrom);
+  if (dto)    params += '&date_to='   + encodeURIComponent(dto);
+
   try {
-    const r = await fetch('leave_requests.php?action=pending_count').then(r=>r.json());
-    if (typeof r.count === 'undefined') return;
-    // Re-fetch full notifications and update panel
-    const r2 = await fetch('notif_poll.php').then(r=>r.json()).catch(()=>null);
-    if (!r2 || !r2.success) {
-      // Fallback: just update the count badge
-      const unread = getUnreadCount();
-      const cnt = document.getElementById('adminNotifCount');
-      if (cnt) {
-        if (unread > 0) { cnt.textContent = unread; cnt.classList.add('show'); }
-        else            { cnt.textContent = '';     cnt.classList.remove('show'); }
-      }
+    var j = await fetchJSON(params);
+    if (!j.success) { tbody.innerHTML='<tr><td colspan="13" class="loading-row">Error loading data.</td></tr>'; return; }
+
+    // Update summary
+    var s = j.summary;
+    document.getElementById('lvSumTotal').textContent   = s.total   || 0;
+    document.getElementById('lvSumApproved').textContent= s.approved || 0;
+    document.getElementById('lvSumPending').textContent = s.pending  || 0;
+    document.getElementById('lvSumDenied').textContent  = s.denied   || 0;
+    document.getElementById('lvSumDays').textContent    = parseFloat(s.total_days||0).toFixed(1);
+    document.getElementById('lvResultBar').style.display= 'flex';
+    document.getElementById('lvCount').textContent = (j.data.length) + ' records';
+
+    // Update print meta
+    var periodLabel = {'week':'This Week','month':'Month '+month+'/'+year,'year':'Year '+year,'custom':'Custom Range'}[period]||period;
+    var filters = [periodLabel];
+    if (dept)   { var dname=document.getElementById('lvDept').options[document.getElementById('lvDept').selectedIndex].text; if(dname!='All Departments') filters.push(dname); }
+    if (status) filters.push('Status: '+status);
+    if (search) filters.push('Search: "'+search+'"');
+    document.getElementById('leavePrintMeta').textContent =
+      'Generated: ' + new Date().toLocaleString('en-PH') + ' | ' + filters.join(' | ');
+
+    if (!j.data.length) {
+      tbody.innerHTML='<tr><td colspan="13" class="loading-row">No leave requests found matching the filters.</td></tr>';
       return;
     }
-    const read   = getReadNotifs();
-    const notifs = r2.notifications || [];
-    // Update the panel list
-    const list = document.getElementById('adminNotifList');
-    if (list) {
-      if (!notifs.length) {
-        list.innerHTML = '<div class="notif-empty"><div class="ne-icon">🔔</div><p>All caught up!</p></div>';
-      } else {
-        list.innerHTML = notifs.map(n => {
-          const isRead = read.includes(n.nid);
-          return `<a class="notif-item ${isRead?'':'unread'}" href="${n.link}" data-nid="${n.nid}" onclick="markNotifRead(this.getAttribute('data-nid'));applyReadState();">
-            <div class="notif-ico" style="background:${n.color}22;">${n.icon}</div>
-            <div class="notif-body">
-              <div class="notif-title">${n.title}</div>
-              <div class="notif-text">${n.body}</div>
-              ${n.time ? '<div class="notif-time">'+adminFmtTime(n.time)+'</div>' : ''}
-            </div>
-          </a>`;
-        }).join('');
-      }
-    }
-    // Update count
-    const unread = notifs.filter(n => !read.includes(n.nid)).length;
-    const cnt = document.getElementById('adminNotifCount');
-    const hd  = document.getElementById('adminNotifHdCount');
-    if (cnt) { cnt.textContent = unread||''; unread ? cnt.classList.add('show') : cnt.classList.remove('show'); }
-    if (hd)  { hd.textContent = notifs.length + ' item' + (notifs.length!==1?'s':''); }
-  } catch(e) {}
+
+    var statusBadge = { 'Approved':'badge-green','Denied':'badge-red','Pending':'badge-amber','Cancelled':'badge-gray' };
+    var typeBadge   = { 'Permanent':'badge-blue','Job Order':'badge-purple','Casual':'badge-amber','Contractual':'badge-teal' };
+
+    tbody.innerHTML = j.data.map(function(r, i) {
+      var sb  = statusBadge[r.status] || 'badge-gray';
+      var tb  = typeBadge[r.employment_type] || 'badge-gray';
+      var empType = r.employment_type === 'Contractual' ? 'COS' : r.employment_type;
+      var credits = parseFloat(r.credits_left||0).toFixed(1);
+      var credColor = parseFloat(r.credits_left||0) <= 0 ? 'color:#ef4444;font-weight:800' :
+                      parseFloat(r.credits_left||0) <= 3 ? 'color:#f59e0b;font-weight:800' : 'color:#22c55e;font-weight:800';
+      return '<tr>'+
+        '<td style="color:var(--gray-400);font-size:.73rem;font-weight:700">'+(i+1)+'</td>'+
+        '<td>'+
+          '<div style="font-weight:700;color:var(--gray-800);font-size:.83rem">'+r.employee_name+'</div>'+
+          '<div style="font-size:.68rem;color:var(--gray-400)">'+r.employee_code+'</div>'+
+        '</td>'+
+        '<td style="font-size:.79rem">'+r.department+'</td>'+
+        '<td><span class="badge '+tb+'" style="font-size:.64rem">'+empType+'</span></td>'+
+        '<td><span class="badge badge-blue" style="font-size:.64rem">'+r.leave_code+'</span> <span style="font-size:.78rem;color:var(--gray-600)">'+r.leave_type+'</span></td>'+
+        '<td style="font-size:.79rem;white-space:nowrap">'+fmt(r.date_from)+'</td>'+
+        '<td style="font-size:.79rem;white-space:nowrap">'+fmt(r.date_to)+'</td>'+
+        '<td class="num"><strong style="color:var(--primary)">'+parseFloat(r.days_requested||0).toFixed(1)+'</strong></td>'+
+        '<td><span class="badge '+sb+'">'+r.status+'</span></td>'+
+        '<td style="font-size:.76rem;white-space:nowrap">'+fmt(r.filed_at)+'</td>'+
+        '<td style="font-size:.76rem;white-space:nowrap">'+(r.reviewed_at?fmt(r.reviewed_at):'—')+'</td>'+
+        '<td class="num"><span style="'+credColor+'">'+credits+'</span></td>'+
+        '<td style="font-size:.76rem;color:var(--gray-600)">'+( r.approved_by||'—')+'</td>'+
+      '</tr>';
+    }).join('');
+  } catch(e) {
+    tbody.innerHTML='<tr><td colspan="13" class="loading-row">Error: '+e.message+'</td></tr>';
+    console.error('loadLeaveReport', e);
+  }
 }
 
-function getUnreadCount() {
-  const read = getReadNotifs();
-  return document.querySelectorAll('.notif-item[data-nid]')
-    .length - Array.from(document.querySelectorAll('.notif-item[data-nid]'))
-    .filter(el => read.includes(el.getAttribute('data-nid'))).length;
+function resetLeaveFilters() {
+  document.getElementById('lvPeriod').value = 'year';
+  document.getElementById('lvYear').value   = '<?= $currentYear ?>';
+  document.getElementById('lvMonth').value  = '<?= $currentMonth ?>';
+  document.getElementById('lvDept').value   = '';
+  document.getElementById('lvStatus').value = 'Approved';
+  document.getElementById('lvType').value   = '';
+  document.getElementById('lvSearch').value = '';
+  document.getElementById('lvDateFrom').value = '';
+  document.getElementById('lvDateTo').value   = '';
+  togglePeriodControls();
+  loadLeaveReport();
 }
 
-function adminFmtTime(dt) {
-  if (!dt) return '';
-  const d = Math.floor((Date.now() - new Date(dt+'Z').getTime()) / 1000);
-  if (isNaN(d)) return '';
-  if (d < 60)    return 'Just now';
-  if (d < 3600)  return Math.floor(d/60) + 'm ago';
-  if (d < 86400) return Math.floor(d/3600) + 'h ago';
-  return new Date(dt).toLocaleDateString('en-PH',{month:'short',day:'numeric'});
-}
-
-// Start polling
-document.addEventListener('DOMContentLoaded', function() {
-  setTimeout(pollAdminNotifications, 5000); // first poll after 5s
-  setInterval(pollAdminNotifications, 60000); // then every 60s
-});
-
+// ────────────────────────────────────────────────────────────
+//  UTILITY
+// ────────────────────────────────────────────────────────────
 function toggleSidebar() {
   document.getElementById('sidebar').classList.toggle('open');
   document.getElementById('overlayMob').classList.toggle('show');
 }
+
+function toggleProfileDropdown() {
+  var dd=document.getElementById('tbDropdown');
+  if(dd) dd.classList.toggle('open');
+}
+document.addEventListener('click',function(e){
+  var w=document.getElementById('tbProfileWrap');
+  if(w&&!w.contains(e.target)){ var dd=document.getElementById('tbDropdown'); if(dd) dd.classList.remove('open'); }
+});
+
+function toggleNotifPanel() {
+  var p=document.getElementById('adminNotifPanel');
+  if(p) p.classList.toggle('open');
+}
+document.addEventListener('click',function(e){
+  var w=document.getElementById('adminNotifWrap');
+  if(w&&!w.contains(e.target)){ var p=document.getElementById('adminNotifPanel'); if(p) p.classList.remove('open'); }
+});
+
+function clearNotifications() {
+  document.querySelectorAll('.notif-item.unread').forEach(function(el){ el.classList.remove('unread'); });
+  var cnt=document.getElementById('adminNotifCount');
+  if(cnt){ cnt.classList.remove('show'); cnt.textContent=''; }
+  var p=document.getElementById('adminNotifPanel');
+  if(p) p.classList.remove('open');
+}
 </script>
-  <!-- ══ CHAT WIDGET ══ -->
-  <style>
-    /* ── Wrap & animation ── */
-    .cw-wrap{position:fixed;bottom:24px;right:24px;width:420px;height:600px;background:#fff;border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.28),0 0 1px rgba(0,0,0,.1);display:none;flex-direction:column;z-index:9999;overflow:hidden;font-family:'Nunito',sans-serif;backdrop-filter:blur(10px);}
-        .cw-wrap.open{display:flex;animation:cwIn .3s cubic-bezier(.34,1.4,.64,1) both;}
-        @keyframes cwIn{0%{opacity:0;transform:scale(.85) translateY(30px);filter:blur(6px);}100%{opacity:1;transform:scale(1) translateY(0);filter:blur(0);}}
-        
-        /* ──── HEADER ──── */
-        .cw-hd{background:linear-gradient(135deg,#1e40af 0%,#2563eb 50%,#22c55e 100%);padding:16px 18px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;position:relative;overflow:hidden;}
-        .cw-hd::before{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.05),transparent);animation:shimmerAnim 3s infinite;}
-        @keyframes shimmerAnim{0%{transform:translateX(-100%);}100%{transform:translateX(100%);}}
-        .cw-hd-left{display:flex;align-items:center;gap:12px;position:relative;z-index:1;}
-        .cw-hd-icon{width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;font-size:1.1rem;box-shadow:0 4px 12px rgba(0,0,0,.15),inset 0 1px 2px rgba(255,255,255,.3);}
-        .cw-hd-title{font-size:.98rem;font-weight:800;color:#fff;letter-spacing:-.5px;}
-        .cw-hd-sub{font-size:.62rem;color:rgba(255,255,255,.75);margin-top:2px;font-weight:500;}
-        .cw-hd-close{width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;font-size:.9rem;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .2s;position:relative;z-index:1;}
-        .cw-hd-close:hover{background:rgba(255,255,255,.25);transform:rotate(90deg);box-shadow:0 2px 8px rgba(0,0,0,.1);}
-        .cw-hd-close:focus-visible{outline:2px solid #fff;outline-offset:2px;}
-        
-        /* ──── BODY LAYOUT ──── */
-        .cw-body{display:flex;flex:1;overflow:hidden;background:#fafbfc;}
-        .cw-contacts{width:130px;flex-shrink:0;border-right:1px solid #e5e7eb;display:flex;flex-direction:column;background:linear-gradient(to bottom,#ffffff,#f9fafb);overflow:hidden;}
-        .cw-contacts-hd{padding:11px 10px;font-size:.56rem;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:.12em;border-bottom:1px solid #e5e7eb;background:#ffffff;}
-        .cw-srch{padding:8px;border-bottom:1px solid #e5e7eb;background:#fff;}
-        .cw-srch input{width:100%;padding:6px 10px;border:1.5px solid #e5e7eb;border-radius:8px;font-family:'Nunito',sans-serif;font-size:.68rem;outline:none;color:#1e293b;background:#f3f4f6;transition:all .2s;font-weight:500;}
-        .cw-srch input:focus{border-color:#2563eb;background:#fff;box-shadow:0 0 0 3px rgba(37,99,235,.1);}
-        .cw-srch input::placeholder{color:#a1afc9;}
-        .cw-clist{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#d1d5db transparent;padding:4px 0;}
-        
-        /* ──── CONTACT ITEMS ──── */
-        .cw-ci{display:flex;flex-direction:column;align-items:center;padding:10px 6px;cursor:pointer;border:2px solid transparent;transition:all .2s ease;position:relative;text-align:center;border-radius:10px;margin:2px 4px;}
-        .cw-ci:hover{background:#f0f4f8;border-color:#e5e7eb;}
-        .cw-ci.active{background:linear-gradient(135deg,#dbeafe 0%,#eff6ff 100%);border-color:#2563eb;box-shadow:0 0 0 1px #2563eb inset,0 2px 6px rgba(37,99,235,.1);}
-        .cw-av{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:800;color:#fff;margin-bottom:4px;flex-shrink:0;box-shadow:0 2px 8px rgba(0,0,0,.12);border:2px solid rgba(255,255,255,.4);position:relative;}
-        .cw-av::after{content:'';position:absolute;inset:0;border-radius:50%;background:radial-gradient(circle at 70% 30%,rgba(255,255,255,.3),transparent);}
-        .cw-cn{font-size:.63rem;font-weight:700;color:#1e293b;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:112px;}
-        .cw-cs{font-size:.54rem;color:#64748b;margin-top:2px;font-weight:500;}
-        .cw-cu{position:absolute;top:2px;right:2px;background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;font-size:.48rem;font-weight:800;padding:2px 5px;border-radius:10px;min-width:16px;text-align:center;box-shadow:0 2px 4px rgba(0,0,0,.15);}
-        .cw-cempty{padding:20px 8px;text-align:center;color:#94a3b8;font-size:.70rem;line-height:1.6;}
-        
-        /* ──── CHAT AREA ──── */
-        .cw-chat{flex:1;display:flex;flex-direction:column;overflow:hidden;background:#fafbfc;}
-        .cw-chat-hd{padding:12px 14px;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;gap:10px;flex-shrink:0;background:linear-gradient(to bottom,#ffffff,#f9fafb);box-shadow:0 1px 3px rgba(0,0,0,.03);}
-        .cw-chat-av{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.66rem;font-weight:800;color:#fff;flex-shrink:0;box-shadow:0 2px 8px rgba(0,0,0,.12);border:2px solid rgba(255,255,255,.4);}
-        .cw-chat-name{font-size:.85rem;font-weight:800;color:#0f172a;letter-spacing:-.3px;}
-        .cw-chat-sub{font-size:.60rem;color:#64748b;margin-top:2px;font-weight:500;}
-        .cw-chat-del{width:28px;height:28px;border-radius:8px;border:1.5px solid #fecaca;background:#fff;color:#dc2626;display:none;align-items:center;justify-content:center;cursor:pointer;transition:all .15s;box-shadow:0 1px 4px rgba(0,0,0,.08);font-size:.82rem;}
-    .cw-chat-del:hover{background:#fef2f2;border-color:#ef4444;box-shadow:0 2px 8px rgba(239,68,68,.18);}
-    .cw-chat-del:focus-visible{outline:2px solid #ef4444;outline-offset:2px;}
-    .cw-online{width:10px;height:10px;border-radius:50%;background:#22c55e;flex-shrink:0;box-shadow:0 0 0 3px #fff,0 0 0 4px #22c55e;animation:pulse 2s cubic-bezier(.4,0,.6,1) infinite;}
-        @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.8;}}
-        
-        /* ──── NO SELECTION STATE ──── */
-        .cw-nosel{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#94a3b8;text-align:center;padding:24px;background:linear-gradient(135deg,#fafbfc 0%,#f0f4f8 100%);}
-        .cw-nosel-ic{font-size:3.2rem;margin-bottom:12px;animation:float 3s ease-in-out infinite;}
-        @keyframes float{0%,100%{transform:translateY(0px);}50%{transform:translateY(-8px);}}
-        .cw-nosel h4{font-size:.88rem;font-weight:800;color:#334155;margin-bottom:6px;}
-        .cw-nosel p{font-size:.74rem;line-height:1.6;color:#64748b;}
-        
-        /* ──── MESSAGE AREA ──── */
-        .cw-msgs{flex:1;overflow-y:auto;padding:14px 12px;display:flex;flex-direction:column;gap:8px;background:#fafbfc;scrollbar-width:thin;scrollbar-color:#d1d5db transparent;}
-        .cw-msgs::-webkit-scrollbar{width:6px;}
-        .cw-msgs::-webkit-scrollbar-track{background:transparent;}
-        .cw-msgs::-webkit-scrollbar-thumb{background:#d1d5db;border-radius:3px;}
-        .cw-mrow{display:flex;align-items:flex-end;gap:6px;position:relative;margin-bottom:2px;animation:msgSlide .3s ease-out;}
-        @keyframes msgSlide{from{opacity:0;transform:translateY(12px);filter:blur(3px);}to{opacity:1;transform:translateY(0);filter:blur(0);}}
-        .cw-mrow.mine{flex-direction:row-reverse;}
-        .cw-mrow:hover .cw-msg-actions{opacity:1;}
-        .cw-mav{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.54rem;font-weight:800;color:#fff;flex-shrink:0;box-shadow:0 1px 4px rgba(0,0,0,.1);}
-        .cw-msg-wrap{display:flex;flex-direction:column;max-width:80%;}
-        .cw-mrow.mine .cw-msg-wrap{align-items:flex-end;}
-        .cw-bubble{padding:10px 14px;border-radius:16px;font-size:.81rem;line-height:1.5;word-break:break-word;transition:all .2s;}
-        .cw-mrow.mine .cw-bubble{background:linear-gradient(135deg,#2563eb 0%,#1e40af 100%);color:#fff;border-bottom-right-radius:3px;box-shadow:0 2px 8px rgba(37,99,235,.25);}
-        .cw-mrow.mine .cw-bubble:hover{box-shadow:0 4px 12px rgba(37,99,235,.35);transform:translateY(-1px);}
-        .cw-mrow.them .cw-bubble{background:#fff;color:#1e293b;border:1.5px solid #e5e7eb;border-bottom-left-radius:3px;box-shadow:0 1px 3px rgba(0,0,0,.05);}
-        .cw-mrow.them .cw-bubble:hover{background:#f9fafb;border-color:#d1d5db;}
-        .cw-bubble.edited::after{content:' ✎ edited';font-size:.54rem;opacity:.6;font-style:italic;font-weight:500;}
-        .cw-bubble.unsent{background:#e5e7eb !important;color:#64748b !important;border:1.5px dashed #b4b8c0 !important;font-style:italic;box-shadow:none !important;opacity:.7;}
-        .cw-mt{font-size:.56rem;color:#94a3b8;margin-top:4px;display:flex;align-items:center;gap:4px;font-weight:500;}
-        .cw-mrow.mine .cw-mt{justify-content:flex-end;}
-        .cw-seen{color:#60a5fa;font-size:.60rem;font-weight:600;}
-        
-        /* ──── MESSAGE ACTIONS ──── */
-        .cw-msg-actions{position:absolute;top:-34px;display:flex;gap:4px;opacity:0;transition:opacity .15s;z-index:10;}
-        .cw-mrow.mine .cw-msg-actions{right:0;}
-        .cw-mrow.them .cw-msg-actions{left:0;}
-        .cw-act-btn{width:28px;height:28px;border-radius:8px;background:#fff;border:1.5px solid #e5e7eb;display:flex;align-items:center;justify-content:center;font-size:.74rem;cursor:pointer;transition:all .15s;box-shadow:0 2px 6px rgba(0,0,0,.1);font-weight:600;}
-        .cw-act-btn:hover{background:#eff6ff;border-color:#2563eb;box-shadow:0 2px 8px rgba(37,99,235,.2);transform:scale(1.05);}
-        .cw-act-btn:focus-visible{outline:2px solid #2563eb;outline-offset:2px;}
-        .cw-act-btn.del:hover{background:#fee2e2;border-color:#ef4444;box-shadow:0 2px 8px rgba(239,68,68,.2);}
-        
-        /* ──── EDIT BAR ──── */
-        .cw-edit-bar{display:none;padding:8px 12px;background:linear-gradient(135deg,#eff6ff,#dbeafe);border-top:2px solid #bfdbfe;border-bottom:1px solid #bfdbfe;font-size:.74rem;color:#1e40af;font-weight:700;align-items:center;gap:8px;flex-shrink:0;}
-        .cw-edit-bar.show{display:flex;animation:slideDown .2s ease-out;}
-        @keyframes slideDown{from{opacity:0;transform:translateY(-8px);}to{opacity:1;transform:translateY(0);}}
-        .cw-edit-cancel{margin-left:auto;background:none;border:none;color:#64748b;cursor:pointer;font-size:.82rem;font-weight:600;transition:color .2s;}
-        .cw-edit-cancel:hover{color:#ef4444;}
-        .cw-ddiv{text-align:center;font-size:.57rem;color:#94a3b8;font-weight:700;padding:6px 0;position:relative;margin:4px 0;}
-        .cw-ddiv::before{content:'';position:absolute;top:50%;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,#e5e7eb,transparent);}
-        .cw-ddiv span{background:#fafbfc;padding:0 10px;position:relative;display:inline-block;}
-        
-        /* ──── INPUT AREA ──── */
-        .cw-inp-row{display:flex;gap:10px;padding:12px 12px;background:#fff;border-top:1px solid #e5e7eb;align-items:flex-end;flex-shrink:0;box-shadow:0 -1px 3px rgba(0,0,0,.02);}
-        .cw-inp{flex:1;padding:10px 14px;border:1.5px solid #e5e7eb;border-radius:20px;font-family:'Nunito',sans-serif;font-size:.83rem;color:#1e293b;resize:none;outline:none;max-height:90px;line-height:1.5;transition:all .2s;background:#f9fafb;font-weight:500;}
-        .cw-inp:focus{border-color:#2563eb;background:#fff;box-shadow:0 0 0 3px rgba(37,99,235,.1);}
-        .cw-inp:disabled{background:#f3f4f6;color:#94a3b8;cursor:not-allowed;}
-        .cw-inp::placeholder{color:#94a3b8;}
-        .cw-sendbtn{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#2563eb,#1e40af);color:#fff;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:.95rem;flex-shrink:0;transition:all .2s;box-shadow:0 4px 12px rgba(37,99,235,.35);font-weight:600;position:relative;overflow:hidden;}
-        .cw-sendbtn::before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 30% 30%,rgba(255,255,255,.3),transparent);opacity:0;}
-        .cw-sendbtn:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(37,99,235,.45);}
-        .cw-sendbtn:active{transform:none;box-shadow:0 2px 8px rgba(37,99,235,.25);}
-        .cw-sendbtn:focus-visible{outline:2px solid #2563eb;outline-offset:3px;}
-        .cw-sendbtn:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none;}
-    
-        /* ════════════════════════════════════════════════════════
-           RESPONSIVE DESIGN FOR CHAT WIDGET
-           ════════════════════════════════════════════════════════ */
-    
-        /* Tablet Landscape (1280px and below) */
-        @media (max-width:1280px){
-          .cw-wrap{width:380px;height:560px;}
-          .cw-contacts{width:120px;}
-          .cw-av{width:36px;height:36px;font-size:.66rem;}
-          .cw-cn{font-size:.61rem;max-width:110px;}
-          .cw-cs{font-size:.54rem;max-width:110px;}
-          .cw-chat-name{font-size:.81rem;}
-          .cw-chat-sub{font-size:.59rem;}
-        }
-    
-        /* Tablet Portrait & iPad (768px and below) */
-        @media (max-width:768px){
-          .cw-wrap{width:340px;height:520px;bottom:16px;right:16px;box-shadow:0 16px 48px rgba(0,0,0,.25);}
-          .cw-contacts{width:110px;}
-          .cw-contacts-hd{font-size:.55rem;padding:10px 8px;}
-          .cw-av{width:32px;height:32px;font-size:.60rem;margin-bottom:3px;}
-          .cw-cn{font-size:.59rem;max-width:100px;}
-          .cw-cs{font-size:.53rem;max-width:100px;}
-          .cw-hd{padding:14px 14px;}
-          .cw-hd-title{font-size:.92rem;}
-          .cw-hd-sub{font-size:.60rem;}
-          .cw-hd-icon{width:36px;height:36px;font-size:1rem;}
-          .cw-hd-close{width:30px;height:30px;font-size:.85rem;}
-          .cw-chat-hd{padding:10px 12px;gap:8px;}
-          .cw-chat-av{width:32px;height:32px;font-size:.60rem;}
-          .cw-chat-name{font-size:.79rem;}
-          .cw-chat-sub{font-size:.58rem;}
-          .cw-msgs{padding:11px 9px;gap:6px;}
-          .cw-mav{width:22px;height:22px;font-size:.50rem;}
-          .cw-bubble{padding:9px 12px;font-size:.77rem;}
-          .cw-inp-row{padding:9px 10px;gap:8px;}
-          .cw-inp{font-size:.78rem;padding:8px 12px;}
-          .cw-sendbtn{width:36px;height:36px;font-size:.88rem;}
-          .cw-edit-bar{padding:7px 10px;font-size:.70rem;}
-          .cw-act-btn{width:26px;height:26px;font-size:.70rem;}
-          .cw-srch input{font-size:.67rem;padding:5px 9px;}
-        }
-    
-        /* Large Phones (600px and below) */
-        @media (max-width:600px){
-          .cw-wrap{width:100%;height:100%;max-width:100vw;max-height:100vh;bottom:0;right:0;border-radius:0;position:fixed !important;box-shadow:none;}
-          .cw-wrap.open{animation:cwInMobile .32s cubic-bezier(.34,1.4,.64,1) both;}
-          @keyframes cwInMobile{0%{opacity:0;transform:translateY(100%);filter:blur(8px);}100%{opacity:1;transform:translateY(0);filter:blur(0);}}
-          .cw-body{flex-direction:column-reverse;}
-          .cw-contacts{width:100%;height:auto;border-right:none;border-top:1px solid #e5e7eb;flex-shrink:0;max-height:48vh;background:#fff;}
-          .cw-contacts-hd{display:none;}
-          .cw-srch{display:none;}
-          .cw-clist{max-height:48vh;display:flex;gap:8px;padding:8px;overflow-x:auto;overflow-y:hidden;border-bottom:1px solid #e5e7eb;background:#fff;scroll-behavior:smooth;}
-          .cw-clist::-webkit-scrollbar{height:4px;}
-          .cw-clist::-webkit-scrollbar-track{background:transparent;}
-          .cw-clist::-webkit-scrollbar-thumb{background:#d1d5db;border-radius:2px;}
-          .cw-ci{flex:none;width:72px;height:auto;padding:8px 4px;border:none;border-radius:10px;background:#f3f4f6;flex-shrink:0;}
-          .cw-ci:hover{background:#eff6ff;}
-          .cw-ci.active{background:#dbeafe;border:none;border-top:3px solid #2563eb;box-shadow:0 0 0 1px #2563eb inset;}
-          .cw-av{width:42px;height:42px;font-size:.70rem;margin-bottom:5px;}
-          .cw-cn{font-size:.63rem;max-width:68px;overflow:visible;white-space:normal;margin-bottom:2px;}
-          .cw-cs{display:none;}
-          .cw-nosel{padding:16px;}
-          .cw-nosel-ic{font-size:2.4rem;margin-bottom:10px;}
-          .cw-nosel h4{font-size:.82rem;}
-          .cw-nosel p{font-size:.70rem;}
-          .cw-hd{padding:12px 14px;gap:10px;}
-          .cw-hd-left{gap:10px;}
-          .cw-hd-icon{width:36px;height:36px;font-size:.95rem;}
-          .cw-hd-title{font-size:.90rem;}
-          .cw-hd-sub{font-size:.59rem;}
-          .cw-hd-close{width:32px;height:32px;font-size:.88rem;}
-          .cw-chat-hd{padding:10px 12px;gap:8px;}
-          .cw-chat-av{width:32px;height:32px;font-size:.60rem;}
-          .cw-chat-name{font-size:.80rem;}
-          .cw-chat-sub{font-size:.58rem;}
-          .cw-online{width:10px;height:10px;}
-          .cw-msgs{padding:10px 8px;gap:6px;flex:1;overflow-y:auto;}
-          .cw-mrow{gap:5px;margin-bottom:1px;}
-          .cw-mav{width:20px;height:20px;font-size:.48rem;}
-          .cw-msg-wrap{max-width:85%;}
-          .cw-bubble{padding:8px 11px;font-size:.75rem;line-height:1.4;}
-          .cw-mt{font-size:.55rem;margin-top:3px;}
-          .cw-msg-actions{top:-30px;gap:3px;}
-          .cw-act-btn{width:24px;height:24px;font-size:.66rem;}
-          .cw-ddiv{font-size:.55rem;padding:4px 0;margin:2px 0;}
-          .cw-edit-bar{padding:6px 10px;font-size:.68rem;gap:6px;}
-          .cw-inp-row{padding:8px 10px;gap:8px;min-height:50px;}
-          .cw-inp{padding:8px 11px;font-size:.76rem;max-height:80px;min-height:36px;}
-          .cw-sendbtn{width:38px;height:38px;font-size:.86rem;min-width:38px;min-height:38px;}
-        }
-    
-        /* Standard Phones (480px and below) */
-        @media (max-width:480px){
-          .cw-clist{max-height:42vh;padding:6px;}
-          .cw-ci{width:64px;padding:6px 3px;}
-          .cw-av{width:38px;height:38px;font-size:.64rem;}
-          .cw-cn{font-size:.60rem;max-width:60px;}
-          .cw-msgs{padding:8px 6px;gap:5px;}
-          .cw-bubble{padding:7px 10px;font-size:.73rem;}
-          .cw-mav{width:18px;height:18px;font-size:.44rem;}
-          .cw-inp-row{padding:7px 8px;min-height:46px;}
-          .cw-inp{padding:7px 10px;font-size:.74rem;min-height:34px;}
-          .cw-sendbtn{width:36px;height:36px;font-size:.82rem;min-width:36px;min-height:36px;}
-          .cw-chat-hd{padding:9px 11px;}
-          .cw-chat-av{width:30px;height:30px;font-size:.56rem;}
-          .cw-chat-name{font-size:.76rem;}
-          .cw-chat-sub{font-size:.55rem;}
-          .cw-hd-icon{width:32px;height:32px;font-size:.90rem;}
-          .cw-hd-title{font-size:.86rem;}
-          .cw-msg-wrap{max-width:88%;}
-          .cw-nosel-ic{font-size:2rem;}
-        }
-    
-        /* Extra Small Phones (380px and below) */
-        @media (max-width:380px){
-          .cw-clist{max-height:40vh;padding:5px;}
-          .cw-ci{width:58px;padding:5px 2px;}
-          .cw-av{width:34px;height:34px;font-size:.58rem;}
-          .cw-cn{font-size:.56rem;max-width:54px;}
-          .cw-bubble{padding:6px 9px;font-size:.70rem;line-height:1.3;}
-          .cw-mt{font-size:.53rem;margin-top:2px;}
-          .cw-inp{font-size:.72rem;padding:6px 10px;}
-          .cw-sendbtn{width:34px;height:34px;font-size:.80rem;min-width:34px;min-height:34px;}
-          .cw-chat-hd{padding:8px 10px;gap:6px;}
-          .cw-chat-av{width:28px;height:28px;font-size:.52rem;}
-          .cw-chat-name{font-size:.72rem;}
-          .cw-chat-sub{font-size:.52rem;}
-          .cw-nosel{padding:12px;}
-          .cw-msg-wrap{max-width:90%;}
-          .cw-hd{padding:10px 12px;}
-          .cw-hd-close{width:28px;height:28px;font-size:.82rem;}
-        }
-    
-        /* ════════════════════════════════════════════════════════
-           TOUCH DEVICE OPTIMIZATIONS
-           ════════════════════════════════════════════════════════ */
-        @media (hover:none) and (pointer:coarse){
-          .cw-ci:hover{background:#f3f4f6;}
-          .cw-ci.active:hover{background:#dbeafe;}
-          .cw-act-btn:hover{background:#fff;border-color:#e5e7eb;transform:none;}
-          .cw-sendbtn:hover{transform:none;}
-          .cw-sendbtn:active{transform:scale(.92);}
-          .cw-mrow:hover .cw-msg-actions{opacity:0.8;}
-          .cw-inp:focus{background:#fff;}
-          .cw-hd-close{min-height:44px;min-width:44px;}
-          .cw-sendbtn{min-height:44px;min-width:44px;}
-          .cw-inp{font-size:16px;padding:12px 14px;}
-        }
-    
-        /* ════════════════════════════════════════════════════════
-           ACCESSIBILITY - KEYBOARD NAVIGATION
-           ════════════════════════════════════════════════════════ */
-        .cw-ci:focus-visible,.cw-clist:focus-visible{outline:2px solid #2563eb;outline-offset:2px;}
-        .cw-act-btn:focus-visible{outline:2px solid #2563eb;outline-offset:1px;}
-        .cw-inp:focus-visible{outline:none;}
-        @media (prefers-reduced-motion:reduce){
-          .cw-wrap.open,.cw-edit-bar.show,.cw-mrow,.cw-act-btn,.cw-sendbtn,.cw-hd-close{animation:none;transition:none;}
-          .cw-hd::before{animation:none;}
-          .cw-online{animation:none;}
-          .cw-nosel-ic{animation:none;}
-        }
-
-  
-    .tb-profile-wrap{position:relative;display:inline-block;}
-    .tb-profile-btn{width:38px;height:38px;border-radius:50%;background:rgba(255,255,255,.20);border:2px solid rgba(255,255,255,.55);display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;flex-shrink:0;transition:all .2s;font-size:.80rem;font-weight:800;color:#fff;}
-    .tb-profile-btn:hover{background:rgba(255,255,255,.35);border-color:#fff;}
-    .tb-dropdown{display:none;position:absolute;top:calc(100% + 10px);right:0;background:#fff;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.18);min-width:200px;z-index:9999;overflow:hidden;}
-    .tb-dropdown.open{display:block;}
-    .tb-dd-header{padding:12px 16px 8px;border-bottom:1px solid #f1f5f9;background:#f8fafc;}
-    .tb-dd-name{font-size:.86rem;font-weight:800;color:#1e293b;}
-    .tb-dd-role{font-size:.70rem;color:#94a3b8;margin-top:1px;}
-    .tb-dd-item{display:flex;align-items:center;gap:10px;padding:10px 16px;font-size:.83rem;font-weight:600;color:#475569;cursor:pointer;transition:background .15s;text-decoration:none;border:none;background:none;width:100%;font-family:'Nunito',sans-serif;}
-    .tb-dd-item:hover{background:#f1f5f9;color:#1e293b;}
-    .tb-dd-item.danger{color:#dc2626;}
-    .tb-dd-item.danger:hover{background:#fef2f2;}
-    .tb-dd-divider{height:1px;background:#f1f5f9;margin:3px 0;}
-    .notif-wrap{position:relative;display:inline-block;}
-    .notif-btn{position:relative;width:38px;height:38px;border-radius:50%;border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:1rem;color:#fff;transition:all .2s;}
-    .notif-btn:hover{background:rgba(255,255,255,.28);}
-    .notif-count{position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;background:#ef4444;border-radius:20px;font-size:.58rem;color:#fff;font-weight:800;display:none;align-items:center;justify-content:center;border:2px solid transparent;padding:0 4px;}
-    .notif-count.show{display:flex;}
-    .notif-panel{display:none;position:absolute;top:calc(100% + 10px);right:0;background:#fff;border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.18);width:340px;max-height:480px;z-index:9999;overflow:hidden;flex-direction:column;}
-    .notif-panel.open{display:flex;}
-    .notif-hd{padding:14px 16px 10px;border-bottom:1px solid #f1f5f9;display:flex;align-items:center;justify-content:space-between;background:#f8fafc;flex-shrink:0;}
-    .notif-hd-title{font-size:.88rem;font-weight:800;color:#1e293b;}
-    .notif-hd-count{font-size:.72rem;font-weight:700;color:#64748b;}
-    .notif-mark-all{font-size:.72rem;font-weight:700;color:#2563eb;cursor:pointer;border:none;background:none;font-family:inherit;}
-    .notif-mark-all:hover{text-decoration:underline;}
-    .notif-list{overflow-y:auto;flex:1;}
-    .notif-item{display:flex;align-items:flex-start;gap:11px;padding:12px 16px;border-bottom:1px solid #f8fafc;cursor:pointer;transition:background .15s;text-decoration:none;}
-    .notif-item:hover{background:#f8fafc;}
-    .notif-item.unread{background:#eff6ff;}
-    .notif-item.unread:hover{background:#dbeafe;}
-    .notif-ico{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0;}
-    .notif-body{flex:1;min-width:0;}
-    .notif-title{font-size:.80rem;font-weight:800;color:#1e293b;margin-bottom:2px;}
-    .notif-text{font-size:.74rem;color:#475569;line-height:1.4;}
-    .notif-time{font-size:.66rem;color:#94a3b8;margin-top:3px;}
-    .notif-empty{text-align:center;padding:40px 20px;color:#94a3b8;}
-    .notif-empty .ne-icon{font-size:2.2rem;margin-bottom:8px;}
-    .notif-empty p{font-size:.82rem;font-weight:600;}
-    .notif-footer{padding:10px 16px;border-top:1px solid #f1f5f9;text-align:center;flex-shrink:0;}
-    .notif-footer a{font-size:.78rem;font-weight:700;color:#2563eb;text-decoration:none;}
-  </style>
-
-  <div class="cw-wrap" id="cwWrap">
-    <!-- Header -->
-    <div class="cw-hd">
-      <div class="cw-hd-left">
-        <div class="cw-hd-icon">&#x1F4AC;</div>
-        <div>
-          <div class="cw-hd-title">Messages</div>
-          <div class="cw-hd-sub" id="cwHdSub">Select someone to chat</div>
-        </div>
-      </div>
-      <button class="cw-hd-close" onclick="cwToggle()" title="Close">&#x2715;</button>
-    </div>
-    <div class="cw-body">
-      <!-- Contacts -->
-      <div class="cw-contacts">
-        <div class="cw-contacts-hd">Employees</div>
-        <div class="cw-srch"><input type="text" id="cwSrch" placeholder="&#x1F50D; Search..." oninput="cwFilter()"/></div>
-        <div class="cw-clist" id="cwClist"><div class="cw-cempty">Loading...</div></div>
-      </div>
-      <!-- Chat -->
-      <div class="cw-chat">
-        <div class="cw-nosel" id="cwNoSel">
-          <div class="cw-nosel-ic">&#x1F4AC;</div>
-          <h4>No conversation selected</h4>
-          <p>Pick an employee from<br>the list to start chatting</p>
-        </div>
-        <div id="cwChatArea" style="display:none;flex:1;flex-direction:column;overflow:hidden;">
-          <!-- Chat header -->
-          <div class="cw-chat-hd">
-            <div class="cw-chat-av" id="cwChatAv"></div>
-            <div style="flex:1;min-width:0;">
-              <div class="cw-chat-name" id="cwChatName"></div>
-              <div class="cw-chat-sub" id="cwChatSub"></div>
-            </div>
-            <button class="cw-chat-del" id="cwChatDelBtn" onclick="cwDeleteConversation()" title="Delete conversation">&#x1F5D1;&#xFE0F;</button>
-            <div class="cw-online" title="Active"></div>
-          </div>
-          <!-- Messages -->
-          <div class="cw-msgs" id="cwMsgs"></div>
-          <!-- Edit bar -->
-          <div class="cw-edit-bar" id="cwEditBar">
-            <span>&#x270F;&#xFE0F; Editing message</span>
-            <button class="cw-edit-cancel" onclick="cwCancelEdit()">&#x2715; Cancel</button>
-          </div>
-          <!-- Input -->
-          <div class="cw-inp-row">
-            <textarea class="cw-inp" id="cwInp" rows="1" placeholder="Type a message..." onkeydown="cwKey(event)" oninput="cwResize(this)"></textarea>
-            <button class="cw-sendbtn" id="cwSendBtn" onclick="cwSend()" title="Send">&#x27A4;</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <script>
-  var CW_ME   = <?php echo (int)($_SESSION['user_id'] ?? 0); ?>;
-  var CW_INIT = <?php echo json_encode(strtoupper(substr($adminName ?? 'AD', 0, 2))); ?>;
-  var CW_API  = 'chat_api.php';
-  var CW_COLS = ['#2563eb','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4','#ec4899','#f97316'];
-
-  var cwCons=[], cwAct=null, cwLastT=null, cwPoll=null, cwConT=null, cwOpen=false;
-  var cwSending=false, cwEditId=null;
-
-  function cwCol(n){return CW_COLS[Math.abs([...(n||'?')].reduce(function(a,c){return a+c.charCodeAt(0);},0))%CW_COLS.length];}
-  function cwIni(n){return (n||'?').split(' ').map(function(w){return w[0]||'';}).join('').slice(0,2).toUpperCase();}
-  function cwFmtS(dt){if(!dt)return '';var d=new Date(dt),now=new Date();return d.toDateString()===now.toDateString()?d.toLocaleTimeString('en-PH',{hour:'numeric',minute:'2-digit'}):d.toLocaleDateString('en-PH',{month:'short',day:'numeric'});}
-  function cwFmtL(dt){return dt?new Date(dt).toLocaleTimeString('en-PH',{hour:'numeric',minute:'2-digit'}):'';}
-  function cwEsc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');}
-
-  function cwToggle(){
-    cwOpen=!cwOpen;
-    document.getElementById('cwWrap').classList.toggle('open',cwOpen);
-    if(cwOpen){cwLoadCons();clearInterval(cwConT);cwConT=setInterval(cwLoadCons,10000);}
-    else{clearInterval(cwPoll);clearInterval(cwConT);}
-  }
-
-  function cwLoadCons(){
-    fetch(CW_API+'?action=contacts')
-      .then(function(r){return r.json();})
-      .then(function(j){if(!j.success)return;cwCons=j.data;cwRenderCons(cwCons);cwUpdBadge();})
-      .catch(function(){});
-  }
-
-  function cwRenderCons(list){
-    var el=document.getElementById('cwClist');
-    if(!list.length){el.innerHTML='<div class="cw-cempty">No employees found.</div>';return;}
-    el.innerHTML=list.map(function(c){
-      var isAct=cwAct&&cwAct.user_id==c.user_id;
-      var name=c.full_name||c.email||'Employee';
-      var lastPrev=c.last_message?'<div class="cw-cs" style="font-style:italic;">'+(c.last_mine?'You: ':'')+c.last_message+'</div>':'';
-      return '<div class="cw-ci'+(isAct?' active':'')+'" onclick="cwOpenChat('+c.user_id+')">'+
-        '<div class="cw-av" style="background:'+cwCol(name)+'">'+cwIni(name)+'</div>'+
-        '<div class="cw-cn" title="'+name+'">'+name+'</div>'+
-        '<div class="cw-cs">'+cwFmtS(c.last_at)+'</div>'+
-        lastPrev+
-        (c.unread>0?'<div class="cw-cu">'+c.unread+'</div>':'')+
-      '</div>';
-    }).join('');
-  }
-
-  function cwFilter(){
-    var q=document.getElementById('cwSrch').value.toLowerCase();
-    cwRenderCons(q?cwCons.filter(function(c){return (c.full_name||c.email||'').toLowerCase().indexOf(q)>=0;}):cwCons);
-  }
-
-  function cwUpdBadge(){
-    var total=cwCons.reduce(function(s,c){return s+(c.unread||0);},0);
-    var b=document.getElementById('cwBadge');
-    b.textContent=total||'';b.style.display=total?'flex':'none';
-  }
-
-  function cwOpenChat(userId){
-    cwAct=cwCons.find(function(c){return c.user_id==userId;})||{user_id:userId};
-    cwLastT=null;cwRenderCons(cwCons);cwCancelEdit();
-    document.getElementById('cwNoSel').style.display='none';
-    var area=document.getElementById('cwChatArea');
-    area.style.display='flex';area.style.flex='1';area.style.flexDirection='column';area.style.overflow='hidden';
-    var av=document.getElementById('cwChatAv');
-    var name=cwAct.full_name||cwAct.email||'Employee';
-    av.textContent=cwIni(name);av.style.background=cwCol(name);
-    document.getElementById('cwChatName').textContent=name;
-    document.getElementById('cwChatSub').textContent=cwAct.position_title||cwAct.department||'Employee';
-    document.getElementById('cwHdSub').textContent=name;
-    var delBtn=document.getElementById('cwChatDelBtn');
-    if(delBtn)delBtn.style.display='inline-flex';
-    document.getElementById('cwMsgs').innerHTML='<div style="text-align:center;padding:24px;font-size:.73rem;color:#94a3b8;">Loading...</div>';
-    cwLoadMsgs(true);
-    document.getElementById('cwInp').focus();
-    clearInterval(cwPoll);cwPoll=setInterval(function(){cwLoadMsgs(false);},3000);
-  }
-
-  function cwLoadMsgs(initial){
-    if(!cwAct)return;
-    var url=CW_API+'?action=messages&with='+cwAct.user_id;
-    if(!initial&&cwLastT)url+='&since_id='+cwLastT;
-    fetch(url)
-      .then(function(r){return r.json();})
-      .then(function(j){
-        if(!j.success)return;
-        if(initial){
-          cwRenderMsgs(j.data);
-          cwLastT=j.data&&j.data.length?j.data[j.data.length-1].message_id:0;
-        } else if(j.data&&j.data.length){
-          cwAppendMsgs(j.data);
-          cwLastT=j.data[j.data.length-1].message_id;
-          cwLoadCons();
-        }
-        // Update seen indicators on existing bubbles
-        if(initial&&j.data){
-          j.data.forEach(function(m){
-            if(parseInt(m.sender_id)===CW_ME&&(m.is_read==1||m.is_read==='1')){
-              cwMarkSeen(m.message_id);
-            }
-          });
-        }
-      }).catch(function(){});
-  }
-
-  function cwMarkSeen(msgId){
-    var row=document.querySelector('.cw-mrow[data-msgid="'+msgId+'"]');
-    if(!row)return;
-    var mt=row.querySelector('.cw-mt');
-    if(mt&&!mt.querySelector('.cw-seen')){
-      var s=document.createElement('span');
-      s.className='cw-seen';s.innerHTML='&#x2713;&#x2713; Seen';
-      mt.appendChild(s);
-    }
-  }
-
-  function cwRenderMsgs(msgs){
-    var el=document.getElementById('cwMsgs');
-    if(!msgs||!msgs.length){el.innerHTML='<div style="text-align:center;padding:28px 16px;font-size:.75rem;color:#94a3b8;line-height:1.7;">No messages yet.<br>Say hello! &#x1F44B;</div>';return;}
-    var html='',ld='';
-    msgs.forEach(function(m){
-      var ds=new Date(m.sent_at).toLocaleDateString('en-PH',{weekday:'short',month:'short',day:'numeric'});
-      if(ds!==ld){html+='<div class="cw-ddiv"><span>'+ds+'</span></div>';ld=ds;}
-      html+=cwBuildMsg(m);
-    });
-    el.innerHTML=html;el.scrollTop=el.scrollHeight;
-  }
-
-  function cwAppendMsgs(msgs){
-    var el=document.getElementById('cwMsgs');
-    var html='';msgs.forEach(function(m){html+=cwBuildMsg(m);});
-    el.insertAdjacentHTML('beforeend',html);el.scrollTop=el.scrollHeight;
-  }
-
-  function cwBuildMsg(m){
-    var mine=parseInt(m.sender_id)===CW_ME;
-    var name=cwAct?cwAct.full_name||cwAct.email||'':'?';
-    var unsent=(m.is_unsent==1||m.is_unsent==='1');
-    var edited =(m.is_edited==1||m.is_edited==='1')&&!unsent;
-    var seen   =(mine&&!unsent&&(m.is_read==1||m.is_read==='1'));
-    var bubbleCls='cw-bubble'+(unsent?' unsent':'')+(edited?' edited':'');
-    var msgText=unsent?'You unsent a message':cwEsc(m.message);
-
-    var actions='';
-    if(mine&&!unsent){
-      actions='<div class="cw-msg-actions">'+
-        '<button class="cw-act-btn" onclick="cwStartEdit('+m.message_id+',this)" title="Edit">&#x270F;&#xFE0F;</button>'+
-        '<button class="cw-act-btn del" onclick="cwUnsend('+m.message_id+')" title="Unsend">&#x1F5D1;&#xFE0F;</button>'+
-      '</div>';
-    }
-
-    return '<div class="cw-mrow '+(mine?'mine':'them')+'" data-msgid="'+m.message_id+'">'+
-      actions+
-      '<div class="cw-mav" style="background:'+(mine?'#2563eb':cwCol(name))+'">'+( mine?CW_INIT:cwIni(name))+'</div>'+
-      '<div class="cw-msg-wrap">'+
-        '<div class="'+bubbleCls+'" data-raw="'+cwEsc(m.message)+'">'+msgText+'</div>'+
-        '<div class="cw-mt">'+cwFmtL(m.sent_at)+(seen?'<span class="cw-seen">&#x2713;&#x2713; Seen</span>':'')+'</div>'+
-      '</div>'+
-    '</div>';
-  }
-
-  // ── Send ─────────────────────────────────────────────────────
-  function cwSend(){
-    if(!cwAct||cwSending)return;
-    var inp=document.getElementById('cwInp'),msg=inp.value.trim();if(!msg)return;
-    // Edit mode
-    if(cwEditId){cwSubmitEdit(cwEditId,msg);return;}
-    cwSending=true;
-    var btn=document.getElementById('cwSendBtn');btn.disabled=true;
-    var sentMsg=msg;inp.value='';cwResize(inp);
-    var fd=new FormData();fd.append('action','send');fd.append('to',cwAct.user_id);fd.append('message',sentMsg);
-    fetch(CW_API,{method:'POST',body:fd})
-      .then(function(r){return r.json();})
-      .then(function(j){
-        if(j.success){cwAppendMsgs([j.data]);cwLastT=j.data.message_id;cwLoadCons();}
-      })
-      .catch(function(){})
-      .finally(function(){cwSending=false;btn.disabled=false;inp.focus();});
-  }
-
-  // ── Edit ─────────────────────────────────────────────────────
-  function cwStartEdit(msgId,btn){
-    var row=document.querySelector('.cw-mrow[data-msgid="'+msgId+'"]');
-    if(!row)return;
-    var bubble=row.querySelector('.cw-bubble');
-    if(!bubble)return;
-    cwEditId=msgId;
-    var raw=bubble.getAttribute('data-raw')||bubble.textContent;
-    var inp=document.getElementById('cwInp');
-    inp.value=raw.replace(/<br>/g,'\n');
-    cwResize(inp);inp.focus();
-    document.getElementById('cwEditBar').classList.add('show');
-    document.getElementById('cwSendBtn').innerHTML='&#x2713;';
-    // Highlight the bubble being edited
-    document.querySelectorAll('.cw-bubble').forEach(function(b){b.style.opacity='0.5';});
-    bubble.style.opacity='1';bubble.style.outline='2px solid #2563eb';bubble.style.outlineOffset='2px';
-  }
-
-  function cwSubmitEdit(msgId,newMsg){
-    cwSending=true;
-    var btn=document.getElementById('cwSendBtn');btn.disabled=true;
-    var fd=new FormData();fd.append('action','edit');fd.append('message_id',msgId);fd.append('message',newMsg);
-    fetch(CW_API,{method:'POST',body:fd})
-      .then(function(r){return r.json();})
-      .then(function(j){
-        if(j.success){
-          var row=document.querySelector('.cw-mrow[data-msgid="'+msgId+'"]');
-          if(row){
-            var bubble=row.querySelector('.cw-bubble');
-            if(bubble){bubble.innerHTML=cwEsc(newMsg);bubble.setAttribute('data-raw',newMsg);bubble.classList.add('edited');}
-          }
-          cwCancelEdit();
-        }
-      })
-      .catch(function(){})
-      .finally(function(){cwSending=false;btn.disabled=false;});
-  }
-
-  function cwCancelEdit(){
-    cwEditId=null;
-    document.getElementById('cwEditBar').classList.remove('show');
-    document.getElementById('cwSendBtn').innerHTML='&#x27A4;';
-    document.getElementById('cwInp').value='';
-    document.querySelectorAll('.cw-bubble').forEach(function(b){b.style.opacity='';b.style.outline='';b.style.outlineOffset='';});
-  }
-
-  // ── Unsend ───────────────────────────────────────────────────
-  function cwUnsend(msgId){
-    if(!confirm('Unsend this message? It will be removed for everyone.'))return;
-    var fd=new FormData();fd.append('action','unsend');fd.append('message_id',msgId);
-    fetch(CW_API,{method:'POST',body:fd})
-      .then(function(r){return r.json();})
-      .then(function(j){
-        if(j.success){
-          var row=document.querySelector('.cw-mrow[data-msgid="'+msgId+'"]');
-          if(row){
-            var bubble=row.querySelector('.cw-bubble');
-            if(bubble){
-              bubble.innerHTML='You unsent a message';
-              bubble.className='cw-bubble unsent';
-              bubble.removeAttribute('data-raw');
-            }
-            var actions=row.querySelector('.cw-msg-actions');
-            if(actions)actions.remove();
-          }
-          cwLoadCons();
-        }
-      }).catch(function(){});
-  }
-
-  
-  function cwDeleteConversation(){
-    if(!cwAct||!cwAct.user_id)return;
-    var name=cwAct.full_name||cwAct.email||'this employee';
-    if(!confirm('Delete entire conversation with '+name+'? This cannot be undone.'))return;
-    var fd=new FormData();fd.append('action','delete_conversation');fd.append('with',cwAct.user_id);
-    fd.append('csrf_token', CSRF_TOKEN);
-    fetch(CW_API,{method:'POST',body:fd})
-      .then(function(r){return r.json();})
-      .then(function(j){
-        if(!j.success){alert(j.message||'Failed to delete conversation.');return;}
-        cwCancelEdit();
-        document.getElementById('cwMsgs').innerHTML='<div style="text-align:center;padding:28px 16px;font-size:.75rem;color:#94a3b8;line-height:1.7;">Conversation deleted.</div>';
-        cwLastT=0;
-        cwLoadCons();
-      })
-      .catch(function(){alert('Failed to delete conversation.');});
-  }
-  function cwKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();e.stopPropagation();cwSend();}}
-  function cwResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,90)+'px';}
-
-  // ── Chat notification toast CSS ──────────────────────────────
-  var _ns = document.createElement('style');
-  _ns.textContent = `
-    .cw-notif-toast {
-      position:fixed;bottom:24px;left:24px;z-index:99999;
-      display:flex;align-items:center;gap:12px;
-      background:#1e293b;color:#fff;
-      padding:13px 18px;border-radius:14px;
-      box-shadow:0 8px 32px rgba(0,0,0,.28);
-      font-family:'Nunito',sans-serif;font-size:.85rem;font-weight:700;
-      cursor:pointer;max-width:300px;
-      animation:_cwni .35s cubic-bezier(.34,1.4,.64,1) both;
-      border-left:4px solid #2563eb;
-    }
-    @keyframes _cwni{from{opacity:0;transform:translateY(20px) scale(.92);}to{opacity:1;transform:translateY(0) scale(1);}}
-    .cw-notif-toast:hover{background:#334155;}
-    .cw-nt-av{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:800;color:#fff;flex-shrink:0;}
-    .cw-nt-body{flex:1;min-width:0;}
-    .cw-nt-name{font-size:.82rem;font-weight:800;margin-bottom:2px;}
-    .cw-nt-msg{font-size:.74rem;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;}
-    .cw-nt-x{background:none;border:none;color:#64748b;font-size:1rem;cursor:pointer;padding:0;flex-shrink:0;}
-    .cw-nt-x:hover{color:#fff;}
-  `;
-  document.head.appendChild(_ns);
-
-  var cwPrevCount = 0, cwNotifTimer = null;
-
-  function cwShowToast(name, msg, userId) {
-    var old = document.querySelector('.cw-notif-toast');
-    if (old) old.remove();
-    var colors = ['#2563eb','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4'];
-    var col = colors[Math.abs([...(name||'?')].reduce(function(a,c){return a+c.charCodeAt(0);},0)) % colors.length];
-    var ini = (name||'?').split(' ').map(function(w){return w[0]||'';}).join('').slice(0,2).toUpperCase();
-    var t = document.createElement('div');
-    t.className = 'cw-notif-toast';
-    t.innerHTML =
-      '<div class="cw-nt-av" style="background:'+col+'">'+ini+'</div>'+
-      '<div class="cw-nt-body"><div class="cw-nt-name">'+name+'</div><div class="cw-nt-msg">'+msg+'</div></div>'+
-      '<button class="cw-nt-x" onclick="event.stopPropagation();this.parentNode.remove();">&#x2715;</button>';
-    t.addEventListener('click', function(){
-      t.remove();
-      if (!cwOpen) cwToggle();
-      if (userId) setTimeout(function(){ var c=cwCons.find(function(x){return x.user_id==userId;}); if(c) cwOpenChat(userId); }, 350);
-    });
-    document.body.appendChild(t);
-    clearTimeout(cwNotifTimer);
-    cwNotifTimer = setTimeout(function(){
-      if (t.parentNode){ t.style.transition='opacity .4s,transform .4s'; t.style.opacity='0'; t.style.transform='translateY(10px)'; setTimeout(function(){if(t.parentNode)t.remove();},400); }
-    }, 6000);
-  }
-
-  // Poll every 5s — update 💬 badge + show toast on new messages
-  function cwPollUnread(){
-    fetch(CW_API+'?action=contacts')
-      .then(function(r){return r.json();})
-      .then(function(j){
-        if (!j.success) return;
-        var total = j.data.reduce(function(s,c){return s+(c.unread||0);},0);
-
-        // Always update badge on 💬 button
-        var b = document.getElementById('cwBadge');
-        if (b){ b.textContent=total||''; b.style.display=total?'flex':'none'; }
-
-        // Toast when new message arrives and widget is closed
-        if (!cwOpen && total > cwPrevCount) {
-          var sender = j.data.find(function(c){return c.unread>0;});
-          if (sender) cwShowToast(sender.full_name||sender.email||'Employee', sender.last_message||'Sent you a message', sender.user_id);
-        }
-
-        // Refresh contact list if widget is open
-        if (cwOpen){ cwCons=j.data; cwRenderCons(cwCons); }
-        cwPrevCount = total;
-      }).catch(function(){});
-  }
-  // Run immediately on page load then every 5s
-  cwPollUnread();
-  setInterval(cwPollUnread, 5000);
-  </script>
 </body>
 </html>

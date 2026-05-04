@@ -1053,6 +1053,7 @@ async function saveAdjust() {
   body.append('balance_id',    id);
   body.append('total_credits', credits);
   body.append('used_days',     used);
+  body.append('csrf_token', CSRF_TOKEN);
 
   try {
     const res  = await fetch('leave_balances.php', { method:'POST', body });
@@ -1085,6 +1086,7 @@ async function confirmReset() {
   const body = new FormData();
   body.append('action', 'reset_year');
   body.append('year',   year);
+  body.append('csrf_token', CSRF_TOKEN);
 
   try {
     const res  = await fetch('leave_balances.php', { method:'POST', body });

@@ -824,7 +824,9 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
   </div>
 
   <script>
-const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
+function getCSRFToken() {
+  return document.querySelector('meta[name=csrf-token]').content;
+}
   // ════════════════════════════════════════════════════════
   //  STATE
   // ════════════════════════════════════════════════════════
@@ -1003,6 +1005,16 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     document.getElementById('fPasswordHint').textContent = '';
     document.getElementById('fEmail').classList.remove('err');
     loadEmployeeDropdown();
+
+    // Set password to employee_code when employee is selected
+    const sel = document.getElementById('fEmployee');
+    sel.onchange = function() {
+      const selected = sel.options[sel.selectedIndex];
+      const match = selected.textContent.match(/\(([^)]+)\)/); // extract employee_code from option text
+      document.getElementById('fPassword').value = match ? match[1] : '';
+    };
+    // Trigger once in case default is selected
+    sel.onchange();
     openModal('modalForm');
   }
 
@@ -1051,7 +1063,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     body.append('role',        document.getElementById('fRoleInput').value);
     body.append('is_active',   document.getElementById('fIsActive').checked ? 1 : 0);
     body.append('employee_id', document.getElementById('fEmployee').value);
-    body.append('csrf_token',  CSRF_TOKEN);
+    body.append('csrf_token',  getCSRFToken());
 
     try {
       const res  = await fetch('user_accounts.php', { method:'POST', body });
@@ -1141,6 +1153,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     const body = new FormData();
     body.append('action', 'delete');
     body.append('id',     deleteTarget);
+    body.append('csrf_token', getCSRFToken());
     try {
       const res  = await fetch('user_accounts.php', { method:'POST', body });
       const json = await res.json();
@@ -1150,6 +1163,9 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
         loadAccounts(1);
       } else {
         showToast('❌ ' + json.message, 'error');
+        if (json.message && json.message.toLowerCase().includes('security token')) {
+          setTimeout(() => location.reload(), 1200);
+        }
       }
     } catch(e) {
       showToast('❌ Delete failed.', 'error');
@@ -1900,7 +1916,7 @@ function toggleSidebar() {
     var btn=document.getElementById('cwSendBtn');btn.disabled=true;
     var sentMsg=msg;inp.value='';cwResize(inp);
     var fd=new FormData();fd.append('action','send');fd.append('to',cwAct.user_id);fd.append('message',sentMsg);
-    fd.append('csrf_token', CSRF_TOKEN);
+    fd.append('csrf_token', getCSRFToken());
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
       .then(function(j){
@@ -1932,7 +1948,7 @@ function toggleSidebar() {
     cwSending=true;
     var btn=document.getElementById('cwSendBtn');btn.disabled=true;
     var fd=new FormData();fd.append('action','edit');fd.append('message_id',msgId);fd.append('message',newMsg);
-    fd.append('csrf_token', CSRF_TOKEN);
+    fd.append('csrf_token', getCSRFToken());
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
       .then(function(j){
@@ -1961,7 +1977,7 @@ function toggleSidebar() {
   function cwUnsend(msgId){
     if(!confirm('Unsend this message? It will be removed for everyone.'))return;
     var fd=new FormData();fd.append('action','unsend');fd.append('message_id',msgId);
-    fd.append('csrf_token', CSRF_TOKEN);
+    fd.append('csrf_token', getCSRFToken());
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
       .then(function(j){
@@ -1988,7 +2004,7 @@ function toggleSidebar() {
     var name=cwAct.full_name||cwAct.email||'this employee';
     if(!confirm('Delete entire conversation with '+name+'? This cannot be undone.'))return;
     var fd=new FormData();fd.append('action','delete_conversation');fd.append('with',cwAct.user_id);
-    fd.append('csrf_token', CSRF_TOKEN);
+    fd.append('csrf_token', getCSRFToken());
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
       .then(function(j){

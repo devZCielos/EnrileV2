@@ -45,34 +45,31 @@ try {
     switch ($action) {
 
         case 'contacts':
-            $isAdmin = in_array($role, ['admin','hr_staff','dept_head']);
-            if ($isAdmin) {
-                $stmt = $pdo->prepare("
-                    SELECT u.user_id, u.email, u.role,
-                           COALESCE(CONCAT(e.first_name,' ',e.last_name), u.email) AS full_name,
-                           COALESCE(e.position_title,'') AS position_title,
-                           COALESCE(d.name,'') AS department,
-                           COALESCE(e.profile_photo,'') AS profile_photo
-                    FROM user_accounts u
-                    LEFT JOIN employees   e ON e.user_id=u.user_id
-                    LEFT JOIN departments d ON d.department_id=e.department_id
-                    WHERE u.role='employee' AND u.user_id!=?
-                    ORDER BY e.last_name, e.first_name");
-                $stmt->execute([$me]);
+            // Admin sees only employees in chat contacts
+            // Role-based chat contact filtering
+            $contactWhere = '';
+            if ($role === 'admin') {
+                // Admin can chat with all employees and dept heads
+                $contactWhere = "u.user_id!=? AND (u.role='employee' OR u.role='dept_head')";
+            } elseif ($role === 'dept_head') {
+                // Dept head can chat with admin and employees
+                $contactWhere = "u.user_id!=? AND (u.role='admin' OR u.role='employee')";
             } else {
-                $stmt = $pdo->prepare("
-                    SELECT u.user_id, u.email, u.role,
-                           COALESCE(CONCAT(e.first_name,' ',e.last_name), u.email) AS full_name,
-                           COALESCE(e.position_title,'') AS position_title,
-                           COALESCE(d.name,'') AS department,
-                           COALESCE(e.profile_photo,'') AS profile_photo
-                    FROM user_accounts u
-                    LEFT JOIN employees   e ON e.user_id=u.user_id
-                    LEFT JOIN departments d ON d.department_id=e.department_id
-                    WHERE u.role IN ('admin','hr_staff','dept_head') AND u.user_id!=?
-                    ORDER BY u.role, e.last_name");
-                $stmt->execute([$me]);
+                // Employee can chat with admin and dept head
+                $contactWhere = "u.user_id!=? AND (u.role='admin' OR u.role='dept_head')";
             }
+            $stmt = $pdo->prepare("
+                SELECT u.user_id, u.email, u.role,
+                       COALESCE(CONCAT(e.first_name,' ',e.last_name), u.email) AS full_name,
+                       COALESCE(e.position_title,'') AS position_title,
+                       COALESCE(d.name,'') AS department,
+                       COALESCE(e.profile_photo,'') AS profile_photo
+                FROM user_accounts u
+                LEFT JOIN employees   e ON e.user_id=u.user_id
+                LEFT JOIN departments d ON d.department_id=e.department_id
+                WHERE $contactWhere
+                ORDER BY e.last_name, e.first_name, u.role");
+            $stmt->execute([$me]);
             $contacts = $stmt->fetchAll(PDO::FETCH_ASSOC);
             $ids = array_column($contacts,'user_id');
             $unreadMap = $lastMap = [];

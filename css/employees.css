@@ -1,3 +1,26 @@
+/* Print button style for service record */
+.print-form-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 20px;
+  background: linear-gradient(135deg, #16a34a, #15803d);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: 'Nunito', sans-serif;
+  font-size: 0.875rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 2px 8px rgba(22,163,74,0.30);
+  white-space: nowrap;
+}
+.print-form-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 14px rgba(22,163,74,0.40);
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+}
 /* employees.css - all styles that were previously inline in employees.php */
 :root {
   --primary:      #2563eb;
