@@ -1,0 +1,14 @@
+# LGU Enrile HRMS — Root .htaccess
+# P3-5: Harden PHP session cookies at server level
+
+# Prevent session cookies from being accessed by JavaScript
+php_value session.cookie_httponly 1
+
+# Restrict cookies to same-site requests only
+php_value session.cookie_samesite Strict
+
+# Prevent exposure of PHP version in headers
+php_value expose_php Off
+
+# Disable directory listing
+Options -Indexes

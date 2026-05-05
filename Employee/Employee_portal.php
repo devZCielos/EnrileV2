@@ -1,10 +1,7 @@
 <?php
-// DEBUG: Show all errors for troubleshooting
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
+require_once __DIR__ . '/_shared/helpers.php';
 define('UPLOAD_DIR', __DIR__ . '/../uploads/documents/');
 define('UPLOAD_URL', '../uploads/documents/');
 if (!is_dir(UPLOAD_DIR)) mkdir(UPLOAD_DIR, 0755, true);
@@ -28,7 +25,7 @@ $action = $_GET['action'] ?? $_POST['action'] ?? '';
 //  LGU ENRILE HRMS — Employee Portal
 //  File: Employee/Employee_portal.php
 // ============================================================
-session_start();
+if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
 // ── Helper: detect AJAX action request ──
 $_isAjax = !empty($_GET['action']) || !empty($_POST['action']);
@@ -71,11 +68,11 @@ require_once __DIR__ . '/../config/db.php';
 // Tables `pds_records` and `saln_records` are defined in lgu_enrile_hrms.sql — no runtime CREATE needed.
 
 // Upload directory
-define('UPLOAD_DIR', __DIR__ . '/../uploads/documents/');
-define('UPLOAD_URL', '../uploads/documents/');
+if (!defined('UPLOAD_DIR')) define('UPLOAD_DIR', __DIR__ . '/../uploads/documents/');
+if (!defined('UPLOAD_URL')) define('UPLOAD_URL', '../uploads/documents/');
 if (!is_dir(UPLOAD_DIR)) mkdir(UPLOAD_DIR, 0755, true);
-define('PHOTO_DIR', __DIR__ . '/../uploads/profile_photos/');
-define('PHOTO_URL', '../uploads/profile_photos/');
+if (!defined('PHOTO_DIR')) define('PHOTO_DIR', __DIR__ . '/../uploads/profile_photos/');
+if (!defined('PHOTO_URL')) define('PHOTO_URL', '../uploads/profile_photos/');
 if (!is_dir(PHOTO_DIR)) mkdir(PHOTO_DIR, 0755, true);
 
 $allowedMimes = [
@@ -198,18 +195,7 @@ if ($action) {
             break;
 
             // ── PROFILE ──────────────────────────────────────
-            case 'whoami':
-                // Diagnostic — shows session linkage
-                $allEmp = $pdo->query("SELECT employee_id, CONCAT(first_name,' ',last_name) AS name, user_id, email_address FROM employees ORDER BY employee_id")->fetchAll();
-                $allUsr = $pdo->query("SELECT user_id, email, `role` AS user_role FROM user_accounts WHERE `role`='employee' ORDER BY user_id")->fetchAll();
-                echo json_encode([
-                    'success'      => true,
-                    'session_user_id'   => $userId,
-                    'resolved_employee_id' => $employeeId,
-                    'all_employees' => $allEmp,
-                    'employee_users'=> $allUsr,
-                ]);
-                break;
+
 
             case 'profile':
                 $stmt = $pdo->prepare("
@@ -385,7 +371,7 @@ if ($action) {
                 }
                 if (!move_uploaded_file($f['tmp_name'], $dest)) { echo json_encode(['success'=>false,'message'=>'Save failed.']); break; }
                 $photoUrl = PHOTO_URL.$name;
-                try { $pdo->exec("ALTER TABLE employees ADD COLUMN IF NOT EXISTS profile_photo VARCHAR(255) DEFAULT NULL"); } catch(Exception $e) {}
+                // P3-9: profile_photo column managed by config/migrations/004_service_records.sql
                 $pdo->prepare("UPDATE employees SET profile_photo=? WHERE employee_id=?")->execute([$photoUrl,$employeeId]);
                 echo json_encode(['success'=>true,'photo_url'=>$photoUrl,'url'=>$photoUrl]);
                 break;
@@ -408,6 +394,18 @@ if ($action) {
                 }
                 if (empty($sets)) {
                     echo json_encode(['success'=>false,'message'=>'Nothing to update.']); break;
+                }
+                // H-7 — Validate email format and uniqueness
+                if (array_key_exists('email_address', $_POST) && !empty(trim($_POST['email_address'] ?? ''))) {
+                    $newEmailVal = trim($_POST['email_address']);
+                    if (!filter_var($newEmailVal, FILTER_VALIDATE_EMAIL)) {
+                        echo json_encode(['success'=>false,'message'=>'Please enter a valid email address.']); break;
+                    }
+                    $emailDup = $pdo->prepare('SELECT COUNT(*) FROM employees WHERE email_address = ? AND employee_id != ?');
+                    $emailDup->execute([$newEmailVal, $employeeId]);
+                    if ((int)$emailDup->fetchColumn() > 0) {
+                        echo json_encode(['success'=>false,'message'=>'This email address is already used by another employee.']); break;
+                    }
                 }
                 $vals[] = $employeeId;
                 $pdo->prepare("UPDATE employees SET ".implode(',',$sets)." WHERE employee_id = ?")
@@ -444,12 +442,20 @@ if ($action) {
                   }
                 }
 
+                // H-10 — Paginate (default 200/page to prevent unbounded response)
+                $prPerPage = max(1, min(200, (int)($_GET['per_page'] ?? 200)));
+                $prPage    = max(1, (int)($_GET['page'] ?? 1));
+                $prOffset  = ($prPage - 1) * $prPerPage;
+                $cntLr = $pdo->prepare("SELECT COUNT(*) FROM leave_requests lr JOIN leave_types lt ON lt.leave_type_id = lr.leave_type_id WHERE $where");
+                $cntLr->execute($params);
+                $prTotal = (int)$cntLr->fetchColumn();
                 $stmt = $pdo->prepare("
                   SELECT lr.*, lt.name AS type_name
                   FROM   leave_requests lr
                   JOIN   leave_types lt ON lt.leave_type_id = lr.leave_type_id
                   WHERE  $where
                   ORDER  BY lr.filed_at DESC
+                  LIMIT  $prPerPage OFFSET $prOffset
                 ");
                 $stmt->execute($params);
                 $rows = $stmt->fetchAll();
@@ -471,7 +477,7 @@ if ($action) {
                 }
 
                 ob_clean();
-                echo json_encode(['success' => true, 'data' => $rows, 'counts' => $statusCounts]);
+                echo json_encode(['success' => true, 'data' => $rows, 'counts' => $statusCounts, 'total' => $prTotal, 'page' => $prPage, 'per_page' => $prPerPage]);
                 break;
 
             // ── SUBMIT LEAVE ──────────────────────────────────
@@ -489,14 +495,23 @@ if ($action) {
                     echo json_encode(['success' => false, 'message' => "Only Permanent employees can file leave requests. Your employment type is: {$empType}. Please contact HR for more information."]); break;
                 }
                 
-                $leaveTypeId = (int)($_POST['leave_type_id']    ?? 0);
-                $dateFrom    = $_POST['date_from']              ?? '';
-                $dateTo      = $_POST['date_to']                ?? '';
-                $daysReq     = (int)($_POST['days_requested']   ?? 0);
-                $reason      = trim($_POST['reason']            ?? '');
+                $leaveTypeId = (int)($_POST['leave_type_id'] ?? 0);
+                $dateFrom    = $_POST['date_from']            ?? '';
+                $dateTo      = $_POST['date_to']              ?? '';
+                $reason      = trim($_POST['reason']          ?? '');
 
-                if (!$leaveTypeId || !$dateFrom || !$dateTo || !$reason || $daysReq < 1) {
+                if (!$leaveTypeId || !$dateFrom || !$dateTo || !$reason) {
                     echo json_encode(['success' => false, 'message' => 'Please fill in all required fields.']); break;
+                }
+                // H-1 — Validate date order
+                if ($dateFrom > $dateTo) {
+                    echo json_encode(['success' => false, 'message' => 'Start date cannot be after end date.']); break;
+                }
+
+                // P2-4 — Compute business days server-side (excludes weekends + holidays)
+                $daysReq = countBusinessDays($pdo, $dateFrom, $dateTo);
+                if ($daysReq < 1) {
+                    echo json_encode(['success' => false, 'message' => 'The selected date range contains no working days (weekends/holidays only).']); break;
                 }
 
                 // ── Server-side gender / marital eligibility check ──────────
@@ -711,15 +726,29 @@ if ($action) {
                         echo json_encode(['success' => true, 'data' => []]);
                         break;
                     }
-                    $rows = $pdo->query("
+                    // P2-11 — Filter by audience and department
+                    $annEmpInfo = $pdo->prepare("SELECT employment_type, department_id FROM employees WHERE employee_id=?");
+                    $annEmpInfo->execute([$employeeId]);
+                    $annEmpRow  = $annEmpInfo->fetch();
+                    $annEmpType = $annEmpRow['employment_type'] ?? 'Permanent';
+                    $annEmpDept = (int)($annEmpRow['department_id'] ?? 0);
+
+                    $annStmt = $pdo->prepare("
                         SELECT announcement_id, title, body, priority, category AS tag, created_at
                         FROM   announcements
                         WHERE  status = 'Published'
                           AND  (publish_date IS NULL OR publish_date <= CURDATE())
                           AND  (expiry_date IS NULL OR expiry_date >= CURDATE())
+                          AND  (
+                              audience = 'All'
+                              OR audience = ?
+                              OR (audience = 'Department' AND (department_id IS NULL OR department_id = ?))
+                          )
                         ORDER BY pinned DESC, created_at DESC
                         LIMIT  10
-                    ")->fetchAll(PDO::FETCH_ASSOC);
+                    ");
+                    $annStmt->execute([$annEmpType, $annEmpDept]);
+                    $rows = $annStmt->fetchAll(PDO::FETCH_ASSOC);
                     echo json_encode(['success' => true, 'data' => $rows]);
                 } catch (PDOException $annEx) {
                     error_log('[HRMS] Announcements error: ' . $annEx->getMessage());
@@ -928,6 +957,10 @@ if ($action) {
                 break;
 
             case 'get_sr_requests':
+                // C-2: Admin/HR only
+                if (!in_array($_SESSION['user_role'], ['admin', 'hr_staff']) && empty($_SESSION['switched_from_admin'])) {
+                    echo json_encode(['success' => false, 'message' => 'Access denied.']); break;
+                }
                 // Admin: get all pending sr_requests
                 $rows = $pdo->query("SELECT r.*, CONCAT(e.first_name,' ',e.last_name) AS emp_name, e.employee_code, d.name AS department
                     FROM sr_requests r JOIN employees e ON e.employee_id=r.employee_id
@@ -937,6 +970,10 @@ if ($action) {
                 break;
 
             case 'resolve_sr_request':
+                // C-2: Admin/HR only
+                if (!in_array($_SESSION['user_role'], ['admin', 'hr_staff']) && empty($_SESSION['switched_from_admin'])) {
+                    echo json_encode(['success' => false, 'message' => 'Access denied.']); break;
+                }
                 $reqId  = (int)($_POST['req_id']??0);
                 $status = $_POST['status']??'';
                 $note   = trim($_POST['admin_note']??'');
@@ -984,12 +1021,29 @@ if ($action) {
                     'personal_subtotal'   => ($data['personal_subtotal']?? '') !== '' ? (float)$data['personal_subtotal']: null,
                     'total_assets'        => ($data['total_assets']     ?? '') !== '' ? (float)$data['total_assets']     : null,
                     'total_liabilities'   => ($data['total_liabilities']?? '') !== '' ? (float)$data['total_liabilities']: null,
-                    'net_worth'           => ($data['net_worth']        ?? '') !== '' ? (float)$data['net_worth']        : null,
+                    // P2-12: net_worth is computed server-side from JSON arrays, never trusted from client
+                    'net_worth'           => null, // overwritten below
                     'gov_id'              => $data['gov_id']     ?? null,
                     'gov_id_no'           => $data['gov_id_no']  ?? null,
                     'gov_id_issued'       => $data['gov_id_issued'] ?? null,
                     'updated_at'          => date('Y-m-d H:i:s'),
                 ];
+
+                // P2-12 — Compute net_worth server-side
+                $snRealAssets = array_sum(array_map(
+                    fn($r) => (float)($r['market_value'] ?? $r['assessed_value'] ?? 0),
+                    $data['real_properties'] ?? []
+                ));
+                $snPersonalAssets = array_sum(array_map(
+                    fn($r) => (float)($r['acq_cost'] ?? 0),
+                    $data['personal_properties'] ?? []
+                ));
+                $snLiabilities = array_sum(array_map(
+                    fn($r) => (float)($r['balance'] ?? 0),
+                    $data['liabilities'] ?? []
+                ));
+                $fields['net_worth'] = ($snRealAssets + $snPersonalAssets) - $snLiabilities;
+
                 if ($existingId) {
                     $set = implode(', ', array_map(fn($k) => "$k = ?", array_keys($fields)));
                     $pdo->prepare("UPDATE saln_records SET $set WHERE saln_id = ?")->execute([...array_values($fields), $existingId]);

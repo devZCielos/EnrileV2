@@ -18,6 +18,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
+require_once __DIR__ . '/../config/mailer.php';
 csrf_verify();
 
 // ── Collect & validate input ──────────────────────────────────
@@ -44,7 +45,22 @@ try {
 
     if ($user) {
 
-        // ── 1. Generate a cryptographically secure token ──────
+        // M-3 — Rate-limit: one reset request per 5 minutes per account
+        $lastReset = $pdo->prepare('SELECT reset_expires FROM user_accounts WHERE user_id = ?');
+        $lastReset->execute([$user['user_id']]);
+        $currentExpiry = $lastReset->fetchColumn();
+        if ($currentExpiry) {
+            $issuedAt = strtotime($currentExpiry) - 3600; // token was set for 1 hour; issued_at = expiry - 3600
+            if ((time() - $issuedAt) < 300) { // less than 5 minutes ago
+                // Silently skip — don’t reveal rate-limit to prevent enumeration
+                error_log('[HRMS] Reset rate-limited for user_id=' . $user['user_id']);
+                // Fall through to show same success message
+                $user = null;
+            }
+        }
+    }
+
+    if ($user) {──
         $rawToken  = bin2hex(random_bytes(32));          // 64-char hex — sent in email
         $hashToken = hash('sha256', $rawToken);          // stored in DB (never the raw value)
         $expiresAt = date('Y-m-d H:i:s', time() + 3600); // 1 hour from now
@@ -59,12 +75,14 @@ try {
         ")->execute([$hashToken, $expiresAt, $user['user_id']]);
 
         // ── 2. Build the reset URL ────────────────────────────
-        $protocol  = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-        $host      = $_SERVER['HTTP_HOST'] ?? 'localhost';
-        $resetUrl  = $protocol . '://' . $host
-                   . '/enrile/Login/reset_password.php'
-                   . '?token=' . urlencode($rawToken)
-                   . '&email=' . urlencode($email);
+        // Use the hardcoded APP_URL constant — never $_SERVER['HTTP_HOST'],
+        // which is attacker-controlled and enables Host Header Injection.
+        if (!defined('APP_URL')) {
+            require_once __DIR__ . '/../config/auth.php';
+        }
+        $resetUrl = rtrim(APP_URL, '/') . '/Login/reset_password.php'
+                  . '?token=' . urlencode($rawToken)
+                  . '&email=' . urlencode($email);
 
         // ── 3. Compose the email ──────────────────────────────
         $subject  = 'LGU Enrile HRMS — Password Reset Request';
@@ -78,51 +96,10 @@ try {
                   . "ignore this email. Your password will not be changed.\r\n\r\n"
                   . "— LGU Enrile HR Administrator";
 
-        // ── 4. Send via PHPMailer (SMTP) or fall back to mail() ──────────
-        // Install PHPMailer with: composer require phpmailer/phpmailer
-        // Then set MAIL_* values in your .env file.
-        $sent = false;
-        $phpMailerPath = __DIR__ . '/../vendor/autoload.php';
+        // ── 4. Send via centralised mailer (SMTP or mail() fallback) ────────
+        $sent = hrms_send_email($email, $subject, $bodyText);
 
-        if (file_exists($phpMailerPath) && getenv('MAIL_HOST')) {
-            // ── PHPMailer (SMTP) path ─────────────────────────
-            require_once $phpMailerPath;
-            $mail = new PHPMailer\PHPMailer\PHPMailer(true);
-            try {
-                $mail->isSMTP();
-                $mail->Host       = getenv('MAIL_HOST');
-                $mail->SMTPAuth   = true;
-                $mail->Username   = getenv('MAIL_USERNAME');
-                $mail->Password   = getenv('MAIL_PASSWORD');
-                $mail->SMTPSecure = PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
-                $mail->Port       = (int)(getenv('MAIL_PORT') ?: 587);
-                $mail->setFrom(
-                    getenv('MAIL_FROM')      ?: 'noreply@lgu-enrile.gov.ph',
-                    getenv('MAIL_FROM_NAME') ?: 'LGU Enrile HRMS'
-                );
-                $mail->addAddress($email);
-                $mail->Subject = $subject;
-                $mail->Body    = $bodyText;
-                $mail->send();
-                $sent = true;
-            } catch (\Exception $e) {
-                error_log('[HRMS] PHPMailer error: ' . $mail->ErrorInfo);
-            }
-        }
-
-        if (!$sent) {
-            // ── Fallback: PHP mail() (works on some servers, not XAMPP) ──
-            $headers  = "From: noreply@lgu-enrile.gov.ph\r\n";
-            $headers .= "Reply-To: hr@lgu-enrile.gov.ph\r\n";
-            $headers .= "Content-Type: text/plain; charset=UTF-8";
-            $sent = @mail($email, $subject, $bodyText, $headers);
-        }
-
-        // Always store reset URL in session for XAMPP dev convenience
-        // (visible on the forgot-password page when email cannot be sent)
-        session_start();
-        $_SESSION['reset_link']  = $resetUrl;
-        $_SESSION['reset_email'] = $email;
+        // Always log the reset link for XAMPP/dev environments where email cannot be sent.
         if (!$sent) {
             error_log('[HRMS] Reset email not sent. Link: ' . $resetUrl);
         }

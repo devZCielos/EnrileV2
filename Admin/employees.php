@@ -6,6 +6,20 @@
 // ============================================================
 session_start();
 
+// ── Session timeout — 8 hours ─────────────────────────────────
+$_sessionLifetime = 8 * 60 * 60;
+if (isset($_SESSION['login_time']) && (time() - strtotime($_SESSION['login_time']) > $_sessionLifetime)) {
+    $_isAjax = !empty($_GET['action']) || !empty($_POST['action']);
+    session_unset(); session_destroy();
+    if ($_isAjax) {
+        header('Content-Type: application/json');
+        echo json_encode(['success'=>false,'message'=>'Your session has expired. Please log in again.']);
+        exit();
+    }
+    header('Location: ../Login/login.php?error=' . urlencode('Your session has expired. Please log in again.'));
+    exit();
+}
+
 // ── Session guard ─────────────────────────────────────────────
 if (empty($_SESSION['user_id']) || empty($_SESSION['user_email'])) {
     header('Location: ../Login/login.php'); exit();
@@ -180,7 +194,16 @@ if ($action) {
                     $setCols = implode(', ', array_map(fn($k) => "$k = ?", array_keys($fields)));
                     $stmt    = $pdo->prepare("UPDATE employees SET $setCols WHERE employee_id = ?");
                     $stmt->execute([...array_values($fields), $id]);
-                    
+
+                    // P2-9 — Keep user_accounts.email in sync with employees.email_address
+                    if (!empty($fields['email_address'])) {
+                        $pdo->prepare("
+                            UPDATE user_accounts ua
+                            JOIN employees e ON e.user_id = ua.user_id
+                            SET ua.email = ?
+                            WHERE e.employee_id = ?
+                        ")->execute([$fields['email_address'], $id]);
+                    }
                     // ── Auto-create contract if employment_type is Contractual/JO/Casual ──
                     if (in_array($fields['employment_type'], ['Contractual', 'Job Order', 'Casual'])) {
                         $chk = $pdo->prepare("SELECT contract_id FROM contracts WHERE employee_id = ? LIMIT 1");

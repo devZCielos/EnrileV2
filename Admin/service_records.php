@@ -36,24 +36,8 @@ if ($action) {
 
             // ── Auto-create service_records table if needed ──────────────────
             case 'init':
-                $pdo->exec("CREATE TABLE IF NOT EXISTS service_records (
-                    sr_id            INT AUTO_INCREMENT PRIMARY KEY,
-                    employee_id      INT NOT NULL,
-                    date_from        DATE NULL,
-                    date_to          DATE NULL,
-                    designation      VARCHAR(200) NULL,
-                    status           VARCHAR(100) NULL,
-                    salary           DECIMAL(14,2) NULL,
-                    branch           VARCHAR(200) NULL,
-                    station          VARCHAR(200) NULL,
-                    lvbs_wo_pay      VARCHAR(200) NULL,
-                    separation_date  DATE NULL,
-                    separation_cause VARCHAR(200) NULL,
-                    created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    updated_at       DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                    INDEX idx_sr_emp (employee_id)
-                ) ENGINE=InnoDB");
-                echo json_encode(['success'=>true]);
+                // P3-9: Schema managed by config/migrations/004_service_records.sql
+                echo json_encode(['success'=>true,'message'=>'Schema is managed via migrations.']);
                 break;
 
             // ── List employees ───────────────────────────────────────────────
@@ -72,15 +56,7 @@ if ($action) {
                 $page = max(1,(int)($_GET['page']??1)); $ps = 15; $offset = ($page-1)*$ps;
                 $cnt  = $pdo->prepare("SELECT COUNT(*) FROM employees e $wSql");
                 $cnt->execute($params); $total = (int)$cnt->fetchColumn();
-                // Check if service_records table exists
-                $hasSR = false;
-                try {
-                    $pdo->query("SELECT 1 FROM service_records LIMIT 1");
-                    $hasSR = true;
-                } catch(Exception $ex) {}
-                $srSubQ = $hasSR
-                    ? "(SELECT COUNT(*) FROM service_records sr WHERE sr.employee_id=e.employee_id)"
-                    : "0";
+                $srSubQ = "(SELECT COUNT(*) FROM service_records sr WHERE sr.employee_id=e.employee_id)";
                 $stmt = $pdo->prepare("
                     SELECT e.employee_id, e.employee_code, e.first_name, e.last_name,
                            e.position_title, e.employment_type, e.date_hired,
@@ -96,24 +72,7 @@ if ($action) {
             // ── Get service record entries for one employee ──────────────────
             case 'get_records':
                 $empId = (int)($_GET['employee_id']??0);
-                // Ensure table exists
-                $pdo->exec("CREATE TABLE IF NOT EXISTS service_records (
-                    sr_id            INT AUTO_INCREMENT PRIMARY KEY,
-                    employee_id      INT NOT NULL,
-                    date_from        DATE NULL,
-                    date_to          DATE NULL,
-                    designation      VARCHAR(200) NULL,
-                    status           VARCHAR(100) NULL,
-                    salary           DECIMAL(14,2) NULL,
-                    branch           VARCHAR(200) NULL,
-                    station          VARCHAR(200) NULL,
-                    lvbs_wo_pay      VARCHAR(200) NULL,
-                    separation_date  DATE NULL,
-                    separation_cause VARCHAR(200) NULL,
-                    created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    updated_at       DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                    INDEX idx_sr_emp (employee_id)
-                ) ENGINE=InnoDB");
+                // P3-9: Schema managed by config/migrations/004_service_records.sql
                 $stmt = $pdo->prepare("SELECT * FROM service_records WHERE employee_id=? ORDER BY date_from ASC, sr_id ASC");
                 $stmt->execute([$empId]);
                 $rows = $stmt->fetchAll();
@@ -183,11 +142,7 @@ if ($action) {
 
             // ── SR Requests (from employee portal) ───────────────────────────
             case 'get_sr_requests':
-                try { $pdo->exec("CREATE TABLE IF NOT EXISTS sr_requests (
-                    req_id INT AUTO_INCREMENT PRIMARY KEY, employee_id INT NOT NULL,
-                    purpose VARCHAR(300) NULL, status ENUM('Pending','Approved','Denied') DEFAULT 'Pending',
-                    admin_note TEXT NULL, requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    resolved_at DATETIME NULL, INDEX idx_srr_emp (employee_id)) ENGINE=InnoDB"); } catch(Exception $ex) {}
+                // P3-9: Schema managed by config/migrations/004_service_records.sql
                 $rows = $pdo->query("SELECT r.*, CONCAT(e.first_name,' ',e.last_name) AS emp_name,
                     e.employee_code, d.name AS department
                     FROM sr_requests r JOIN employees e ON e.employee_id=r.employee_id

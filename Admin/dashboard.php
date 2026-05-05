@@ -26,6 +26,8 @@ $adminName  = isset($_SESSION['user_name']) ? ucwords($_SESSION['user_name']) : 
 $roleLabels = ['admin'=>'Super Admin','hr_staff'=>'HR Staff','dept_head'=>'Department Head'];
 $roleLabel  = $roleLabels[$_SESSION['user_role'] ?? 'admin'] ?? 'Administrator';
 $initials   = strtoupper(implode('', array_map(fn($w)=>$w[0]??'', array_slice(explode(' ', $adminName), 0, 2))));
+// U-2: Pass login timestamp to JS for client-side session warning
+$_loginTimeTs = isset($_SESSION['login_time']) ? strtotime($_SESSION['login_time']) : time();
 
 // ── DB connection ──────────────────────────────────────────────────────────
 $possibleDb = [__DIR__.'/../config/db.php', __DIR__.'/config/db.php'];
@@ -1921,6 +1923,66 @@ function toggleSidebar() {
   </div>
 
   <script>
+  // ── U-1: Double-submit prevention ─────────────────────────────
+  // Disable any submit button immediately when its parent form is submitted.
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    var btn  = form.querySelector('button[type="submit"], input[type="submit"]');
+    if (btn && !btn.disabled) {
+      btn.disabled = true;
+      btn._origText = btn.innerHTML;
+      btn.innerHTML = '⏳ Processing…';
+      // Re-enable after 10s as a safety net (in case no page reload occurs)
+      setTimeout(function() {
+        btn.disabled  = false;
+        btn.innerHTML = btn._origText;
+      }, 10000);
+    }
+  }, true);
+
+  // ── U-2: Session expiry warning banner ────────────────────────
+  (function() {
+    var SESSION_LIFETIME = 8 * 60 * 60; // seconds — must match PHP
+    var loginTimeTs      = <?php echo (int)$_loginTimeTs; ?>;
+    var warnBefore       = 5 * 60; // warn 5 minutes before expiry
+    var warningShown     = false;
+
+    function checkSession() {
+      var elapsed   = Math.floor(Date.now() / 1000) - loginTimeTs;
+      var remaining = SESSION_LIFETIME - elapsed;
+
+      if (remaining <= 0) {
+        // Session already expired — redirect
+        window.location.href = '../Login/login.php?error=' + encodeURIComponent('Your session has expired. Please log in again.');
+        return;
+      }
+
+      if (remaining <= warnBefore && !warningShown) {
+        warningShown = true;
+        var mins = Math.ceil(remaining / 60);
+        var banner = document.createElement('div');
+        banner.id = 'sessionWarnBanner';
+        banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#1c1917;padding:10px 16px;font-size:0.875rem;font-weight:700;display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+        banner.innerHTML = '<span>⚠️ Your session will expire in <strong id="sessionCountdown">' + mins + ' minute' + (mins !== 1 ? 's' : '') + '</strong>. Please save your work and refresh the page.</span>'
+                         + '<button onclick="this.parentNode.remove()" style="background:none;border:none;font-size:1.1rem;cursor:pointer;color:#1c1917;" title="Dismiss">✕</button>';
+        document.body.prepend(banner);
+
+        // Countdown every second
+        var countdownEl = document.getElementById('sessionCountdown');
+        var tick = setInterval(function() {
+          var now = Math.floor(Date.now() / 1000);
+          var rem = SESSION_LIFETIME - (now - loginTimeTs);
+          if (rem <= 0) { clearInterval(tick); return; }
+          var m = Math.floor(rem / 60), s = rem % 60;
+          if (countdownEl) countdownEl.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+        }, 1000);
+      }
+    }
+
+    setInterval(checkSession, 30000); // check every 30 seconds
+    checkSession(); // run immediately on load
+  })();
+
   var CW_ME   = <?php echo (int)($_SESSION['user_id'] ?? 0); ?>;
   var CW_INIT = <?php echo json_encode(strtoupper(substr($adminName ?? 'AD', 0, 2))); ?>;
   var CW_API  = 'chat_api.php';

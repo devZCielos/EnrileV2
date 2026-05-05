@@ -58,16 +58,28 @@ if ($action) {
                 break;
 
             case 'announcements':
+                // P2-11 — Filter announcements by audience and department
+                $empInfo = $pdo->prepare("SELECT employment_type, department_id FROM employees WHERE employee_id=?");
+                $empInfo->execute([$employeeId]);
+                $empData = $empInfo->fetch();
+                $empType  = $empData['employment_type'] ?? 'Permanent';
+                $empDept  = (int)($empData['department_id'] ?? 0);
+
                 $stmt = $pdo->prepare("
                     SELECT title, created_at FROM announcements
                     WHERE status = 'Published'
                     AND (publish_date IS NULL OR publish_date <= CURDATE())
                     AND (expiry_date IS NULL OR expiry_date >= CURDATE())
                     AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+                    AND (
+                        audience = 'All'
+                        OR audience = ?
+                        OR (audience = 'Department' AND (department_id IS NULL OR department_id = ?))
+                    )
                     ORDER BY pinned DESC, created_at DESC
                     LIMIT 3
                 ");
-                $stmt->execute();
+                $stmt->execute([$empType, $empDept]);
                 echo json_encode(['success' => true, 'data' => $stmt->fetchAll()]);
                 break;
 

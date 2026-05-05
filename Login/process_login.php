@@ -32,31 +32,16 @@ if (strlen($password) < 6) {
 }
 
 // ── Brute-force protection ────────────────────────────────────
-// Track failed attempts per email in session. After 5 failures,
-// lock the account for 15 minutes. The counter is reset on success.
-$attemptKey  = 'login_fail_'   . md5($email);
-$timeKey     = 'login_fail_ts_' . md5($email);
+// Track failed attempts per email in user_accounts (DB-backed).
+// After 5 failures the account is locked for 15 minutes.
+// Opening a new tab / browser cannot bypass this.
 $maxAttempts = 5;
 $lockSeconds = 15 * 60; // 15 minutes
 
-$attempts  = (int)($_SESSION[$attemptKey]  ?? 0);
-$firstFail = (int)($_SESSION[$timeKey]     ?? 0);
-
-// Reset counter if lockout window has expired
-if ($attempts >= $maxAttempts && $firstFail && (time() - $firstFail) >= $lockSeconds) {
-    unset($_SESSION[$attemptKey], $_SESSION[$timeKey]);
-    $attempts = 0;
-}
-
-if ($attempts >= $maxAttempts) {
-    $remaining = $lockSeconds - (time() - $firstFail);
-    $minutes   = (int)ceil($remaining / 60);
-    redirectBack("Too many failed login attempts. Please try again in {$minutes} minute(s).", $email, $role);
-}
-
 try {
     $stmt = $pdo->prepare("
-        SELECT user_id, email, password_hash, role, is_active
+        SELECT user_id, email, password_hash, role, is_active,
+               failed_login_attempts, locked_until
         FROM   user_accounts
         WHERE  email = ?
         LIMIT  1
@@ -68,13 +53,40 @@ try {
     redirectBack('A system error occurred. Please try again later.', $email, $role);
 }
 
-if (!$user || !password_verify($password, $user['password_hash'])) {
-    // Increment attempt counter
-    if (!$firstFail) {
-        $_SESSION[$timeKey] = time();
+// Check lockout before password verify (even for wrong emails, fail silently)
+if ($user) {
+    $attempts   = (int)($user['failed_login_attempts'] ?? 0);
+    $lockedUntil = $user['locked_until'] ? strtotime($user['locked_until']) : 0;
+
+    // If lockout has expired, clear it now
+    if ($lockedUntil && time() >= $lockedUntil) {
+        $pdo->prepare("UPDATE user_accounts SET failed_login_attempts=0, locked_until=NULL WHERE user_id=?")
+            ->execute([$user['user_id']]);
+        $attempts    = 0;
+        $lockedUntil = 0;
     }
-    $_SESSION[$attemptKey] = $attempts + 1;
-    $remaining = $maxAttempts - ($_SESSION[$attemptKey]);
+
+    if ($lockedUntil && time() < $lockedUntil) {
+        $minutes = (int)ceil(($lockedUntil - time()) / 60);
+        redirectBack("Too many failed login attempts. Please try again in {$minutes} minute(s).", $email, $role);
+    }
+}
+
+if (!$user || !password_verify($password, $user['password_hash'])) {
+    // Increment DB-backed attempt counter; lock after $maxAttempts failures
+    if ($user) {
+        $newAttempts = (int)($user['failed_login_attempts'] ?? 0) + 1;
+        if ($newAttempts >= $maxAttempts) {
+            $lockUntil = date('Y-m-d H:i:s', time() + $lockSeconds);
+            $pdo->prepare("UPDATE user_accounts SET failed_login_attempts=?, locked_until=? WHERE user_id=?")
+                ->execute([$newAttempts, $lockUntil, $user['user_id']]);
+            redirectBack("Too many failed login attempts. Please try again in 15 minutes.", $email, $role);
+        } else {
+            $pdo->prepare("UPDATE user_accounts SET failed_login_attempts=? WHERE user_id=?")
+                ->execute([$newAttempts, $user['user_id']]);
+        }
+    }
+    $remaining = $user ? ($maxAttempts - (int)($user['failed_login_attempts'] ?? 0) - 1) : $maxAttempts;
     $msg = $remaining > 0
         ? "Incorrect email or password. {$remaining} attempt(s) remaining."
         : "Too many failed login attempts. Please try again in 15 minutes.";
@@ -85,24 +97,9 @@ if (!(bool)$user['is_active']) {
     redirectBack('Your account has been deactivated. Please contact the HR Administrator.', $email, $role);
 }
 
-// ── Role mismatch check ───────────────────────────────────────
-// If someone clicks "Employee" toggle but their DB role is admin (or vice versa),
-// warn them instead of silently redirecting to the wrong portal.
-
-$dbRole = $user['role'];
-$isAdminRole = in_array($dbRole, ['admin', 'hr_staff']); // dept_head is now allowed as employee
-
-
-// Allow dept_head to log in as employee, but block as admin/hr
-if ($role === 'employee' && $isAdminRole) {
-    redirectBack('This account is an Admin/HR account. Please use the Admin/HR login.', $email, $role);
-}
-if ($role !== 'employee' && $dbRole === 'employee') {
-    redirectBack('This account is an Employee account. Please use the Employee login.', $email, $role);
-}
-if ($role !== 'employee' && $dbRole === 'dept_head') {
-    redirectBack('Department Heads must use the Employee login.', $email, $role);
-}
+// ── Determine role from DB — redirect target set at the bottom ──
+$dbRole      = $user['role'];
+$isAdminRole = in_array($dbRole, ['admin', 'hr_staff']);
 
 // ── Regenerate session (clear any old admin session) ──────────
 session_unset();
@@ -111,7 +108,8 @@ session_start();
 session_regenerate_id(true);
 
 // ── Clear brute-force counters on successful login ────────────
-unset($_SESSION[$attemptKey], $_SESSION[$timeKey]);
+$pdo->prepare("UPDATE user_accounts SET failed_login_attempts=0, locked_until=NULL WHERE user_id=?")
+    ->execute([$user['user_id']]);
 
 // ── Store session variables ───────────────────────────────────
 $_SESSION['user_id']    = $user['user_id'];
@@ -149,7 +147,8 @@ if ($remember === 'on') {
             'expires'  => time() + (30 * 24 * 3600),
             'path'     => '/',
             'httponly' => true,
-            'samesite' => 'Lax',
+            'samesite' => 'Strict',
+            'secure'   => (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off'),
         ]);
         $pdo->prepare("UPDATE user_accounts SET remember_token = ? WHERE user_id = ?")
             ->execute([$tokenHash, $user['user_id']]);
@@ -181,6 +180,11 @@ try {
 }
 
 // ── Redirect ──────────────────────────────────────────────────
+// If the account was flagged for a mandatory password change, redirect there first.
+if (!empty($user['must_change_password'])) {
+    header('Location: ../Login/reset_password.php?force=1');
+    exit();
+}
 if ($isAdminRole) {
     header('Location: ../Admin/dashboard.php');
 } else {

@@ -182,12 +182,12 @@ footer {
 
   <section id="contact" class="about">
     <h2>Contact Us</h2>
-    <p>Email: info@mysystem.com</p>
-    <p>Phone: +63 900 000 0000</p>
+    <p>Email: lguenrile.cagayan@gmail.com</p>
+    <p>Phone: +63 78 844 1234</p>
   </section>
 
   <footer>
-    <p>&copy; 2026 My Web System. All rights reserved.</p>
+    <p>&copy; 2026 LGU Enrile HRMS. All rights reserved.</p>
   </footer>
 </body>
 </html>

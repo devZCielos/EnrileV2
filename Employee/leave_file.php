@@ -79,7 +79,27 @@ if ($action) {
                     break;
                 }
 
-                $daysRequested = floor(($to - $from) / 86400) + 1;
+                // P2-4 — Count working days only (excludes weekends + holidays table)
+                $daysRequested = countBusinessDays($pdo, $dateFrom, $dateTo);
+                if ($daysRequested < 1) {
+                    echo json_encode(['success' => false, 'message' => 'The selected date range contains no working days.']);
+                    break;
+                }
+
+                // P2-5 — Enforce gender restriction on leave type
+                $ltStmt = $pdo->prepare("SELECT gender_restriction FROM leave_types WHERE leave_type_id=?");
+                $ltStmt->execute([$typeId]);
+                $lt = $ltStmt->fetch();
+                if ($lt && !empty($lt['gender_restriction']) && $lt['gender_restriction'] !== 'Any') {
+                    // Fetch employee's sex from the employees table
+                    $sexStmt = $pdo->prepare("SELECT sex FROM employees WHERE employee_id=?");
+                    $sexStmt->execute([$employeeId]);
+                    $empSex = $sexStmt->fetchColumn();
+                    if ($empSex && strtolower($empSex) !== strtolower($lt['gender_restriction'])) {
+                        echo json_encode(['success' => false, 'message' => 'This leave type is restricted to ' . $lt['gender_restriction'] . ' employees only.']);
+                        break;
+                    }
+                }
 
                 // Check balance
                 $stmt = $pdo->prepare("

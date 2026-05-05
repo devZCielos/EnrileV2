@@ -230,11 +230,36 @@ if ($action) {
                 $remark  = trim($_POST['remark']  ?? '') ?: 'Approved.';
                 $adminId = $_SESSION['user_id'];
 
-
                 $req = $pdo->prepare("SELECT * FROM leave_requests WHERE request_id = ? AND LOWER(status) LIKE 'pending%'");
                 $req->execute([$id]);
                 $r = $req->fetch();
                 if (!$r) { echo json_encode(['success'=>false,'message'=>'Request not found or already processed.']); break; }
+
+                // P2-3 — Balance sufficiency check before approving
+                $leaveYear = (int)date('Y', strtotime($r['date_from']));
+                $balStmt = $pdo->prepare("
+                    SELECT remaining_days FROM leave_balances
+                    WHERE employee_id=? AND leave_type_id=? AND calendar_year=?
+                ");
+                $balStmt->execute([$r['employee_id'], $r['leave_type_id'], $leaveYear]);
+                $balance = $balStmt->fetchColumn();
+                if ($balance !== false && (float)$balance < (float)$r['days_requested']) {
+                    echo json_encode(['success'=>false,'message'=>'Insufficient leave balance. Employee has ' . (float)$balance . ' day(s) remaining.']);
+                    break;
+                }
+
+                // P2-2 — Overlap detection: reject if another approved leave covers same dates
+                $overlapStmt = $pdo->prepare("
+                    SELECT COUNT(*) FROM leave_requests
+                    WHERE employee_id=? AND request_id!=? AND is_deleted=0
+                      AND status='Approved'
+                      AND date_from <= ? AND date_to >= ?
+                ");
+                $overlapStmt->execute([$r['employee_id'], $id, $r['date_to'], $r['date_from']]);
+                if ((int)$overlapStmt->fetchColumn() > 0) {
+                    echo json_encode(['success'=>false,'message'=>'Overlap detected: employee already has an approved leave covering these dates.']);
+                    break;
+                }
 
                 $pdo->prepare("
                     UPDATE leave_requests
@@ -242,13 +267,13 @@ if ($action) {
                     WHERE request_id=?
                 ")->execute([$remark, $adminId, $id]);
 
-                // Deduct from leave balance
+                // P2-1 — Deduct from leave balance using the year of date_from, not YEAR(NOW())
                 $pdo->prepare("
                     UPDATE leave_balances
                     SET used_days      = used_days + ?,
                         remaining_days = remaining_days - ?
-                    WHERE employee_id=? AND leave_type_id=? AND calendar_year=YEAR(NOW())
-                ")->execute([$r['days_requested'], $r['days_requested'], $r['employee_id'], $r['leave_type_id']]);
+                    WHERE employee_id=? AND leave_type_id=? AND calendar_year=?
+                ")->execute([$r['days_requested'], $r['days_requested'], $r['employee_id'], $r['leave_type_id'], $leaveYear]);
 
                 // Log activity (only if table exists)
                 try {

@@ -19,6 +19,12 @@
 // Session timeout — 8 hours (matches Employee portal)
 define('SESSION_LIFETIME', 8 * 60 * 60);
 
+// Hardcoded application base URL — used for all server-generated links (password reset, etc.)
+// Change this to match your deployment environment. Never use $_SERVER['HTTP_HOST'] for links.
+if (!defined('APP_URL')) {
+    define('APP_URL', 'http://localhost/enrilecagayann_V2');
+}
+
 /**
  * Enforce admin authentication and session timeout.
  *
@@ -33,6 +39,8 @@ function require_admin_auth(array $allowedRoles = ['admin', 'hr_staff', 'dept_he
     header('X-Content-Type-Options: nosniff');
     header('Referrer-Policy: strict-origin-when-cross-origin');
     header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
+    // P3-6 — Content Security Policy (restricts script/style sources to same origin)
+    header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none';");
 
     // Detect AJAX: action param present (all admin AJAX pages use ?action=...)
     $isAjax = !empty($_GET['action']) || !empty($_POST['action']);

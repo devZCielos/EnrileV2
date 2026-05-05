@@ -28,6 +28,7 @@ if (!in_array($_SESSION['user_role'] ?? '', $allowedRoles)) {
 
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
+require_once __DIR__ . '/../config/mailer.php';
 
 // ════════════════════════════════════════════════════════════
 //  AJAX HANDLER
@@ -144,6 +145,13 @@ if ($action) {
                 $password    = trim($_POST['password']    ?? '');
                 $isActive    = isset($_POST['is_active']) ? (int)$_POST['is_active'] : 1;
 
+                // Validate role against the known set — reject any arbitrary string
+                $validRoles = ['admin', 'hr_staff', 'dept_head', 'employee'];
+                if (!in_array($role, $validRoles, true)) {
+                    echo json_encode(['success' => false, 'message' => 'Invalid role specified.']);
+                    break;
+                }
+
                 if (empty($email)) {
                     echo json_encode(['success' => false, 'message' => 'Email is required.']);
                     break;
@@ -201,29 +209,34 @@ if ($action) {
                         }
                     }
 
-                    // ── Send welcome email with credentials ──────────────────
-                    $subject = 'Your LGU Enrile HRMS Account Created';
+                    // ── Generate a one-time password-setup link instead of emailing plaintext password ──
+                    $rawToken  = bin2hex(random_bytes(32));
+                    $hashToken = hash('sha256', $rawToken);
+                    $expiresAt = date('Y-m-d H:i:s', time() + 48 * 3600); // 48-hour window
+                    $pdo->prepare("UPDATE user_accounts SET reset_token=?, reset_expires=?, must_change_password=1 WHERE user_id=?")
+                        ->execute([$hashToken, $expiresAt, $newId]);
+
+                    if (!defined('APP_URL')) {
+                        require_once __DIR__ . '/../config/auth.php';
+                    }
+                    $setupUrl = rtrim(APP_URL, '/') . '/Login/reset_password.php'
+                              . '?token=' . urlencode($rawToken)
+                              . '&email=' . urlencode($email);
+
+                    // ── Send welcome email with setup link (no plaintext password) ──
+                    $subject = 'Your LGU Enrile HRMS Account Has Been Created';
                     $message = "Hello" . ($empName ? " {$empName}" : "") . ",\r\n\r\n"
-                             . "Your account has been created in the LGU Enrile HRMS system.\r\n\r\n"
+                             . "An account has been created for you in the LGU Enrile HRMS system.\r\n\r\n"
                              . "📧 Email: {$email}\r\n"
-                             . "🔐 Password: {$password}\r\n"
                              . "👤 Role: " . ucfirst(str_replace('_', ' ', $role)) . "\r\n\r\n"
-                             . "🔗 Login here: " . (isset($_SERVER['HTTP_HOST']) ? 'http://' . $_SERVER['HTTP_HOST'] . '/enrile/Login/login.php' : 'http://localhost/enrile/Login/login.php') . "\r\n\r\n"
-                             . "⚠️ IMPORTANT:\r\n"
-                             . "1. Please log in with the credentials above\r\n"
-                             . "2. Change your password immediately upon first login\r\n"
-                             . "3. Do not share this password with anyone\r\n\r\n"
-                             . "If you have any issues accessing your account, please contact HR.\r\n\r\n"
+                             . "Click the link below to set your password (expires in 48 hours):\r\n"
+                             . $setupUrl . "\r\n\r\n"
+                             . "If you did not expect this email, please contact HR.\r\n\r\n"
                              . "— LGU Enrile Human Resources";
 
-                    $headers  = "From: noreply@lgu-enrile.gov.ph\r\n";
-                    $headers .= "Reply-To: hr@lgu-enrile.gov.ph\r\n";
-                    $headers .= "X-Mailer: PHP/" . phpversion() . "\r\n";
-                    $headers .= "Content-Type: text/plain; charset=UTF-8";
-
-                    $sent = @mail($email, $subject, $message, $headers);
+                    $sent = hrms_send_email($email, $subject, $message);
                     if (!$sent) {
-                        error_log('[HRMS] Welcome email not sent to ' . $email . ' (mail() unavailable)');
+                        error_log('[HRMS] Welcome email not sent to ' . $email . '. Setup link: ' . $setupUrl);
                     }
 
                     echo json_encode(['success' => true, 'message' => 'Account created successfully. Credentials sent to ' . $email, 'id' => $newId]);
@@ -252,42 +265,88 @@ if ($action) {
                 if (strlen($password) < 8) {
                     echo json_encode(['success' => false, 'message' => 'Password must be at least 8 characters.']); break;
                 }
-                
+
                 // Get user email before updating password
                 $userStmt = $pdo->prepare("SELECT email FROM user_accounts WHERE user_id = ?");
                 $userStmt->execute([$id]);
                 $userEmail = $userStmt->fetchColumn();
-                
+
+                // Hash and store the new password; mark must_change_password so user
+                // is forced to choose their own password on next login.
                 $hash = password_hash($password, PASSWORD_BCRYPT);
-                $pdo->prepare("UPDATE user_accounts SET password_hash = ?, updated_at = NOW() WHERE user_id = ?")->execute([$hash, $id]);
-                
-                // ── Send password reset email ──────────────────────────────
+                $pdo->prepare("UPDATE user_accounts SET password_hash=?, must_change_password=1, updated_at=NOW() WHERE user_id=?")
+                    ->execute([$hash, $id]);
+
+                // ── Send notification email with login link (no plaintext password) ──
                 if (!empty($userEmail)) {
-                    $subject = 'Your Password Has Been Reset';
-                    $message = "Hello,\r\n\r\n"
-                             . "An administrator has reset your password in the LGU Enrile HRMS system.\r\n\r\n"
-                             . "📧 Email: {$userEmail}\r\n"
-                             . "🔐 New Password: {$password}\r\n\r\n"
-                             . "🔗 Login here: " . (isset($_SERVER['HTTP_HOST']) ? 'http://' . $_SERVER['HTTP_HOST'] . '/enrile/Login/login.php' : 'http://localhost/enrile/Login/login.php') . "\r\n\r\n"
-                             . "⚠️ IMPORTANT:\r\n"
-                             . "1. Use the password above to log in\r\n"
-                             . "2. Change your password immediately upon login\r\n"
-                             . "3. Do not share this password with anyone\r\n\r\n"
-                             . "If you did not request this password reset, please contact HR immediately.\r\n\r\n"
-                             . "— LGU Enrile Human Resources";
+                    if (!defined('APP_URL')) {
+                        require_once __DIR__ . '/../config/auth.php';
+                    }
+                    $loginUrl = rtrim(APP_URL, '/') . '/Login/login.php';
+                    $subject  = 'Your Password Has Been Reset';
+                    $message  = "Hello,\r\n\r\n"
+                              . "An administrator has reset your password in the LGU Enrile HRMS system.\r\n\r\n"
+                              . "📧 Email: {$userEmail}\r\n\r\n"
+                              . "Please log in and set a new password when prompted:\r\n"
+                              . $loginUrl . "\r\n\r\n"
+                              . "If you did not request this change, contact HR immediately.\r\n\r\n"
+                              . "— LGU Enrile Human Resources";
 
-                    $headers  = "From: noreply@lgu-enrile.gov.ph\r\n";
-                    $headers .= "Reply-To: hr@lgu-enrile.gov.ph\r\n";
-                    $headers .= "X-Mailer: PHP/" . phpversion() . "\r\n";
-                    $headers .= "Content-Type: text/plain; charset=UTF-8";
-
-                    $sent = @mail($userEmail, $subject, $message, $headers);
+                    $sent = hrms_send_email($userEmail, $subject, $message);
                     if (!$sent) {
-                        error_log('[HRMS] Password reset email not sent to ' . $userEmail . ' (mail() unavailable)');
+                        error_log('[HRMS] Password reset email not sent to ' . $userEmail);
                     }
                 }
-                
+
                 echo json_encode(['success' => true, 'message' => 'Password reset successfully. Email notification sent.']);
+                break;
+
+            // ── RESEND WELCOME EMAIL ──────────────────────────
+            case 'resend_welcome':
+                $id = (int)($_POST['id'] ?? 0);
+                if (!$id) { echo json_encode(['success' => false, 'message' => 'Invalid ID.']); break; }
+
+                $uStmt = $pdo->prepare("SELECT email, role FROM user_accounts WHERE user_id = ?");
+                $uStmt->execute([$id]);
+                $uRow = $uStmt->fetch();
+                if (!$uRow) { echo json_encode(['success' => false, 'message' => 'Account not found.']); break; }
+
+                // Get linked employee name
+                $rwEmpName = '';
+                $rwEmpStmt = $pdo->prepare("SELECT first_name, last_name FROM employees WHERE user_id = ?");
+                $rwEmpStmt->execute([$id]);
+                $rwEmpRow = $rwEmpStmt->fetch();
+                if ($rwEmpRow) {
+                    $rwEmpName = $rwEmpRow['first_name'] . ' ' . $rwEmpRow['last_name'];
+                }
+
+                // Generate a fresh 48h password-setup token
+                $rwRawToken  = bin2hex(random_bytes(32));
+                $rwHashToken = hash('sha256', $rwRawToken);
+                $rwExpires   = date('Y-m-d H:i:s', time() + 48 * 3600);
+                $pdo->prepare("UPDATE user_accounts SET reset_token=?, reset_expires=?, must_change_password=1 WHERE user_id=?")
+                    ->execute([$rwHashToken, $rwExpires, $id]);
+
+                if (!defined('APP_URL')) { require_once __DIR__ . '/../config/auth.php'; }
+                $rwSetupUrl = rtrim(APP_URL, '/') . '/Login/reset_password.php'
+                            . '?token=' . urlencode($rwRawToken)
+                            . '&email=' . urlencode($uRow['email']);
+
+                $rwSubject = 'Your LGU Enrile HRMS Account Access';
+                $rwMessage = "Hello" . ($rwEmpName ? " {$rwEmpName}" : "") . ",\r\n\r\n"
+                           . "Here is your access link to the LGU Enrile HRMS system.\r\n\r\n"
+                           . "\xF0\x9F\x93\x9D Email: {$uRow['email']}\r\n"
+                           . "\xF0\x9F\x91\xA4 Role: " . ucfirst(str_replace('_', ' ', $uRow['role'])) . "\r\n\r\n"
+                           . "Click the link below to set your password (expires in 48 hours):\r\n"
+                           . $rwSetupUrl . "\r\n\r\n"
+                           . "If you did not expect this email, please contact HR.\r\n\r\n"
+                           . "\u2014 LGU Enrile Human Resources";
+
+                $rwSent = hrms_send_email($uRow['email'], $rwSubject, $rwMessage);
+                if (!$rwSent) {
+                    error_log('[HRMS] Resend welcome email not sent to ' . $uRow['email'] . '. Setup link: ' . $rwSetupUrl);
+                }
+                echo json_encode(['success' => true, 'message' => 'Welcome email resent to ' . $uRow['email']]);
                 break;
 
             // ── DELETE ───────────────────────────────────────
@@ -297,6 +356,16 @@ if ($action) {
                 // Prevent self-deletion
                 if ($id === (int)$_SESSION['user_id']) {
                     echo json_encode(['success' => false, 'message' => 'You cannot delete your own account.']); break;
+                }
+                // C-4: Prevent deleting the last admin account
+                $targetRole = $pdo->prepare('SELECT role FROM user_accounts WHERE user_id = ?');
+                $targetRole->execute([$id]);
+                $tRole = $targetRole->fetchColumn();
+                if (in_array($tRole, ['admin', 'hr_staff'])) {
+                    $adminCount = (int)$pdo->query("SELECT COUNT(*) FROM user_accounts WHERE role IN ('admin','hr_staff') AND is_active = 1")->fetchColumn();
+                    if ($adminCount <= 1) {
+                        echo json_encode(['success' => false, 'message' => 'Cannot delete the last admin/HR account. Assign another admin first.']); break;
+                    }
                 }
                 $pdo->prepare("UPDATE employees SET user_id = NULL WHERE user_id = ?")->execute([$id]);
                 $pdo->prepare("DELETE FROM user_accounts WHERE user_id = ?")->execute([$id]);
@@ -919,6 +988,7 @@ function getCSRFToken() {
           <div class="row-actions">
             <button class="icon-btn edit"   onclick="editAccount(${u.user_id})"   title="Edit">✏️</button>
             <button class="icon-btn reset"  onclick="openReset(${u.user_id},'${u.email.replace(/'/g,"\\'")}')" title="Reset Password">🔑</button>
+            <button class="icon-btn resend" onclick="resendWelcome(${u.user_id},'${u.email.replace(/'/g,"\\'")}')" title="Resend Welcome Email">📧</button>
             <button class="icon-btn toggle" onclick="toggleActive(${u.user_id}, this)" title="${u.is_active ? 'Deactivate' : 'Activate'}">${u.is_active ? '🔒' : '🔓'}</button>
             ${!isSelf ? `<button class="icon-btn delete" onclick="deleteAccount(${u.user_id},'${u.email.replace(/'/g,"\\'")}')" title="Delete">🗑️</button>` : ''}
           </div>
@@ -1136,6 +1206,24 @@ function getCSRFToken() {
       }
     } catch(e) {
       showToast('❌ Failed.', 'error');
+    }
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  RESEND WELCOME EMAIL  (U-7)
+  // ════════════════════════════════════════════════════════
+  async function resendWelcome(id, email) {
+    if (!confirm(`Resend welcome / password-setup email to "${email}"?`)) return;
+    const body = new FormData();
+    body.append('action',     'resend_welcome');
+    body.append('id',         id);
+    body.append('csrf_token', getCSRFToken());
+    try {
+      const res  = await fetch('user_accounts.php', { method:'POST', body });
+      const json = await res.json();
+      showToast(json.success ? '📧 ' + json.message : '❌ ' + json.message, json.success ? 'success' : 'error');
+    } catch(e) {
+      showToast('❌ Failed to resend email.', 'error');
     }
   }
 

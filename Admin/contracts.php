@@ -26,28 +26,7 @@ if (!in_array($_SESSION['user_role'] ?? '', $allowedRoles)) {
 }
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
-
-$pdo->exec("CREATE TABLE IF NOT EXISTS contracts (
-    contract_id INT AUTO_INCREMENT PRIMARY KEY,
-    employee_id INT NOT NULL,
-    contract_type ENUM('Permanent','Contractual','Casual','Job Order','Co-Terminus') NOT NULL DEFAULT 'Contractual',
-    contract_number VARCHAR(100) DEFAULT NULL,
-    position_title VARCHAR(150) NOT NULL,
-    department_id INT DEFAULT NULL,
-    salary_grade VARCHAR(50) DEFAULT NULL,
-    monthly_salary DECIMAL(12,2) DEFAULT NULL,
-    start_date DATE NOT NULL,
-    end_date DATE DEFAULT NULL,
-    status ENUM('Active','Expired','Terminated','Renewed') NOT NULL DEFAULT 'Active',
-    remarks TEXT DEFAULT NULL,
-    created_by INT DEFAULT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_employee_id (employee_id),
-    INDEX idx_department_id (department_id),
-    INDEX idx_status (status),
-    INDEX idx_end_date (end_date)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+// P3-9: Schema managed by config/migrations/005_contracts.sql
 
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
 if ($action) {
@@ -61,7 +40,9 @@ if ($action) {
                 if (!empty($_GET['status'])) { $where[]='c.status = ?'; $params[]=$_GET['status']; }
                 if (!empty($_GET['type']))   { $where[]='c.contract_type = ?'; $params[]=$_GET['type']; }
                 if (!empty($_GET['dept']))   { $where[]='d.name = ?'; $params[]=$_GET['dept']; }
-                $pdo->exec("UPDATE contracts SET status='Expired' WHERE end_date IS NOT NULL AND end_date < CURDATE() AND status='Active'");
+                // H-5: Auto-expire moved to cron (config/cron_leave_notifications.php)
+                // and the dedicated 'expire_contracts' action below.
+                // Running on every list call was a performance issue on large datasets.
                 $wSql = $where ? 'WHERE '.implode(' AND ',$where) : '';
                 $page=max(1,(int)($_GET['page']??1)); $pageSize=10; $offset=($page-1)*$pageSize;
                 $sortMap=['name'=>'e.last_name, e.first_name','start'=>'c.start_date','end'=>'c.end_date','status'=>'c.status','type'=>'c.contract_type'];
@@ -92,6 +73,14 @@ if ($action) {
                 if(!$deptId&&!empty($_POST['department_id'])) $deptId=(int)$_POST['department_id'];
                 $fields=['employee_id'=>$empId,'contract_type'=>$_POST['contract_type']??'Contractual','contract_number'=>trim($_POST['contract_number']??'')?:null,'position_title'=>trim($_POST['position_title']??''),'department_id'=>$deptId,'salary_grade'=>trim($_POST['salary_grade']??'')?:null,'monthly_salary'=>($_POST['monthly_salary']??'')!==''?(float)$_POST['monthly_salary']:null,'start_date'=>$_POST['start_date']?:null,'end_date'=>$_POST['end_date']?:null,'status'=>$_POST['status']??'Active','remarks'=>trim($_POST['remarks']??'')?:null,'created_by'=>(int)$_SESSION['user_id']];
                 if(!$fields['employee_id']||empty($fields['position_title'])||empty($fields['start_date'])){echo json_encode(['success'=>false,'message'=>'Employee, position, and start date are required.']);break;}
+                // P2-10a — Validate end_date > start_date
+                if($fields['end_date'] && $fields['start_date'] && $fields['end_date'] <= $fields['start_date']){echo json_encode(['success'=>false,'message'=>'End date must be after start date.']);break;}
+                // P2-10b — Prevent duplicate Active contract for same employee
+                if($fields['status']==='Active'){
+                    $dupChk=$pdo->prepare("SELECT COUNT(*) FROM contracts WHERE employee_id=? AND status='Active' AND contract_id!=?");
+                    $dupChk->execute([$empId,$id?:0]);
+                    if((int)$dupChk->fetchColumn()>0){echo json_encode(['success'=>false,'message'=>'This employee already has an Active contract. Renew or close it before adding a new one.']);break;}
+                }
                 if($id){$set=implode(', ',array_map(fn($k)=>"$k = ?",array_keys($fields)));$pdo->prepare("UPDATE contracts SET $set WHERE contract_id=?")->execute([...array_values($fields),$id]);echo json_encode(['success'=>true,'message'=>'Contract updated successfully.','id'=>$id]);}
                 else{$cols=implode(', ',array_keys($fields));$marks=implode(', ',array_fill(0,count($fields),'?'));$pdo->prepare("INSERT INTO contracts ($cols) VALUES ($marks)")->execute(array_values($fields));echo json_encode(['success'=>true,'message'=>'Contract added successfully.','id'=>(int)$pdo->lastInsertId()]);}
                 break;

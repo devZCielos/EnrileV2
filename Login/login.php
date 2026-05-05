@@ -256,75 +256,7 @@ if (!empty($_COOKIE['remember_token'])) {
       transition: all 0.25s;
     }
 
-    /* ══════════════════════════════════
-       ROLE TOGGLE  ← NEW
-    ══════════════════════════════════ */
-    .role-toggle {
-      display: flex;
-      background: rgba(255,255,255,0.10);
-      border: 1px solid rgba(255,255,255,0.22);
-      border-radius: 11px;
-      padding: 4px;
-      margin-bottom: 8px;
-      gap: 4px;
-    }
-
-    .role-btn {
-      flex: 1;
-      padding: 10px 8px;
-      border-radius: 8px;
-      border: none;
-      font-family: 'Nunito', sans-serif;
-      font-size: 0.84rem;
-      font-weight: 700;
-      cursor: pointer;
-      transition: all 0.25s;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      color: rgba(255,255,255,0.55);
-      background: transparent;
-    }
-
-    .role-btn:hover {
-      color: rgba(255,255,255,0.88);
-      background: rgba(255,255,255,0.08);
-    }
-
-    .role-btn.active {
-      background: rgba(255,255,255,0.22);
-      color: #fff;
-      box-shadow: 0 2px 12px rgba(0,0,0,0.16);
-    }
-
-    .role-btn .rb-icon {
-      width: 28px;
-      height: 28px;
-      border-radius: 7px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 0.95rem;
-      background: rgba(255,255,255,0.10);
-      transition: background 0.25s;
-      flex-shrink: 0;
-    }
-
-    .role-btn.active .rb-icon {
-      background: rgba(255,255,255,0.24);
-    }
-
-    /* small hint text under the toggle */
-    .role-hint {
-      text-align: center;
-      font-size: 0.70rem;
-      color: rgba(255,255,255,0.42);
-      margin-bottom: 20px;
-      min-height: 14px;
-    }
-
-    /* login button — swaps color per role */
+    /* login button */
     .login-btn {
       width: 100%;
       padding: 12px;
@@ -350,17 +282,8 @@ if (!empty($_COOKIE['remember_token'])) {
 
     .login-btn:active { transform: translateY(0); }
 
-    /* green variant when Employee is selected */
-    .login-btn.employee-mode {
-      background: linear-gradient(to right, #16a34a, #15803d);
-    }
-
-    .login-btn.employee-mode:hover {
-      box-shadow: 0 4px 12px rgba(22,163,74,0.45);
-    }
-
     /* ══════════════════════════════════
-       FORM — unchanged from your file
+       FORM
     ══════════════════════════════════ */
     .form-group { margin-bottom: 20px; }
 
@@ -512,11 +435,7 @@ if (!empty($_COOKIE['remember_token'])) {
       .role-btn { font-size: 0.78rem; padding: 9px 6px; }
     }
 
-    /* on very small phones, hide text labels — show icons only */
-    @media(max-width: 380px) {
-      .rb-label { display: none; }
-      .role-btn { gap: 0; }
-    }
+
   </style>
 </head>
 <body>
@@ -551,34 +470,16 @@ if (!empty($_COOKIE['remember_token'])) {
       <div class="login-container">
         <div class="login-box">
 
-          <!-- heading — updates dynamically via JS -->
           <div class="login-header">
-            <h2 id="loginTitle">Admin / HR Login</h2>
-            <p id="loginSubtitle">Sign in to access the HR Management System</p>
+            <h2>HR Portal Login</h2>
+            <p>Sign in to access the HR Management System</p>
           </div>
-
-          <!-- ══ ROLE TOGGLE ══ -->
-          <div class="role-toggle">
-            <button type="button" class="role-btn active" id="btnAdmin" onclick="setRole('admin')">
-              <span class="rb-icon">🛡️</span>
-              <span class="rb-label">Admin / HR Staff</span>
-            </button>
-            <button type="button" class="role-btn" id="btnEmployee" onclick="setRole('employee')">
-              <span class="rb-icon">👤</span>
-              <span class="rb-label">Employee</span>
-            </button>
-          </div>
-          <!-- small context hint -->
-          <p class="role-hint" id="roleHint">Redirects to the Admin Dashboard after login</p>
 
           <div id="errorMessage" class="error-message"></div>
           <div id="successMessage" class="success-message"></div>
 
           <form id="loginForm" method="POST" action="process_login.php">
             <?= csrf_field() ?>
-
-            <!-- hidden field — process_login.php reads $_POST['role'] to redirect correctly -->
-            <input type="hidden" id="roleField" name="role" value="admin" />
 
             <div class="form-group">
               <label for="email">Email Address</label>
@@ -596,7 +497,7 @@ if (!empty($_COOKIE['remember_token'])) {
               <a href="../Landingpage/forgot_password.php">Forgot password?</a>
             </div>
             <button type="submit" class="login-btn" id="loginBtn">
-              🛡️ Login as Admin / HR Staff
+              Login
             </button>
           </form>
 
@@ -615,60 +516,18 @@ if (!empty($_COOKIE['remember_token'])) {
   </footer> -->
 
   <script>
-    /* ══════════════════════════════════
-       ROLE TOGGLE
-    ══════════════════════════════════ */
-    function setRole(role) {
-      const isAdmin = role === 'admin';
-
-      // toggle active class on the two buttons
-      document.getElementById('btnAdmin').classList.toggle('active', isAdmin);
-      document.getElementById('btnEmployee').classList.toggle('active', !isAdmin);
-
-      // update heading & subtitle
-      document.getElementById('loginTitle').textContent =
-        isAdmin ? 'Admin / HR Login' : 'Employee Login';
-      document.getElementById('loginSubtitle').textContent =
-        isAdmin ? 'Sign in to access the HR Management System'
-                : 'Sign in to access your Employee Portal';
-
-      // update hint text
-      document.getElementById('roleHint').textContent =
-        isAdmin ? 'Redirects to the Admin Dashboard after login'
-                : 'Redirects to the Employee Portal after login';
-
-      // hidden field sent with the form — PHP reads this to decide redirect
-      document.getElementById('roleField').value = role;
-
-      // update button label + swap to green for Employee
-      const btn = document.getElementById('loginBtn');
-      btn.innerHTML = isAdmin
-        ? '🛡️ Login as Admin / HR Staff'
-        : '👤 Login as Employee';
-      btn.classList.toggle('employee-mode', !isAdmin);
-
-      clearMessages();
-    }
-
-    /* ══════════════════════════════════
-       FORM VALIDATION — your original logic, unchanged
-    ══════════════════════════════════ */
-    const loginForm     = document.getElementById('loginForm');
-    const errorMessage  = document.getElementById('errorMessage');
-    const successMessage= document.getElementById('successMessage');
+    const loginForm      = document.getElementById('loginForm');
+    const errorMessage   = document.getElementById('errorMessage');
+    const successMessage = document.getElementById('successMessage');
 
     const urlParams  = new URLSearchParams(window.location.search);
     const emailParam = urlParams.get('email');
     const error      = urlParams.get('error');
     const success    = urlParams.get('success');
-    // ?role=employee in the URL auto-selects the Employee tab
-    // (useful for a direct "Employee Login" link from your landing page)
-    const roleParam  = urlParams.get('role');
 
     if (emailParam) document.getElementById('email').value = decodeURIComponent(emailParam);
     if (error)   { errorMessage.textContent   = decodeURIComponent(error);   errorMessage.classList.add('show'); }
     if (success) { successMessage.textContent = decodeURIComponent(success); successMessage.classList.add('show'); }
-    if (roleParam === 'employee') setRole('employee');
 
     loginForm.addEventListener('submit', function(e) {
       const email    = document.getElementById('email').value.trim();

@@ -48,7 +48,7 @@ if ($action) {
                     echo json_encode(['success' => false, 'message' => 'Leave record not found.']);
                     break;
                 }
-                if ($leave['status'] !== 'Pending') {
+                if (!in_array($leave['status'], ['Pending', 'Pending Dept Head', 'Pending HR'], true)) {
                     echo json_encode(['success' => false, 'message' => 'Only pending requests can be cancelled.']);
                     break;
                 }

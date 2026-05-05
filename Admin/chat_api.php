@@ -26,7 +26,11 @@ if (!$dbPath) {
 }
 require_once $dbPath;
 
-// Tables `chat_messages` is defined in lgu_enrile_hrms.sql — no runtime CREATE needed.
+// ── CSRF protection on all state-changing POST requests ────────────────────
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../config/csrf.php';
+    csrf_verify(true);
+}
 // If upgrading an existing DB that pre-dates the consolidated schema, run:
 //   ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS is_unsent TINYINT(1) NOT NULL DEFAULT 0;
 //   ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS is_edited  TINYINT(1) NOT NULL DEFAULT 0;

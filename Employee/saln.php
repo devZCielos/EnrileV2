@@ -38,36 +38,50 @@ if ($action) {
 
             case 'save_saln':
                 $data = json_decode(file_get_contents('php://input'), true) ?? [];
-                
+
+                $realProp = json_encode($data['real_property'] ?? []);
+                $persProp = json_encode($data['personal_property'] ?? []);
+                $liab     = json_encode($data['liabilities'] ?? []);
+                $income   = json_encode($data['income_info'] ?? []);
+
+                // P2-12 — Compute net_worth server-side so it is persisted to the DB
+                $totalAssets = 0;
+                foreach ($data['real_property'] ?? [] as $rp) {
+                    $totalAssets += (float)($rp['market_value'] ?? $rp['value'] ?? 0);
+                }
+                foreach ($data['personal_property'] ?? [] as $pp) {
+                    $totalAssets += (float)($pp['value'] ?? 0);
+                }
+                $totalLiabilities = 0;
+                foreach ($data['liabilities'] ?? [] as $lb) {
+                    $totalLiabilities += (float)($lb['outstanding_balance'] ?? $lb['amount'] ?? 0);
+                }
+                $netWorth = $totalAssets - $totalLiabilities;
+
                 $stmt = $pdo->prepare("
                     SELECT saln_id FROM statements_assets_liabilities
                     WHERE employee_id = ? AND saln_year = ?
                 ");
                 $stmt->execute([$employeeId, date('Y')]);
                 $existing = $stmt->fetch();
-                
-                $realProp = json_encode($data['real_property'] ?? []);
-                $persProp = json_encode($data['personal_property'] ?? []);
-                $liab = json_encode($data['liabilities'] ?? []);
-                $income = json_encode($data['income_info'] ?? []);
-                
+
                 if ($existing) {
                     $stmt = $pdo->prepare("
                         UPDATE statements_assets_liabilities
                         SET real_property = ?, personal_property = ?, liabilities = ?,
-                            income_info = ?, updated_at = NOW()
+                            income_info = ?, net_worth = ?, updated_at = NOW()
                         WHERE employee_id = ? AND saln_year = ?
                     ");
-                    $stmt->execute([$realProp, $persProp, $liab, $income, $employeeId, date('Y')]);
+                    $stmt->execute([$realProp, $persProp, $liab, $income, $netWorth, $employeeId, date('Y')]);
                 } else {
                     $stmt = $pdo->prepare("
                         INSERT INTO statements_assets_liabilities
-                        (employee_id, saln_year, real_property, personal_property, liabilities, income_info, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())
+                        (employee_id, saln_year, real_property, personal_property, liabilities, income_info, net_worth, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
                     ");
-                    $stmt->execute([$employeeId, date('Y'), $realProp, $persProp, $liab, $income]);
+                    $stmt->execute([$employeeId, date('Y'), $realProp, $persProp, $liab, $income, $netWorth]);
                 }
-                echo json_encode(['success' => true, 'message' => 'SALN saved successfully.']);
+                echo json_encode(['success' => true, 'message' => 'SALN saved successfully.', 'net_worth' => $netWorth]);
                 break;
 
             case 'render':

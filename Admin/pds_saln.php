@@ -34,9 +34,11 @@ if ($action) {
         switch ($action) {
 
             case 'list_employees':
-                $search = trim($_GET['search'] ?? '');
-                $dept   = (int)($_GET['dept'] ?? 0);
-                $where  = ["e.employment_status = 'Active'"];
+                $search      = trim($_GET['search'] ?? '');
+                $dept        = (int)($_GET['dept'] ?? 0);
+                // P3-10: include archived employees so their PDS/SALN records remain accessible
+                $inclArchived = !empty($_GET['include_archived']);
+                $where  = $inclArchived ? [] : ["e.employment_status = 'Active'"];
                 $params = [];
                 if ($search) {
                     $s = '%'.$search.'%';
@@ -44,13 +46,14 @@ if ($action) {
                     $params  = [$s,$s];
                 }
                 if ($dept) { $where[] = 'e.department_id = ?'; $params[] = $dept; }
-                $wSql = 'WHERE '.implode(' AND ',$where);
+                $wSql = count($where) ? 'WHERE '.implode(' AND ',$where) : '';
                 $page = max(1,(int)($_GET['page']??1)); $ps = 15; $offset = ($page-1)*$ps;
                 $cnt  = $pdo->prepare("SELECT COUNT(*) FROM employees e $wSql");
                 $cnt->execute($params); $total = (int)$cnt->fetchColumn();
                 $stmt = $pdo->prepare("
                     SELECT e.employee_id, e.employee_code, e.first_name, e.last_name,
-                           e.position_title, e.employment_type, d.name AS department,
+                           e.position_title, e.employment_type, e.employment_status,
+                           d.name AS department,
                            (SELECT COUNT(*) FROM pds_records p WHERE p.employee_id=e.employee_id) AS has_pds,
                            (SELECT COUNT(*) FROM saln_records s WHERE s.employee_id=e.employee_id) AS saln_count
                     FROM employees e
@@ -86,6 +89,84 @@ if ($action) {
             case 'departments':
                 $rows = $pdo->query("SELECT department_id,name FROM departments ORDER BY name")->fetchAll();
                 echo json_encode(['success'=>true,'data'=>$rows]);
+                break;
+
+            // P3-3 — Admin-side PDS update
+            case 'update_pds':
+                if ($_SERVER['REQUEST_METHOD'] !== 'POST') { echo json_encode(['success'=>false,'message'=>'POST required.']); break; }
+                csrf_verify(true);
+                $empId = (int)($_GET['employee_id'] ?? 0);
+                if (!$empId) { echo json_encode(['success'=>false,'message'=>'Invalid employee.']); break; }
+                $data = json_decode(file_get_contents('php://input'), true) ?? [];
+                $allowed = ['personal_info','family_background','education','civil_service',
+                            'work_experience','voluntary_work','trainings','other_info',
+                            'q4_questions','pds_references'];
+                $sets = []; $vals = [];
+                foreach ($allowed as $col) {
+                    if (array_key_exists($col, $data)) {
+                        $sets[] = "$col = ?";
+                        $vals[] = is_array($data[$col]) ? json_encode($data[$col]) : $data[$col];
+                    }
+                }
+                if (empty($sets)) { echo json_encode(['success'=>false,'message'=>'No fields provided.']); break; }
+
+                $exists = $pdo->prepare("SELECT pds_id FROM pds_records WHERE employee_id=?");
+                $exists->execute([$empId]);
+                if ($exists->fetchColumn()) {
+                    $vals[] = $empId;
+                    $pdo->prepare("UPDATE pds_records SET ".implode(', ',$sets)." WHERE employee_id=?")->execute($vals);
+                } else {
+                    $vals[] = $empId;
+                    $pdo->prepare("INSERT INTO pds_records (".implode(',',$allowed).",employee_id) VALUES (".rtrim(str_repeat('?,',count($allowed)),',').",?)")->execute($vals);
+                }
+                $pdo->prepare("INSERT INTO activity_logs (user_id,action,module,details,ip_address,created_at)
+                    VALUES (?,?,?,?,?,NOW())")->execute([
+                    $_SESSION['user_id'], 'update_pds', 'PDS/SALN',
+                    "Admin updated PDS for employee_id=$empId",
+                    $_SERVER['REMOTE_ADDR'] ?? null,
+                ]);
+                echo json_encode(['success'=>true,'message'=>'PDS updated.']);
+                break;
+
+            // P3-3 — Admin-side SALN update
+            case 'update_saln':
+                if ($_SERVER['REQUEST_METHOD'] !== 'POST') { echo json_encode(['success'=>false,'message'=>'POST required.']); break; }
+                csrf_verify(true);
+                $empId = (int)($_GET['employee_id'] ?? 0);
+                $saln_year = (int)($_GET['saln_year'] ?? date('Y'));
+                if (!$empId) { echo json_encode(['success'=>false,'message'=>'Invalid employee.']); break; }
+                $data = json_decode(file_get_contents('php://input'), true) ?? [];
+                $allowed = ['as_of_date','filing_type','filing_mode','declarant_info','spouse_info',
+                            'children_info','real_properties','personal_properties','liabilities',
+                            'biz_interests','relatives_govt','no_biz','no_rel',
+                            'real_subtotal','personal_subtotal','total_assets','total_liabilities','net_worth'];
+                $sets = []; $vals = [];
+                foreach ($allowed as $col) {
+                    if (array_key_exists($col, $data)) {
+                        $sets[] = "$col = ?";
+                        $vals[] = is_array($data[$col]) ? json_encode($data[$col]) : $data[$col];
+                    }
+                }
+                if (empty($sets)) { echo json_encode(['success'=>false,'message'=>'No fields provided.']); break; }
+
+                $exists = $pdo->prepare("SELECT saln_id FROM saln_records WHERE employee_id=? AND saln_year=?");
+                $exists->execute([$empId, $saln_year]);
+                if ($exists->fetchColumn()) {
+                    $vals[] = $empId; $vals[] = $saln_year;
+                    $pdo->prepare("UPDATE saln_records SET ".implode(', ',$sets)." WHERE employee_id=? AND saln_year=?")->execute($vals);
+                } else {
+                    $vals[] = $empId; $vals[] = $saln_year;
+                    $colList = implode(',', $allowed) . ',employee_id,saln_year';
+                    $placeholders = rtrim(str_repeat('?,', count($allowed)), ',') . ',?,?';
+                    $pdo->prepare("INSERT INTO saln_records ($colList) VALUES ($placeholders)")->execute($vals);
+                }
+                $pdo->prepare("INSERT INTO activity_logs (user_id,action,module,details,ip_address,created_at)
+                    VALUES (?,?,?,?,?,NOW())")->execute([
+                    $_SESSION['user_id'], 'update_saln', 'PDS/SALN',
+                    "Admin updated SALN for employee_id=$empId year=$saln_year",
+                    $_SERVER['REMOTE_ADDR'] ?? null,
+                ]);
+                echo json_encode(['success'=>true,'message'=>'SALN updated.']);
                 break;
         }
     } catch (PDOException $e) {

@@ -1,0 +1,12 @@
+# M-4: Block PHP execution in uploads directory.
+# Prevents uploaded files from being executed as PHP scripts.
+php_flag engine off
+
+# Deny direct browser listing
+Options -Indexes
+
+# Block access to PHP files explicitly (belt-and-suspenders)
+<FilesMatch "\.(php|php5|php7|phtml|pl|py|cgi|sh)$">
+    Order Allow,Deny
+    Deny from all
+</FilesMatch>

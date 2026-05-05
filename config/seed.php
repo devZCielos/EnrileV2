@@ -12,8 +12,8 @@
 
 require_once __DIR__ . '/db.php';
 
-// Safety flag — set to true only when you want to re-seed
-define('ALLOW_SEED', true);
+// Safety flag — set to true ONLY when seeding locally; MUST be false in production
+define('ALLOW_SEED', false);
 
 if (!ALLOW_SEED) {
     die('<b style="color:red;">Seeder is disabled. Set ALLOW_SEED to true in seed.php to run.</b>');

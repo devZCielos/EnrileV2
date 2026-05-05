@@ -139,11 +139,36 @@ if ($action) {
                 }
 
                 $remaining = $totalCredits - $usedDays;
+
+                // P3-8 — Capture old values before update for audit trail
+                $old = $pdo->prepare("SELECT total_credits, used_days, remaining_days, employee_id, leave_type_id, calendar_year FROM leave_balances WHERE balance_id=?");
+                $old->execute([$id]);
+                $oldRow = $old->fetch();
+
                 $pdo->prepare("
                     UPDATE leave_balances
                     SET total_credits = ?, used_days = ?, remaining_days = ?, updated_at = NOW()
                     WHERE balance_id = ?
                 ")->execute([$totalCredits, $usedDays, $remaining, $id]);
+
+                // P3-8 — Write audit log entry
+                if ($oldRow) {
+                    $pdo->prepare("
+                        INSERT INTO activity_logs (user_id, action, module, details, ip_address, created_at)
+                        VALUES (?, 'adjust_leave_balance', 'Leave Balances', ?, ?, NOW())
+                    ")->execute([
+                        $_SESSION['user_id'],
+                        json_encode([
+                            'balance_id'   => $id,
+                            'employee_id'  => $oldRow['employee_id'],
+                            'leave_type_id'=> $oldRow['leave_type_id'],
+                            'year'         => $oldRow['calendar_year'],
+                            'before'       => ['total'=>$oldRow['total_credits'],'used'=>$oldRow['used_days'],'remaining'=>$oldRow['remaining_days']],
+                            'after'        => ['total'=>$totalCredits,'used'=>$usedDays,'remaining'=>$remaining],
+                        ]),
+                        $_SERVER['REMOTE_ADDR'] ?? null,
+                    ]);
+                }
 
                 echo json_encode(['success' => true, 'message' => 'Balance adjusted successfully.']);
                 break;
@@ -183,6 +208,14 @@ if ($action) {
                 }
 
                 echo json_encode(['success' => true, 'message' => "Created $created balance record(s) for $newYear."]);
+
+                // H-6 — Audit log
+                $pdo->prepare("INSERT INTO activity_logs (user_id, action, module, details, ip_address, created_at) VALUES (?, 'reset_year', 'Leave Balances', ?, ?, NOW())")
+                    ->execute([
+                        $_SESSION['user_id'],
+                        json_encode(['from_year' => $year, 'to_year' => $newYear, 'records_created' => $created]),
+                        $_SERVER['REMOTE_ADDR'] ?? null,
+                    ]);
                 break;
 
             // ── INIT MISSING — fill gaps for current year ─────
@@ -223,6 +256,14 @@ if ($action) {
                     'message' => "Done. Created {$created} missing record(s) for {$year}."
                               . ($skipped ? " {$skipped} already existed and were left unchanged." : ''),
                 ]);
+
+                // H-6 — Audit log
+                $pdo->prepare("INSERT INTO activity_logs (user_id, action, module, details, ip_address, created_at) VALUES (?, 'init_missing_balances', 'Leave Balances', ?, ?, NOW())")
+                    ->execute([
+                        $_SESSION['user_id'],
+                        json_encode(['year' => $year, 'records_created' => $created, 'skipped' => $skipped]),
+                        $_SERVER['REMOTE_ADDR'] ?? null,
+                    ]);
                 break;
 
             // ── FILTERS DATA ──────────────────────────────────

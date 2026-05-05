@@ -28,59 +28,11 @@ if (!in_array($_SESSION['user_role'] ?? '', $allowedRoles)) {
 
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
-
-// Auto-create table
-$pdo->exec("CREATE TABLE IF NOT EXISTS announcements (
-    announcement_id  INT AUTO_INCREMENT PRIMARY KEY,
-    title            VARCHAR(255) NOT NULL,
-    body             TEXT NOT NULL,
-    category         ENUM('General','HR Notice','Policy','Event','Holiday','Urgent') NOT NULL DEFAULT 'General',
-    priority         ENUM('Normal','High','Urgent') NOT NULL DEFAULT 'Normal',
-    audience         ENUM('All','Permanent','Contractual','Casual','Job Order','Department') NOT NULL DEFAULT 'All',
-    department_id    INT DEFAULT NULL,
-    pinned           TINYINT(1) NOT NULL DEFAULT 0,
-    status           ENUM('Draft','Published','Archived') NOT NULL DEFAULT 'Draft',
-    publish_date     DATE DEFAULT NULL,
-    expiry_date      DATE DEFAULT NULL,
-    created_by       INT DEFAULT NULL,
-    created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at       DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_status (status),
-    INDEX idx_category (category),
-    INDEX idx_pinned (pinned),
-    INDEX idx_publish_date (publish_date)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-
-// ── Migration: ensure ALL expected columns exist ─────────────────────────
-// Read what columns the table currently has
-$existingCols = $pdo->query("SHOW COLUMNS FROM announcements")->fetchAll(PDO::FETCH_COLUMN);
-
-// Every column the full schema needs, in dependency order.
-// All use IF NOT EXISTS — safe to run on every page load.
-$migrations = [
-    "category"      => "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS category     ENUM('General','HR Notice','Policy','Event','Holiday','Urgent') NOT NULL DEFAULT 'General' AFTER body",
-    "priority"      => "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS priority     ENUM('Normal','High','Urgent') NOT NULL DEFAULT 'Normal' AFTER category",
-    "audience"      => "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS audience     ENUM('All','Permanent','Contractual','Casual','Job Order','Department') NOT NULL DEFAULT 'All' AFTER priority",
-    "department_id" => "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS department_id INT DEFAULT NULL AFTER audience",
-    "pinned"        => "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS pinned       TINYINT(1) NOT NULL DEFAULT 0 AFTER department_id",
-    "status"        => "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS status       ENUM('Draft','Published','Archived') NOT NULL DEFAULT 'Draft' AFTER pinned",
-    "publish_date"  => "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS publish_date DATE DEFAULT NULL AFTER status",
-    "expiry_date"   => "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS expiry_date  DATE DEFAULT NULL AFTER publish_date",
-    "created_by"    => "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS created_by   INT DEFAULT NULL AFTER expiry_date",
-    "updated_at"    => "ALTER TABLE announcements ADD COLUMN IF NOT EXISTS updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at",
-];
-foreach ($migrations as $col => $sql) {
-    if (!in_array($col, $existingCols)) {
-        try { $pdo->exec($sql); } catch (PDOException $e) { /* ignore */ }
-    }
-}
-
-// Re-read AFTER migrations so flags are always accurate
-$existingCols    = $pdo->query("SHOW COLUMNS FROM announcements")->fetchAll(PDO::FETCH_COLUMN);
-$hasDeptCol      = in_array('department_id', $existingCols);
-$hasPinnedCol    = in_array('pinned',        $existingCols);
-$hasCreatedByCol = in_array('created_by',    $existingCols);
-
+// P3-9: Schema managed by config/migrations/002_announcements.sql
+// All columns are guaranteed to exist after migrations are run.
+$hasDeptCol      = true;
+$hasPinnedCol    = true;
+$hasCreatedByCol = true;
 
 // ════════════════════════════════════════════════════════════
 //  AJAX HANDLER
@@ -224,6 +176,23 @@ if ($action) {
                     break;
                 }
 
+                // H-3: Validate audience value and require dept when 'Department'
+                $audience = $_POST['audience'] ?? 'All';
+                if (!in_array($audience, ['All', 'Permanent', 'Contractual', 'Casual', 'Job Order', 'Department'])) {
+                    $audience = 'All';
+                }
+                if ($audience === 'Department' && empty($_POST['department_id'])) {
+                    echo json_encode(['success' => false, 'message' => 'Please select a department when audience is set to Department.']);
+                    break;
+                }
+                // H-4: expiry_date must be after publish_date
+                $pubDate = $_POST['publish_date'] ?: null;
+                $expDate = $_POST['expiry_date']  ?: null;
+                if ($pubDate && $expDate && $expDate <= $pubDate) {
+                    echo json_encode(['success' => false, 'message' => 'Expiry date must be after the publish date.']);
+                    break;
+                }
+
                 // Resolve department_id (only if column exists)
                 $deptId = null;
                 if ($hasDeptCol && !empty($_POST['department_id'])) {
@@ -235,15 +204,15 @@ if ($action) {
                     'body'         => $body,
                     'category'     => $_POST['category']     ?? 'General',
                     'priority'     => $_POST['priority']     ?? 'Normal',
-                    'audience'     => $_POST['audience']     ?? 'All',
+                    'audience'     => $audience,
                 ];
                 if ($hasDeptCol) {
                     $fields['department_id'] = $deptId;
                 }
                 $fields += [
                     'status'       => $_POST['status']       ?? 'Draft',
-                    'publish_date' => $_POST['publish_date'] ?: null,
-                    'expiry_date'  => $_POST['expiry_date']  ?: null,
+                    'publish_date' => $pubDate,
+                    'expiry_date'  => $expDate,
                 ];
                 if ($hasPinnedCol) {
                     $fields['pinned'] = (int)(($_POST['pinned'] ?? '0') === '1');

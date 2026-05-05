@@ -26,28 +26,7 @@ if (!in_array($_SESSION['user_role'] ?? '', $allowedRoles)) {
 }
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
-
-// ── Ensure archived_at column exists on employees ──────────────
-$cols = $pdo->query("SHOW COLUMNS FROM employees")->fetchAll(PDO::FETCH_COLUMN);
-if (!in_array('archived_at', $cols)) {
-    $pdo->exec("ALTER TABLE employees ADD COLUMN IF NOT EXISTS archived_at DATETIME DEFAULT NULL");
-}
-if (!in_array('archive_reason', $cols)) {
-    $pdo->exec("ALTER TABLE employees ADD COLUMN IF NOT EXISTS archive_reason VARCHAR(255) DEFAULT NULL");
-}
-
-// ── Create archive_log table ───────────────────────────────────
-$pdo->exec("CREATE TABLE IF NOT EXISTS archive_log (
-    log_id        INT AUTO_INCREMENT PRIMARY KEY,
-    record_type   ENUM('employee','contract','leave_request','document','announcement') NOT NULL,
-    record_id     INT NOT NULL,
-    action        ENUM('archived','restored','deleted') NOT NULL,
-    reason        VARCHAR(255) DEFAULT NULL,
-    performed_by  INT DEFAULT NULL,
-    performed_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_record (record_type, record_id),
-    INDEX idx_performed_by (performed_by)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+// P3-9: Schema managed by config/migrations/001_archive_log.sql
 
 // ── JSON API ───────────────────────────────────────────────────
 $action = $_GET['action'] ?? $_POST['action'] ?? '';

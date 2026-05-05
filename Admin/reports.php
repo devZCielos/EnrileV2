@@ -122,10 +122,16 @@ if ($action) {
                 $month      = (int)($_GET['month'] ?? date('n'));
                 $search     = $_GET['search']    ?? '';
 
-                $where  = ['1=1'];
-                $params = [];
+                // H-9: dept_head scoped to their own department
+                if (($_SESSION['user_role'] ?? '') === 'dept_head') {
+                    $dhStmt = $pdo->prepare('SELECT department_id FROM employees WHERE user_id = ? LIMIT 1');
+                    $dhStmt->execute([(int)$_SESSION['user_id']]);
+                    $dept = (string)($dhStmt->fetchColumn() ?: '');
+                }
 
-                // Period filter
+                $where  = ['1=1', 'lr.is_deleted = 0']; // P2-7: exclude soft-deleted requests
+                $params = [];
+                // H-8: Fix missing if for 'week' period (was parse error)
                 if ($period === 'week') {
                     $where[] = 'lr.filed_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)';
                 } elseif ($period === 'month') {
@@ -191,7 +197,7 @@ if ($action) {
                 $stmt->execute($params);
                 $rows = $stmt->fetchAll();
 
-                // Summary
+                // Summary (re-use same WHERE params — both queries must stay in sync)
                 $sum_stmt = $pdo->prepare("
                     SELECT COUNT(*) AS total,
                         SUM(lr.days_requested) AS total_days,
@@ -207,7 +213,24 @@ if ($action) {
                 $sum_stmt->execute($params);
                 $summary = $sum_stmt->fetch();
 
-                echo json_encode(['success'=>true,'data'=>$rows,'summary'=>$summary]);
+                // P3-2 — Pagination
+                $perPage   = max(1, min(500, (int)($_GET['per_page'] ?? 50)));
+                $page      = max(1, (int)($_GET['page'] ?? 1));
+                $offset    = ($page - 1) * $perPage;
+                $totalRows = count($rows);
+                $rows      = array_slice($rows, $offset, $perPage);
+
+                echo json_encode([
+                    'success'    => true,
+                    'data'       => $rows,
+                    'summary'    => $summary,
+                    'pagination' => [
+                        'total'    => $totalRows,
+                        'page'     => $page,
+                        'per_page' => $perPage,
+                        'pages'    => (int)ceil($totalRows / $perPage),
+                    ],
+                ]);
                 break;
 
             // ── LEAVE TYPES LIST ───────────────────────────────────────
@@ -254,6 +277,102 @@ if ($action) {
                 $stmt->execute([$year]);
                 echo json_encode(['success'=>true,'data'=>$stmt->fetchAll()]);
                 break;
+
+            // ── CSV EXPORT OF LEAVE REPORT (P3-1) ─────────────────────
+            case 'export_csv':
+                $dept       = $_GET['dept']       ?? '';
+                $status     = $_GET['status']     ?? 'Approved';
+                $leave_type = $_GET['leave_type'] ?? '';
+                $period     = $_GET['period']     ?? 'year';
+                $year       = (int)($_GET['year']  ?? date('Y'));
+                $month      = (int)($_GET['month'] ?? date('n'));
+                $search     = $_GET['search']     ?? '';
+
+                // H-9: dept_head scoped to their own department
+                if (($_SESSION['user_role'] ?? '') === 'dept_head') {
+                    $dhStmt2 = $pdo->prepare('SELECT department_id FROM employees WHERE user_id = ? LIMIT 1');
+                    $dhStmt2->execute([(int)$_SESSION['user_id']]);
+                    $dept = (string)($dhStmt2->fetchColumn() ?: '');
+                }
+
+                $where  = ['1=1', 'lr.is_deleted = 0'];
+                $params = [];
+
+                if ($period === 'week') {
+                    $where[] = 'lr.filed_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)';
+                } elseif ($period === 'month') {
+                    $where[] = 'YEAR(lr.filed_at) = ? AND MONTH(lr.filed_at) = ?';
+                    $params[] = $year; $params[] = $month;
+                } elseif ($period === 'year') {
+                    $where[] = 'YEAR(lr.filed_at) = ?';
+                    $params[] = $year;
+                }
+                if ($_GET['date_from'] ?? '') { $where[] = 'lr.filed_at >= ?'; $params[] = $_GET['date_from']; }
+                if ($_GET['date_to']   ?? '') { $where[] = 'lr.filed_at <= ?'; $params[] = $_GET['date_to'].' 23:59:59'; }
+                if ($dept)       { $where[] = 'e.department_id = ?';  $params[] = $dept; }
+                if ($status)     { $where[] = 'lr.status = ?';         $params[] = $status; }
+                if ($leave_type) { $where[] = 'lr.leave_type_id = ?'; $params[] = $leave_type; }
+                if ($search) {
+                    $where[] = "(CONCAT(e.first_name,' ',e.last_name) LIKE ? OR e.employee_code LIKE ?)";
+                    $s = "%$search%"; $params[] = $s; $params[] = $s;
+                }
+
+                $wSql = 'WHERE ' . implode(' AND ', $where);
+                $csvStmt = $pdo->prepare("
+                    SELECT
+                        lr.request_id,
+                        e.employee_code,
+                        CONCAT(e.first_name,' ',e.last_name)  AS employee_name,
+                        COALESCE(d.name,'—')                   AS department,
+                        e.employment_type,
+                        lt.name                                AS leave_type,
+                        lr.date_from, lr.date_to,
+                        lr.days_requested,
+                        lr.status,
+                        lr.filed_at,
+                        COALESCE(
+                            (SELECT CONCAT(e2.first_name,' ',e2.last_name)
+                             FROM employees e2
+                             WHERE e2.user_id = lr.reviewed_by LIMIT 1),
+                            ua.email,'—'
+                        )                                      AS approved_by,
+                        lr.admin_remarks
+                    FROM leave_requests lr
+                    JOIN employees   e  ON lr.employee_id   = e.employee_id
+                    JOIN leave_types lt ON lr.leave_type_id = lt.leave_type_id
+                    LEFT JOIN departments   d  ON e.department_id = d.department_id
+                    LEFT JOIN user_accounts ua ON lr.reviewed_by  = ua.user_id
+                    $wSql
+                    ORDER BY lr.filed_at DESC
+                ");
+                $csvStmt->execute($params);
+                $csvRows = $csvStmt->fetchAll();
+
+                // Stream CSV — no buffering
+                while (ob_get_level()) { ob_end_clean(); }
+                header('Content-Type: text/csv; charset=utf-8');
+                $filename = 'leave_report_' . date('Ymd_His') . '.csv';
+                header('Content-Disposition: attachment; filename="' . $filename . '"');
+                header('Cache-Control: no-cache, no-store, must-revalidate');
+
+                $out = fopen('php://output', 'w');
+                // BOM for Excel UTF-8 compatibility
+                fwrite($out, "\xEF\xBB\xBF");
+                fputcsv($out, ['#','Employee Code','Employee Name','Department','Employment Type',
+                               'Leave Type','Date From','Date To','Days','Status',
+                               'Filed At','Approved By','Remarks']);
+                $n = 1;
+                foreach ($csvRows as $r) {
+                    fputcsv($out, [
+                        $n++,
+                        $r['employee_code'], $r['employee_name'], $r['department'],
+                        $r['employment_type'], $r['leave_type'],
+                        $r['date_from'], $r['date_to'], $r['days_requested'],
+                        $r['status'], $r['filed_at'], $r['approved_by'], $r['admin_remarks'],
+                    ]);
+                }
+                fclose($out);
+                exit();
 
             default:
                 echo json_encode(['success'=>false,'message'=>'Unknown action.']);

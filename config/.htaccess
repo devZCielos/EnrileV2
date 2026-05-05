@@ -1,0 +1,7 @@
+# Block all direct browser access to PHP files in this directory.
+# Config files (db.php, auth.php, csrf.php, seed.php, etc.) must only
+# be accessed via require_once from application code, never directly.
+<FilesMatch "\.php$">
+    Order deny,allow
+    Deny from all
+</FilesMatch>

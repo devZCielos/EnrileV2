@@ -37,11 +37,16 @@ CREATE TABLE IF NOT EXISTS user_accounts (
   email           VARCHAR(180)  NOT NULL UNIQUE,
   password_hash   VARCHAR(255)  NOT NULL,               -- bcrypt via password_hash()
   role            ENUM('admin','hr_staff','dept_head','employee') NOT NULL DEFAULT 'employee',
-  is_active       TINYINT(1)    DEFAULT 1,
-  last_login      TIMESTAMP     NULL,
-  remember_token  VARCHAR(100)  NULL,
-  created_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
-  updated_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  is_active              TINYINT(1)    DEFAULT 1,
+  last_login             TIMESTAMP     NULL,
+  remember_token         VARCHAR(100)  NULL,
+  reset_token            VARCHAR(100)  NULL,
+  reset_expires          DATETIME      NULL,
+  failed_login_attempts  INT           NOT NULL DEFAULT 0,
+  locked_until           DATETIME      NULL,
+  must_change_password   TINYINT(1)    NOT NULL DEFAULT 0,
+  created_at             TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+  updated_at             TIMESTAMP     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
 -- ============================================================
@@ -93,6 +98,19 @@ CREATE TABLE IF NOT EXISTS leave_types (
   require_married TINYINT(1)    DEFAULT 0,
   advance_notice_days INT        DEFAULT 0 COMMENT 'Days in advance employee must file leave (0 = same-day filing allowed)',
   created_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+-- ============================================================
+--  TABLE 4b: holidays
+--  Non-working days used for business-day leave calculation.
+--  Populate annually via admin or import from official IATF/CSC calendars.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS holidays (
+  holiday_id    INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  holiday_date  DATE         NOT NULL UNIQUE,
+  description   VARCHAR(255) NOT NULL,
+  is_recurring  TINYINT(1)   NOT NULL DEFAULT 0 COMMENT 'If 1, the month-day recurs every year',
+  created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
 -- ============================================================
@@ -287,3 +305,53 @@ CREATE INDEX idx_req_dates      ON leave_requests (date_from, date_to);
 CREATE INDEX idx_bal_year       ON leave_balances (calendar_year);
 CREATE INDEX idx_log_user       ON activity_logs (user_id);
 CREATE INDEX idx_log_created    ON activity_logs (created_at);
+-- P3-7: Additional indexes for common lookup patterns
+CREATE INDEX idx_user_remember_token ON user_accounts (remember_token);
+CREATE INDEX idx_doc_employee_id     ON documents (employee_id);
+
+-- ============================================================
+--  TABLE: contracts  (P2-13 — was absent from master schema)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS contracts (
+  contract_id     INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  employee_id     INT UNSIGNED  NOT NULL,
+  contract_type   ENUM('Permanent','Contractual','Casual','Job Order','Co-Terminus') NOT NULL DEFAULT 'Contractual',
+  contract_number VARCHAR(100)  NULL,
+  position_title  VARCHAR(150)  NOT NULL,
+  department_id   INT UNSIGNED  NULL,
+  salary_grade    VARCHAR(50)   NULL,
+  monthly_salary  DECIMAL(12,2) NULL,
+  start_date      DATE          NOT NULL,
+  end_date        DATE          NULL,
+  status          ENUM('Active','Expired','Terminated','Renewed') NOT NULL DEFAULT 'Active',
+  remarks         TEXT          NULL,
+  created_by      INT UNSIGNED  NULL,
+  created_at      DATETIME      DEFAULT CURRENT_TIMESTAMP,
+  updated_at      DATETIME      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_con_employee  (employee_id),
+  INDEX idx_con_status    (status),
+  INDEX idx_con_end_date  (end_date)
+) ENGINE=InnoDB;
+
+-- ============================================================
+--  TABLE: leave_notifications  (P2-13 — was absent from master schema)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS leave_notifications (
+  notification_id   INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  employee_id       INT UNSIGNED  NOT NULL,
+  request_id        INT UNSIGNED  NULL,
+  leave_type_id     INT UNSIGNED  NOT NULL,
+  notification_type ENUM('FILING_DEADLINE','LEAVE_REMINDER','LEAVE_ENDING','OTHER') NOT NULL DEFAULT 'OTHER',
+  title             VARCHAR(200)  NOT NULL,
+  message           TEXT          NOT NULL,
+  target_date       DATE          NOT NULL,
+  is_sent           TINYINT(1)    DEFAULT 0,
+  read_at           TIMESTAMP     NULL,
+  created_at        TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TIMESTAMP     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_notif_emp  FOREIGN KEY (employee_id)   REFERENCES employees(employee_id)   ON DELETE CASCADE,
+  CONSTRAINT fk_notif_req  FOREIGN KEY (request_id)    REFERENCES leave_requests(request_id) ON DELETE SET NULL,
+  CONSTRAINT fk_notif_type FOREIGN KEY (leave_type_id) REFERENCES leave_types(leave_type_id) ON DELETE RESTRICT,
+  INDEX idx_notif_emp_sent  (employee_id, is_sent),
+  INDEX idx_notif_target    (target_date)
+) ENGINE=InnoDB;

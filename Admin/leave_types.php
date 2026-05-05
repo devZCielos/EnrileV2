@@ -129,15 +129,25 @@ if ($action) {
                     ")->execute([$name, $code, $maxDays, $description, $isActive, $appGender, $reqMarried]);
                     $newId = $pdo->lastInsertId();
 
-                    // Auto-create leave balances for all active employees
+                    // Auto-create leave balances for all active employees (wrapped in transaction)
                     $year = date('Y');
                     $emps = $pdo->query("SELECT employee_id FROM employees WHERE employment_status = 'Active'")->fetchAll();
-                    $balStmt = $pdo->prepare("
-                        INSERT IGNORE INTO leave_balances (employee_id, leave_type_id, calendar_year, total_credits, used_days, remaining_days)
-                        VALUES (?, ?, ?, ?, 0, ?)
-                    ");
-                    foreach ($emps as $emp) {
-                        $balStmt->execute([$emp['employee_id'], $newId, $year, $maxDays, $maxDays]);
+                    try {
+                        $pdo->beginTransaction();
+                        $balStmt = $pdo->prepare("
+                            INSERT IGNORE INTO leave_balances (employee_id, leave_type_id, calendar_year, total_credits, used_days, remaining_days)
+                            VALUES (?, ?, ?, ?, 0, ?)
+                        ");
+                        foreach ($emps as $emp) {
+                            $balStmt->execute([$emp['employee_id'], $newId, $year, $maxDays, $maxDays]);
+                        }
+                        $pdo->commit();
+                    } catch (PDOException $balEx) {
+                        $pdo->rollBack();
+                        // Leave type was already inserted — rollback only balances
+                        error_log('[HRMS] leave balance init failed: ' . $balEx->getMessage());
+                        echo json_encode(['success' => true, 'message' => 'Leave type added but balance initialisation failed. Run Init Missing Balances manually.']);
+                        break;
                     }
 
                     echo json_encode(['success' => true, 'message' => "Leave type added and balances created for " . count($emps) . " employee(s)."]);

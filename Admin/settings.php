@@ -15,20 +15,7 @@ if (($_SESSION['user_role'] ?? '') !== 'admin') {
 
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
-
-// Auto-create settings table
-$pdo->exec("CREATE TABLE IF NOT EXISTS system_settings (
-    setting_id    INT AUTO_INCREMENT PRIMARY KEY,
-    setting_key   VARCHAR(100) NOT NULL UNIQUE,
-    setting_value TEXT,
-    setting_group VARCHAR(50) NOT NULL DEFAULT 'general',
-    label         VARCHAR(150),
-    description   VARCHAR(255),
-    input_type    ENUM('text','number','email','textarea','select','toggle','password') NOT NULL DEFAULT 'text',
-    options_json  TEXT,
-    updated_by    INT DEFAULT NULL,
-    updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+// P3-9: Schema managed by config/migrations/003_system_settings.sql
 
 // Seed default settings if table is empty
 $count = (int)$pdo->query("SELECT COUNT(*) FROM system_settings")->fetchColumn();
@@ -118,6 +105,13 @@ if ($action) {
                 foreach ($values as $key => $val) {
                     // Sanitise key name
                     if (!preg_match('/^[a-z0-9_]+$/', $key)) continue;
+                    // S-2: For password fields submitted as empty, keep the existing DB value
+                    if ($val === '') {
+                        // Check if this key has input_type=password; if so, skip the update
+                        $typeCheck = $pdo->prepare("SELECT input_type FROM system_settings WHERE setting_key = ?");
+                        $typeCheck->execute([$key]);
+                        if ($typeCheck->fetchColumn() === 'password') continue;
+                    }
                     $stmt->execute([$val, (int)$_SESSION['user_id'], $key, $group]);
                 }
                 echo json_encode(['success' => true, 'message' => ucfirst($group) . ' settings saved.']);
@@ -802,10 +796,12 @@ function buildField(f) {
   }
 
   if (f.input_type === 'password') {
+    // S-2: Never pre-fill password value in HTML — submit empty string to keep existing
+    var pwPlaceholder = val ? '(saved — leave blank to keep)' : 'Enter password';
     return '<div class="setting-field">' +
       '<label for="' + id + '">' + escHtml(f.label) + '</label>' +
       '<div class="pw-wrap">' +
-        '<input type="password" id="' + id + '" value="' + escHtml(val) + '" autocomplete="new-password"/>' +
+        '<input type="password" id="' + id + '" value="" placeholder="' + pwPlaceholder + '" autocomplete="new-password"/>' +
         '<button class="pw-toggle" type="button" onclick="togglePw(\'' + id + '\',this)">👁️</button>' +
       '</div>' +
       (f.description ? '<span class="hint">' + escHtml(f.description) + '</span>' : '') +

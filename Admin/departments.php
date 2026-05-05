@@ -93,20 +93,36 @@ if ($action) {
 
             // ── SAVE (add or edit) ────────────────────────────
             case 'save':
-                $id = (int)($_POST['department_id'] ?? 0);
+                $id             = (int)($_POST['department_id'] ?? 0);
+                $headEmployeeId = (int)($_POST['head_employee_id'] ?? 0) ?: null;
+
+                // Resolve display name: if employee linked, pull from DB; else use text fallback
+                $headName = trim($_POST['head_name'] ?? '');
+                if ($headEmployeeId) {
+                    $hEmpRow = $pdo->prepare("SELECT CONCAT(first_name,' ',last_name) FROM employees WHERE employee_id = ? AND employment_status='Active'");
+                    $hEmpRow->execute([$headEmployeeId]);
+                    $resolvedName = $hEmpRow->fetchColumn();
+                    if ($resolvedName) { $headName = $resolvedName; }
+                    else { $headEmployeeId = null; } // employee not found/active — fall back to text
+                }
 
                 $fields = [
-                    'name'           => trim($_POST['name']           ?? ''),
-                    'head_name'      => trim($_POST['head_name']       ?? ''),
-                    'description'    => trim($_POST['description']     ?? ''),
-                    'icon'           => trim($_POST['icon']            ?? '🏢'),
-                    'color'          => trim($_POST['color']           ?? '#2563eb'),
-                    'employee_count' => (int)($_POST['employee_count'] ?? 0),
-                    'is_active'      => 1,
+                    'name'             => trim($_POST['name'] ?? ''),
+                    'head_name'        => $headName,
+                    'head_employee_id' => $headEmployeeId,
+                    'description'      => trim($_POST['description'] ?? ''),
+                    'icon'             => trim($_POST['icon']         ?? '🏢'),
+                    'color'            => trim($_POST['color']        ?? '#2563eb'),
+                    'employee_count'   => (int)($_POST['employee_count'] ?? 0),
+                    'is_active'        => 1,
                 ];
 
-                if (empty($fields['name']) || empty($fields['head_name'])) {
-                    echo json_encode(['success' => false, 'message' => 'Name and Department Head are required.']);
+                if (empty($fields['name'])) {
+                    echo json_encode(['success' => false, 'message' => 'Department Name is required.']);
+                    break;
+                }
+                if (empty($fields['head_name']) && empty($fields['head_employee_id'])) {
+                    echo json_encode(['success' => false, 'message' => 'Department Head is required.']);
                     break;
                 }
 
@@ -534,7 +550,10 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
 
         <div class="form-group">
           <label>Department Head <span class="req">*</span></label>
-          <input type="text" id="fHead" placeholder="e.g. Juan Dela Cruz"/>
+          <select id="fHead" style="width:100%;padding:10px 12px;border:2px solid #e2e8f0;border-radius:8px;font-size:0.95rem;">
+            <option value="">— Select Employee —</option>
+          </select>
+          <input type="hidden" id="fHeadId" />
         </div>
 
         <div class="form-group">
@@ -718,7 +737,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
               </div>
             </div>
             <div class="dept-name">${d.name}</div>
-            <div class="dept-head">👤 ${d.head_name || '—'}</div>
+            <div class="dept-head">👤 ${d.head_display || d.head_name || '—'}</div>
             <div class="dept-desc">${d.description || '<em style="color:var(--gray-400)">No description.</em>'}</div>
             <div class="dept-stats">
               <div class="dept-stat blue">👥 ${empCount} Employee${empCount != 1 ? 's' : ''}</div>
@@ -740,7 +759,33 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
   }
 
   // ════════════════════════════════════════════════════════
-  //  ADD
+  //  LOAD HEAD DROPDOWN  (M-2)
+  // ════════════════════════════════════════════════════════
+  async function loadHeadDropdown(selectedId) {
+    const sel = document.getElementById('fHead');
+    try {
+      const res  = await fetch('departments.php?action=list_heads');
+      const json = await res.json();
+      sel.innerHTML = '<option value="">\u2014 Select Employee \u2014</option>';
+      (json.data || []).forEach(function(e) {
+        const opt = document.createElement('option');
+        opt.value = e.employee_id;
+        opt.textContent = e.full_name;
+        if (String(e.employee_id) === String(selectedId)) opt.selected = true;
+        sel.appendChild(opt);
+      });
+    } catch(err) {
+      sel.innerHTML = '<option value="">\u2014 Failed to load \u2014</option>';
+    }
+    // sync hidden id field on change
+    sel.onchange = function() {
+      document.getElementById('fHeadId').value = sel.value;
+    };
+    document.getElementById('fHeadId').value = sel.value;
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  OPEN ADD
   // ════════════════════════════════════════════════════════
   function openAdd() {
     editTarget = null;
@@ -748,7 +793,6 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     document.getElementById('formSub').textContent   = 'Fill in the department details';
     document.getElementById('fId').value    = '';
     document.getElementById('fName').value  = '';
-    document.getElementById('fHead').value  = '';
     document.getElementById('fDesc').value  = '';
     document.getElementById('fCount').value = '';
     document.getElementById('fName').classList.remove('err');
@@ -756,6 +800,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     selIcon = '🏢'; selColor = '#2563eb';
     document.querySelectorAll('.icon-opt').forEach(el    => el.classList.toggle('selected', el.dataset.icon  === selIcon));
     document.querySelectorAll('.color-swatch').forEach(el => el.classList.toggle('selected', el.dataset.color === selColor));
+    loadHeadDropdown(null);
     openModal('modalForm');
   }
 
@@ -774,7 +819,6 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     document.getElementById('formSub').textContent   = `Editing: ${d.name}`;
     document.getElementById('fId').value    = d.department_id;
     document.getElementById('fName').value  = d.name        || '';
-    document.getElementById('fHead').value  = d.head_name   || '';
     document.getElementById('fDesc').value  = d.description || '';
     document.getElementById('fCount').value = d.employee_count || 0;
     document.getElementById('fName').classList.remove('err');
@@ -783,6 +827,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     selColor = d.color || '#2563eb';
     document.querySelectorAll('.icon-opt').forEach(el    => el.classList.toggle('selected', el.dataset.icon  === selIcon));
     document.querySelectorAll('.color-swatch').forEach(el => el.classList.toggle('selected', el.dataset.color === selColor));
+    loadHeadDropdown(d.head_employee_id || null);
     openModal('modalForm');
   }
 
@@ -790,27 +835,26 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
   //  SAVE
   // ════════════════════════════════════════════════════════
   async function saveDept() {
-    const name  = document.getElementById('fName').value.trim();
-    const head  = document.getElementById('fHead').value.trim();
-    let valid   = true;
+    const name   = document.getElementById('fName').value.trim();
+    const headId = document.getElementById('fHeadId').value;
 
     document.getElementById('fName').classList.toggle('err', !name);
-    document.getElementById('fHead').classList.toggle('err', !head);
-    if (!name || !head) { showToast('⚠️ Please fill in required fields.', 'info'); return; }
+    document.getElementById('fHead').classList.toggle('err', !headId);
+    if (!name || !headId) { showToast('⚠️ Please fill in required fields.', 'info'); return; }
 
     const btn = document.getElementById('saveBtn');
     btn.disabled = true; btn.textContent = '⏳ Saving…';
 
     const body = new FormData();
-    body.append('csrf_token',      CSRF_TOKEN);
-    body.append('action',          'save');
-    body.append('department_id',   document.getElementById('fId').value);
-    body.append('name',            name);
-    body.append('head_name',       head);
-    body.append('description',     document.getElementById('fDesc').value.trim());
-    body.append('employee_count',  document.getElementById('fCount').value || 0);
-    body.append('icon',            selIcon);
-    body.append('color',           selColor);
+    body.append('csrf_token',        CSRF_TOKEN);
+    body.append('action',            'save');
+    body.append('department_id',     document.getElementById('fId').value);
+    body.append('name',              name);
+    body.append('head_employee_id',  headId);
+    body.append('description',       document.getElementById('fDesc').value.trim());
+    body.append('employee_count',    document.getElementById('fCount').value || 0);
+    body.append('icon',              selIcon);
+    body.append('color',             selColor);
 
     try {
       const res  = await fetch('departments.php', { method:'POST', body });

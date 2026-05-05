@@ -125,6 +125,13 @@ try {
         }
     }
     
+    // ──────────────────────────────────────────────────────────────
+    // STEP 4 (H-5): Auto-expire contracts whose end_date has passed
+    // ──────────────────────────────────────────────────────────────
+    $expiredContracts = $pdo->exec(
+        "UPDATE contracts SET status='Expired' WHERE end_date IS NOT NULL AND end_date < CURDATE() AND status='Active'"
+    );
+
     // Log successful execution
     error_log("[" . date('Y-m-d H:i:s') . "] Leave notification cron completed. Marked {$updatedCount} notifications as sent.");
     echo "✓ Leave notification cron completed successfully.\n";

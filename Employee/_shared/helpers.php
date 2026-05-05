@@ -124,8 +124,38 @@ function formatFileSize($bytes) {
 }
 
 // ── Sanitize input ──
+// Trims whitespace only. htmlspecialchars() must be applied at output/display
+// time, NOT before DB inserts — storing O&#039;Brien corrupts data.
 function sanitize($input) {
-    return htmlspecialchars(trim($input), ENT_QUOTES, 'UTF-8');
+    return trim($input);
+}
+
+// ── Business-day leave day counter ──
+// Returns the number of working days between two date strings (inclusive),
+// excluding Saturdays, Sundays, and any dates in the `holidays` table.
+function countBusinessDays(PDO $pdo, string $dateFrom, string $dateTo): int {
+    $start   = new DateTime($dateFrom);
+    $end     = new DateTime($dateTo);
+    $end->modify('+1 day'); // make end exclusive for DatePeriod
+
+    // Fetch holidays in range
+    $stmt = $pdo->prepare("
+        SELECT holiday_date FROM holidays
+        WHERE holiday_date BETWEEN ? AND ?
+    ");
+    $stmt->execute([$dateFrom, $dateTo]);
+    $holidays = array_flip($stmt->fetchAll(PDO::FETCH_COLUMN));
+
+    $days = 0;
+    $interval = new DateInterval('P1D');
+    $period   = new DatePeriod($start, $interval, $end);
+    foreach ($period as $day) {
+        $dow = (int)$day->format('N'); // 1=Mon...7=Sun
+        if ($dow >= 6) continue;       // skip Sat (6) and Sun (7)
+        if (isset($holidays[$day->format('Y-m-d')])) continue; // skip holidays
+        $days++;
+    }
+    return $days;
 }
 
 // ── Check document type allowed ──
