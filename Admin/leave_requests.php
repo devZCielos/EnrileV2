@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 // ============================================================
 //  LGU ENRILE HRMS — Leave Requests Page
 //  File: Admin/leave_requests.php
@@ -10,7 +10,7 @@ if (isset($_SESSION['login_time']) && (time() - strtotime($_SESSION['login_time'
     $_isAjax = !empty($_GET['action']) || !empty($_POST['action']);
     session_unset(); session_destroy();
     if ($_isAjax) {
-        header('Content-Type: application/json');
+        header('Content-Type: application/json; charset=utf-8');
         echo json_encode(['success'=>false,'message'=>'Your session has expired. Please log in again.']);
         exit();
     }
@@ -35,7 +35,7 @@ csrf_token();
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
 
 if ($action) {
-    header('Content-Type: application/json');
+    header('Content-Type: application/json; charset=utf-8');
     if ($_SERVER['REQUEST_METHOD'] === 'POST') { csrf_verify(true); }
     try {
         switch ($action) {
@@ -106,8 +106,10 @@ if ($action) {
                 $sortCol = $sortMap[$_GET['sort'] ?? ''] ?? 'lr.filed_at';
                 $sortDir = strtoupper($_GET['dir'] ?? 'DESC') === 'ASC' ? 'ASC' : 'DESC';
 
-                // Always float pending requests to the top when viewing all and no status filter
-                if (empty($status) && $tab === 'all' && empty($_GET['sort'])) {
+                // Always float pending requests to the top when viewing all and no status filter.
+                // Applies when sort is empty OR when using the default sort (filed/DESC).
+                $isDefaultSort = (empty($_GET['sort']) || ($_GET['sort'] === 'filed' && $sortDir === 'DESC'));
+                if (empty($status) && $tab === 'all' && $isDefaultSort) {
                   $orderBy = "ORDER BY (lr.status = 'Pending') DESC, lr.filed_at DESC";
                 } else {
                   $orderBy = "ORDER BY $sortCol $sortDir";
@@ -198,6 +200,16 @@ if ($action) {
                   ");
                 $stmt->execute([$id]);
                 $row = $stmt->fetch();
+                if ($row) {
+                    // Fetch the HR department head for 7.A certification
+                    $hrHead = $pdo->query("
+                        SELECT COALESCE(head_name, '') FROM departments
+                        WHERE LOWER(name) REGEXP 'human.?resource|hr.?office|hrmo'
+                        AND is_active = 1
+                        ORDER BY department_id ASC LIMIT 1
+                    ")->fetchColumn();
+                    $row['hr_head_name'] = $hrHead ?: '';
+                }
                 echo json_encode($row
                     ? ['success'=>true,'data'=>$row]
                     : ['success'=>false,'message'=>'Not found.']);
@@ -268,12 +280,12 @@ if ($action) {
                 ")->execute([$remark, $adminId, $id]);
 
                 // P2-1 — Deduct from leave balance using the year of date_from, not YEAR(NOW())
+                // Note: remaining_days is a GENERATED ALWAYS AS column, so only update used_days
                 $pdo->prepare("
                     UPDATE leave_balances
-                    SET used_days      = used_days + ?,
-                        remaining_days = remaining_days - ?
+                    SET used_days = used_days + ?
                     WHERE employee_id=? AND leave_type_id=? AND calendar_year=?
-                ")->execute([$r['days_requested'], $r['days_requested'], $r['employee_id'], $r['leave_type_id'], $leaveYear]);
+                ")->execute([$r['days_requested'], $r['employee_id'], $r['leave_type_id'], $leaveYear]);
 
                 // Log activity (only if table exists)
                 try {
@@ -361,6 +373,11 @@ if ($action) {
 $adminName  = ucwords($_SESSION['user_name'] ?? 'Administrator');
 $roleLabels = ['admin'=>'Super Admin','hr_staff'=>'HR Staff','dept_head'=>'Department Head'];
 $roleLabel  = $roleLabels[$_SESSION['user_role']] ?? 'Admin';
+// ── Mayor / Authorized Official (CS Form 6) ─────────────────────────────────────
+$_mayorRow   = null;
+try { $_mayorRow = $pdo->query("SELECT first_name, last_name, position_title FROM employees WHERE is_mayor=1 AND employment_status='Active' LIMIT 1")->fetch(PDO::FETCH_ASSOC); } catch (Exception $_e) {}
+$mayorName  = $_mayorRow ? 'HON. ' . strtoupper(trim($_mayorRow['first_name'] . ' ' . $_mayorRow['last_name'])) : 'HON. MIGUEL B. DECENA, JR.';
+$mayorTitle = $_mayorRow ? ($_mayorRow['position_title'] ?: 'Municipal Mayor') : 'Municipal Mayor';
 ?>
 
 <?php
@@ -419,7 +436,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .user-info strong{display:block;font-size:0.82rem;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
     .user-info span{font-size:0.68rem;color:rgba(255,255,255,0.52);}
     .main{margin-left:var(--sidebar-w);flex:1;display:flex;flex-direction:column;overflow:hidden;}
-    .topbar{height:var(--topbar-h);background:linear-gradient(135deg,#2563eb 0%,#1e40af 50%,#22c55e 100%);display:flex;align-items:center;padding:0 20px;gap:12px;position:sticky;top:0;z-index:100;box-shadow:0 2px 16px rgba(37,99,235,0.30);overflow:hidden;}
+    .topbar{height:var(--topbar-h);background:linear-gradient(135deg,#2563eb 0%,#1e40af 50%,#22c55e 100%);display:flex;align-items:center;padding:0 20px;gap:12px;position:sticky;top:0;z-index:100;box-shadow:0 2px 16px rgba(37,99,235,0.30);}
     .menu-toggle{display:none;background:none;border:none;font-size:1.4rem;cursor:pointer;color:rgba(255,255,255,0.85);padding:4px;flex-shrink:0;}
     .topbar-title{flex:1;min-width:0;overflow:hidden;}
     .topbar-title h1{font-size:1.20rem;font-weight:800;color:#fff;font-family:'Playfair Display',serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
@@ -465,7 +482,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .table-wrap{overflow-x:auto;}
     table{width:100%;border-collapse:collapse;font-size:0.83rem;}
     thead tr{background:var(--gray-50);}
-    th{padding:11px 16px;text-align:left;font-size:0.69rem;font-weight:800;color:var(--gray-400);text-transform:uppercase;letter-spacing:0.07em;border-bottom:1.5px solid var(--gray-200);white-space:nowrap;cursor:pointer;user-select:none;transition:color 0.2s;}
+    th{padding:11px 16px;text-align:left;font-size:0.69rem;font-weight:800;color:var(--gray-400);text-transform:uppercase;letter-spacing:0.07em;border-bottom:1.5px solid var(--gray-200);white-space:nowrap;cursor:pointer;-webkit-user-select:none;user-select:none;transition:color 0.2s;}
     th:hover{color:var(--primary);}
     td{padding:13px 16px;border-bottom:1px solid var(--gray-100);color:var(--gray-800);vertical-align:middle;}
     tr:last-child td{border-bottom:none;}
@@ -507,7 +524,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .empty-state{padding:52px 20px;text-align:center;}
     .empty-state .ei{font-size:2.8rem;margin-bottom:12px;opacity:0.5;}
     .empty-state p{font-size:0.875rem;font-weight:600;color:var(--gray-400);}
-    .modal-overlay{display:none;position:fixed;inset:0;background:rgba(15,23,42,0.55);z-index:500;align-items:center;justify-content:center;backdrop-filter:blur(4px);}
+    .modal-overlay{display:none;position:fixed;inset:0;background:rgba(15,23,42,0.55);z-index:500;align-items:center;justify-content:center;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);}
     .modal-overlay.open{display:flex;}
     .modal{background:var(--white);border-radius:var(--radius);box-shadow:var(--shadow-lg);width:92%;max-width:580px;max-height:92vh;overflow-y:auto;animation:modalIn 0.3s cubic-bezier(0.34,1.4,0.64,1) both;}
     .modal.sm{max-width:440px;}
@@ -746,18 +763,18 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
       <div class="toolbar">
         <div class="search-box">
           <span style="color:var(--gray-400);font-size:1rem;">🔍</span>
-          <input type="text" id="searchInput" placeholder="Search employee or leave type…" oninput="debounceLoad()"/>
+          <input type="text" id="searchInput" aria-label="Search employee or leave type" placeholder="Search employee or leave type…" oninput="debounceLoad()"/>
         </div>
-        <select class="filter-select" id="fStatus" onchange="loadRequests(1)">
+        <select class="filter-select" id="fStatus" title="Filter by status" aria-label="Filter by status" onchange="loadRequests(1)">
           <option value="">All Requests</option>
           <option value="Pending">Pending</option>
           <option value="Approved">Approved</option>
           <option value="Denied">Denied</option>
           <option value="Cancelled">Cancelled</option>
         </select>
-        <select class="filter-select" id="fDept"  onchange="loadRequests(1)"><option value="">All Departments</option></select>
-        <select class="filter-select" id="fType"  onchange="loadRequests(1)"><option value="">All Leave Types</option></select>
-        <select class="filter-select" id="fMonth" onchange="loadRequests(1)">
+        <select class="filter-select" id="fDept" title="Filter by department" aria-label="Filter by department" onchange="loadRequests(1)"><option value="">All Departments</option></select>
+        <select class="filter-select" id="fType" title="Filter by leave type" aria-label="Filter by leave type" onchange="loadRequests(1)"><option value="">All Leave Types</option></select>
+        <select class="filter-select" id="fMonth" title="Filter by month" aria-label="Filter by month" onchange="loadRequests(1)">
           <option value="">All Months</option>
           <option value="1">January</option><option value="2">February</option><option value="3">March</option>
           <option value="4">April</option><option value="5">May</option><option value="6">June</option>
@@ -809,18 +826,18 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
       </div>
       <div class="modal-body">
         <div class="form-row">
-          <div class="form-group"><label>Employee <span class="req">*</span></label><select id="fEmployee"><option value="">Select employee</option></select></div>
-          <div class="form-group"><label>Leave Type <span class="req">*</span></label><select id="fLeaveType"><option value="">Select type</option></select></div>
+          <div class="form-group"><label for="fEmployee">Employee <span class="req">*</span></label><select id="fEmployee" aria-label="Select employee"><option value="">Select employee</option></select></div>
+          <div class="form-group"><label for="fLeaveType">Leave Type <span class="req">*</span></label><select id="fLeaveType" aria-label="Select leave type"><option value="">Select type</option></select></div>
         </div>
         <div class="form-row">
-          <div class="form-group"><label>Date From <span class="req">*</span></label><input type="date" id="fFrom"/></div>
-          <div class="form-group"><label>Date To <span class="req">*</span></label><input type="date" id="fTo"/></div>
+          <div class="form-group"><label for="fFrom">Date From <span class="req">*</span></label><input type="date" id="fFrom" aria-label="Date from"/></div>
+          <div class="form-group"><label for="fTo">Date To <span class="req">*</span></label><input type="date" id="fTo" aria-label="Date to"/></div>
         </div>
         <div class="form-row">
-          <div class="form-group"><label>Number of Days <span class="req">*</span></label><input type="number" id="fDays" min="1" placeholder="e.g. 3"/></div>
+          <div class="form-group"><label for="fDays">Number of Days <span class="req">*</span></label><input type="number" id="fDays" min="1" placeholder="e.g. 3" aria-label="Number of days"/></div>
         </div>
         <div class="form-row">
-          <div class="form-group form-full"><label>Reason / Remarks</label><textarea id="fReason" placeholder="State the reason for this leave application…"></textarea></div>
+          <div class="form-group form-full"><label for="fReason">Reason / Remarks</label><textarea id="fReason" aria-label="Reason or remarks" placeholder="State the reason for this leave application…"></textarea></div>
         </div>
         <div class="form-row">
           <div class="form-group form-full">
@@ -1058,9 +1075,9 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
               <div style="min-height:12px;border-bottom:1px solid #000;margin:2px 0;">&nbsp;</div>
               <div style="min-height:12px;border-bottom:1px solid #000;margin:2px 0;">&nbsp;</div>
               <div style="min-height:12px;border-bottom:1px solid #000;margin:2px 0;">&nbsp;</div>
-              <div style="margin-top:28px;border-top:1px solid #000;padding-top:4px;text-align:center;">
-                <div id="cf-7b-authorized-officer" style="font-size:.80rem;font-weight:700;letter-spacing:.02em;text-transform:uppercase;">(Authorized Officer)</div>
-                <div style="font-size:.63rem;color:#333;">(Authorized Officer)</div>
+              <div style="margin-top:24px;text-align:center;">
+                <div id="cf-7b-authorized-officer" style="font-size:.80rem;font-weight:700;letter-spacing:.02em;text-transform:uppercase;"></div>
+                <div style="border-top:1px solid #000;margin-top:4px;padding-top:4px;font-size:.63rem;color:#333;">(Authorized Officer)</div>
               </div>
             </td>
           </tr>
@@ -1091,8 +1108,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
 
               <div style="padding-top:32px;text-align:center;">
                 <div style="display:inline-block;min-width:260px;text-align:center;">
-                  <div style="font-size:1.00rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;">HON. MIGUEL B. DECENA, JR.</div>
-                  <div style="font-size:.98rem;font-weight:700;">Municipal Mayor</div>
+                  <div style="font-size:1.00rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;"><?= htmlspecialchars($mayorName) ?></div>
+                  <div style="font-size:.98rem;font-weight:700;"><?= htmlspecialchars($mayorTitle) ?></div>
                   <div style="border-top:1.5px solid #000;margin-top:4px;padding-top:4px;font-size:.90rem;font-weight:700;">(Authorized Official)</div>
                 </div>
               </div>
@@ -1118,7 +1135,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         <div class="confirm-icon">✅</div>
         <h4>Approve this leave request?</h4>
         <p id="approveText"></p>
-        <textarea class="confirm-reason" id="approveRemark" placeholder="Optional remarks for the employee…"></textarea>
+        <textarea class="confirm-reason" id="approveRemark" aria-label="Approval remarks" placeholder="Optional remarks for the employee…"></textarea>
       </div>
       <div class="modal-footer">
         <button class="btn btn-cancel" onclick="closeModal('modalApprove')">Cancel</button>
@@ -1138,7 +1155,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         <div class="confirm-icon">⚠️</div>
         <h4>Deny this leave request?</h4>
         <p id="denyText"></p>
-        <textarea class="confirm-reason" id="denyRemark" placeholder="Please state the reason for denial…"></textarea>
+        <textarea class="confirm-reason" id="denyRemark" aria-label="Denial reason" placeholder="Please state the reason for denial…"></textarea>
       </div>
       <div class="modal-footer">
         <button class="btn btn-cancel" onclick="closeModal('modalDeny')">Cancel</button>
@@ -1191,7 +1208,7 @@ if (!CSRF_TOKEN) {
 }
 
   const COLORS=['#2563eb','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4','#ec4899','#0ea5e9','#84cc16','#f97316'];
-  let currentTab='all',currentPage=1,sortKey='filed',sortAsc=false;
+  let currentTab='all',currentPage=1,sortKey='',sortAsc=false;
   let approveTarget=null,denyTarget=null,debounceTimer=null;
 
   const fmt   = d => d ? new Date(d.slice(0,10)+'T00:00:00').toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'numeric'}) : '—';
@@ -1587,10 +1604,11 @@ async function doDeleteRequest() {
 
     // 7B — recommendation based on status
     // 7A — CERTIFICATION OF LEAVE CREDITS: Always HRMO
-    var hrmoName = 'AIREEN G. BERAN, HRMO';
+    var hrmoName = r.hr_head_name && r.hr_head_name.trim() ? r.hr_head_name.trim() : 'HRMO';
+    var hrmoLabel = r.hr_head_name && r.hr_head_name.trim() ? r.hr_head_name.trim() : 'HRMO';
     var certOfficer = document.getElementById('cf-authorized-officer');
     if (certOfficer) {
-      certOfficer.textContent = hrmoName;
+      certOfficer.textContent = hrmoLabel;
       certOfficer.style.textTransform = 'uppercase';
     }
 
@@ -2013,14 +2031,17 @@ document.addEventListener('click',function(e){
 });
 
 // ── Poll admin notifications every 60 seconds ──────────────────────────────
+function dEsc(s) {
+  const _d = document.createElement('div');
+  _d.textContent = String(s ?? '');
+  return _d.innerHTML;
+}
+
 async function pollAdminNotifications() {
   try {
-    const r = await fetch('leave_requests.php?action=pending_count').then(r=>r.json());
-    if (typeof r.count === 'undefined') return;
-    // Re-fetch full notifications and update panel
     const r2 = await fetch('notif_poll.php').then(r=>r.json()).catch(()=>null);
     if (!r2 || !r2.success) {
-      // Fallback: just update the count badge
+      // Fallback: just update the count badge from current DOM state
       const unread = getUnreadCount();
       const cnt = document.getElementById('adminNotifCount');
       if (cnt) {
@@ -2038,13 +2059,17 @@ async function pollAdminNotifications() {
         list.innerHTML = '<div class="notif-empty"><div class="ne-icon">🔔</div><p>All caught up!</p></div>';
       } else {
         list.innerHTML = notifs.map(n => {
-          const isRead = read.includes(n.nid);
-          return `<a class="notif-item ${isRead?'':'unread'}" href="${n.link}" data-nid="${n.nid}" onclick="markNotifRead(this.getAttribute('data-nid'));applyReadState();">
-            <div class="notif-ico" style="background:<?=htmlspecialchars($n['color'])?>22;"><?=$n['icon']?></div>
+          const isRead    = read.includes(n.nid);
+          const safeNid   = dEsc(String(n.nid || ''));
+          const safeColor = /^#[0-9a-fA-F]{3,6}$/.test(n.color) ? n.color : '#94a3b8';
+          const safeLinkRaw = String(n.link || '#');
+          const safeLink  = /^[a-zA-Z0-9_./?=&#%-]+$/.test(safeLinkRaw) ? safeLinkRaw : '#';
+          return `<a class="notif-item ${isRead?'':'unread'}" href="${safeLink}" data-nid="${safeNid}" onclick="markNotifRead(this.getAttribute('data-nid'));applyReadState();">
+            <div class="notif-ico" style="background:${safeColor}22;">${dEsc(n.icon)}</div>
             <div class="notif-body">
-              <div class="notif-title"><?=htmlspecialchars($n['title'])?></div>
-              <div class="notif-text"><?=htmlspecialchars($n['body'])?></div>
-              ${n.time ? '<div class="notif-time">'+adminFmtTime(n.time)+'</div>' : ''}
+              <div class="notif-title">${dEsc(n.title)}</div>
+              <div class="notif-text">${dEsc(n.body)}</div>
+              ${n.time ? '<div class="notif-time">'+adminFmtTime(dEsc(n.time))+'</div>' : ''}
             </div>
           </a>`;
         }).join('');
@@ -2159,7 +2184,7 @@ function toggleSidebar(){document.getElementById('sidebar').classList.toggle('op
   <!-- ══ CHAT WIDGET ══ -->
   <style>
     /* ── Wrap & animation ── */
-    .cw-wrap{position:fixed;bottom:24px;right:24px;width:420px;height:600px;background:#fff;border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.28),0 0 1px rgba(0,0,0,.1);display:none;flex-direction:column;z-index:9999;overflow:hidden;font-family:'Nunito',sans-serif;backdrop-filter:blur(10px);}
+    .cw-wrap{position:fixed;bottom:24px;right:24px;width:420px;height:600px;background:#fff;border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.28),0 0 1px rgba(0,0,0,.1);display:none;flex-direction:column;z-index:9999;overflow:hidden;font-family:'Nunito',sans-serif;-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);}
         .cw-wrap.open{display:flex;animation:cwIn .3s cubic-bezier(.34,1.4,.64,1) both;}
         @keyframes cwIn{0%{opacity:0;transform:scale(.85) translateY(30px);filter:blur(6px);}100%{opacity:1;transform:scale(1) translateY(0);filter:blur(0);}}
         
@@ -2697,7 +2722,7 @@ function toggleSidebar(){document.getElementById('sidebar').classList.toggle('op
     cwSending=true;
     var btn=document.getElementById('cwSendBtn');btn.disabled=true;
     var sentMsg=msg;inp.value='';cwResize(inp);
-    var fd=new FormData();fd.append('action','send');fd.append('to',cwAct.user_id);fd.append('message',sentMsg);
+    var fd=new FormData();fd.append('action','send');fd.append('to',cwAct.user_id);fd.append('message',sentMsg);fd.append('csrf_token',CSRF_TOKEN);
     fd.append('csrf_token', CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
@@ -2729,7 +2754,7 @@ function toggleSidebar(){document.getElementById('sidebar').classList.toggle('op
   function cwSubmitEdit(msgId,newMsg){
     cwSending=true;
     var btn=document.getElementById('cwSendBtn');btn.disabled=true;
-    var fd=new FormData();fd.append('action','edit');fd.append('message_id',msgId);fd.append('message',newMsg);
+    var fd=new FormData();fd.append('action','edit');fd.append('message_id',msgId);fd.append('message',newMsg);fd.append('csrf_token',CSRF_TOKEN);
     fd.append('csrf_token', CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
@@ -2758,7 +2783,7 @@ function toggleSidebar(){document.getElementById('sidebar').classList.toggle('op
   // ── Unsend ───────────────────────────────────────────────────
   function cwUnsend(msgId){
     if(!confirm('Unsend this message? It will be removed for everyone.'))return;
-    var fd=new FormData();fd.append('action','unsend');fd.append('message_id',msgId);
+    var fd=new FormData();fd.append('action','unsend');fd.append('message_id',msgId);fd.append('csrf_token',CSRF_TOKEN);
     fd.append('csrf_token', CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})

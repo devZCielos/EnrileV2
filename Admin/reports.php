@@ -118,6 +118,7 @@ if ($action) {
                 $status     = $_GET['status']    ?? 'Approved';
                 $leave_type = $_GET['leave_type'] ?? '';
                 $period     = $_GET['period']    ?? 'year';  // week, month, year
+                if (!in_array($period, ['week','month','year','custom'], true)) $period = 'year';
                 $year       = (int)($_GET['year'] ?? date('Y'));
                 $month      = (int)($_GET['month'] ?? date('n'));
                 $search     = $_GET['search']    ?? '';
@@ -213,12 +214,16 @@ if ($action) {
                 $sum_stmt->execute($params);
                 $summary = $sum_stmt->fetch();
 
-                // P3-2 — Pagination
-                $perPage   = max(1, min(500, (int)($_GET['per_page'] ?? 50)));
-                $page      = max(1, (int)($_GET['page'] ?? 1));
-                $offset    = ($page - 1) * $perPage;
+                // P3-2 — Pagination (bypassed when print=1 is passed)
                 $totalRows = count($rows);
-                $rows      = array_slice($rows, $offset, $perPage);
+                if (empty($_GET['print'])) {
+                    $perPage = max(1, min(500, (int)($_GET['per_page'] ?? 50)));
+                    $page    = max(1, (int)($_GET['page'] ?? 1));
+                    $rows    = array_slice($rows, ($page - 1) * $perPage, $perPage);
+                } else {
+                    $perPage = $totalRows ?: 1;
+                    $page    = 1;
+                }
 
                 echo json_encode([
                     'success'    => true,
@@ -374,6 +379,60 @@ if ($action) {
                 fclose($out);
                 exit();
 
+            // ── CSV EXPORT OF EMPLOYEE ROSTER ─────────────────────────────────
+            case 'export_csv_employees':
+                $dept   = $_GET['dept']   ?? '';
+                $type   = $_GET['type']   ?? '';
+                $status = $_GET['status'] ?? '';
+                $search = $_GET['search'] ?? '';
+                $where  = ['1=1'];
+                $params = [];
+                if ($dept)   { $where[] = 'e.department_id = ?';     $params[] = $dept; }
+                if ($type)   { $where[] = 'e.employment_type = ?';   $params[] = $type; }
+                if ($status) { $where[] = 'e.employment_status = ?'; $params[] = $status; }
+                if ($search) {
+                    $where[] = "(CONCAT(e.first_name,' ',e.last_name) LIKE ? OR e.employee_code LIKE ? OR e.position_title LIKE ?)";
+                    $s = "%$search%"; $params[] = $s; $params[] = $s; $params[] = $s;
+                }
+                $wSql = 'WHERE ' . implode(' AND ', $where);
+                $empCsvStmt = $pdo->prepare("
+                    SELECT e.employee_code,
+                        CONCAT(e.first_name,' ',COALESCE(e.middle_name,''),' ',e.last_name) AS full_name,
+                        COALESCE(d.name,'—') AS department,
+                        e.position_title, e.employment_type,
+                        e.employment_status, e.gender, e.date_hired,
+                        e.contact_number, e.email_address
+                    FROM employees e
+                    LEFT JOIN departments d ON e.department_id = d.department_id
+                    $wSql
+                    ORDER BY e.last_name, e.first_name
+                ");
+                $empCsvStmt->execute($params);
+                $empCsvRows = $empCsvStmt->fetchAll();
+                while (ob_get_level()) { ob_end_clean(); }
+                header('Content-Type: text/csv; charset=utf-8');
+                $empFilename = 'employee_roster_' . date('Ymd_His') . '.csv';
+                header('Content-Disposition: attachment; filename="' . $empFilename . '"');
+                header('Cache-Control: no-cache, no-store, must-revalidate');
+                $out = fopen('php://output', 'w');
+                fwrite($out, "\xEF\xBB\xBF");
+                fputcsv($out, ['#','Employee Code','Full Name','Department','Position Title',
+                               'Employment Type','Status','Gender','Date Hired','Contact','Email']);
+                $n = 1;
+                foreach ($empCsvRows as $r) {
+                    $empType = $r['employment_type'] === 'Contractual' ? 'COS/Contractual' : $r['employment_type'];
+                    fputcsv($out, [
+                        $n++,
+                        $r['employee_code'],
+                        trim(preg_replace('/\s+/', ' ', $r['full_name'])),
+                        $r['department'], $r['position_title'],
+                        $empType, $r['employment_status'], $r['gender'],
+                        $r['date_hired'], $r['contact_number'], $r['email_address'],
+                    ]);
+                }
+                fclose($out);
+                exit();
+
             default:
                 echo json_encode(['success'=>false,'message'=>'Unknown action.']);
         }
@@ -516,6 +575,11 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .btn-apply:hover { transform:translateY(-1px); box-shadow:0 4px 14px rgba(37,99,235,0.35); }
     .btn-reset { background:var(--gray-100); color:var(--gray-600); border:1.5px solid var(--gray-200); }
     .btn-reset:hover { background:var(--gray-200); }
+    .btn-export { background:linear-gradient(135deg,#22c55e,#16a34a); color:#fff; border:none; box-shadow:0 2px 8px rgba(34,197,94,0.25); }
+    .btn-export:hover { transform:translateY(-1px); box-shadow:0 4px 14px rgba(34,197,94,0.35); }
+
+    /* Screen-only: hide print-only table */
+    .print-only-table { display:none; }
 
     /* ── PANEL ── */
     .panel { background:var(--white); border-radius:var(--radius); border:1.5px solid var(--gray-200); box-shadow:var(--shadow-sm); overflow:hidden; animation:fadeIn 0.4s ease both; margin-bottom:20px; }
@@ -620,34 +684,87 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     }
 
     /* ══════════════════════════════════════
-       PRINT STYLES
+       PRINT STYLES — Clean B&W Text Output
     ══════════════════════════════════════ */
+    @page { size: A4 landscape; margin: 15mm; }
     @media print {
-      .sidebar, .topbar, .btn-print, .overlay-mob,
-      .report-tabs, .filter-bar, .panel-head-actions,
-      .btn-filter, .no-print { display:none !important; }
-      .main { margin:0 !important; }
-      body { background:#fff !important; }
-      .content { padding:0 !important; }
-      .report-section { display:block !important; }
-      .panel { box-shadow:none !important; border:1px solid #ddd !important; break-inside:avoid; margin-bottom:16px; }
-      .stat-card { box-shadow:none !important; break-inside:avoid; }
-      .stat-cards { gap:10px; }
-      .rep-table thead th { background:#f1f5f9 !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-      .rep-table tbody tr:hover { background:none !important; }
-      .badge { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-      .two-col { grid-template-columns:1fr 1fr; }
-      .print-header { display:block !important; }
+      /* ── Hide all UI chrome ── */
+      .sidebar, .topbar, .overlay-mob,
+      .report-tabs, .filter-bar, .result-bar,
+      .panel-head-actions, .btn-filter, .btn-print, .btn-export,
+      .stat-cards, .two-col, .sparkline-wrap,
+      .bar-chart, .donut-wrap, .ctrl-select,
+      .no-print { display:none !important; }
 
-      /* Force the active tab section to print */
-      #overviewSection,
-      #employeeSection,
-      #leaveSection {
-        display:block !important;
+      /* ── Layout reset ── */
+      body   { background:#fff !important; font-family:Arial,sans-serif !important; font-size:10pt !important; color:#000 !important; display:block !important; }
+      .main  { margin:0 !important; display:block !important; }
+      .content { padding:0 !important; }
+
+      /* ── Only the active section prints; inactive sections are hidden ── */
+      .report-section        { display:none !important; }
+      .report-section.active { display:block !important; }
+
+      /* ── Print header ── */
+      .print-header { display:block !important; text-align:center; margin-bottom:14px; padding-bottom:10px; border-bottom:2px solid #000; }
+      .print-header h2 { font-size:14pt !important; font-weight:bold; color:#000 !important; margin-bottom:3px; }
+      .print-header p  { font-size:9pt !important; color:#333 !important; }
+
+      /* ── Panel: no shadow, no radius ── */
+      .panel { box-shadow:none !important; border:1px solid #bbb !important; border-radius:0 !important; margin-bottom:10px; break-inside:auto; }
+      .panel-head { background:#efefef !important; border-bottom:1px solid #bbb !important; padding:6px 10px !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+      .panel-head h3 { font-size:10pt !important; color:#000 !important; }
+      .panel-body { padding:0 !important; }
+
+      /* ── Overview print-only summary table ── */
+      .print-only-table { display:table !important; width:100%; border-collapse:collapse; font-size:10pt; margin:10px 0 14px; }
+
+      /* ── Data tables: plain B&W ── */
+      .rep-table { width:100%; border-collapse:collapse; font-size:9pt; }
+      .rep-table-wrap { overflow:visible !important; }
+      .rep-table thead tr { background:#e0e0e0 !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+      .rep-table thead th {
+        background:#e0e0e0 !important;
+        color:#000 !important;
+        font-size:8pt !important;
+        font-weight:bold !important;
+        padding:5px 7px !important;
+        border:1px solid #999 !important;
+        text-transform:uppercase;
+        -webkit-print-color-adjust:exact;
+        print-color-adjust:exact;
+      }
+      .rep-table tbody td {
+        padding:4px 7px !important;
+        border:1px solid #ccc !important;
+        color:#000 !important;
+        font-size:9pt !important;
+        font-weight:normal !important;
+        background:#fff !important;
+        white-space:normal !important;
+      }
+      .rep-table tbody tr:nth-child(even) td {
+        background:#f5f5f5 !important;
+        -webkit-print-color-adjust:exact;
+        print-color-adjust:exact;
+      }
+      .rep-table tbody tr:hover td { background:inherit !important; }
+      .rep-table td.num { text-align:right !important; font-weight:bold !important; }
+
+      /* ── Badges → plain bold text, no color fill ── */
+      .badge {
+        background:none !important;
+        color:#000 !important;
+        border:none !important;
+        border-radius:0 !important;
+        padding:0 !important;
+        font-size:inherit !important;
+        font-weight:bold !important;
+        display:inline !important;
       }
     }
 
-    /* Print-only header */
+    /* Print-only header (screen: hidden) */
     .print-header { display:none; text-align:center; margin-bottom:20px; padding-bottom:12px; border-bottom:2px solid #e2e8f0; }
     .print-header h2 { font-family:'Playfair Display',serif; font-size:1.3rem; color:#1e293b; margin-bottom:4px; }
     .print-header p  { font-size:0.80rem; color:#64748b; }
@@ -803,8 +920,23 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     <div class="report-section active" id="overviewSection">
       <div class="print-header">
         <h2>LGU Enrile HR Management System</h2>
-        <p>Overview Report — Generated: <?= date('F j, Y g:i A') ?></p>
+        <p id="ovPrintDate">Overview Report — Generated: <?= date('F j, Y g:i A') ?></p>
       </div>
+
+      <!-- Print-only overview summary table (hidden on screen; shown when printing) -->
+      <table class="print-only-table rep-table" id="ovPrintTable">
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th style="text-align:right">Count</th>
+            <th>Metric</th>
+            <th style="text-align:right">Count</th>
+          </tr>
+        </thead>
+        <tbody id="ovPrintTbody">
+          <tr><td colspan="4" style="text-align:center;padding:10px;color:#999">Loading overview data…</td></tr>
+        </tbody>
+      </table>
 
       <!-- Overview Stat Cards -->
       <div class="stat-cards">
@@ -933,6 +1065,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         <div class="filter-actions">
           <button class="btn-filter btn-apply" onclick="loadEmployeeRoster()">🔍 Filter</button>
           <button class="btn-filter btn-reset" onclick="resetEmpFilters()">↺ Reset</button>
+          <button class="btn-filter btn-export" onclick="exportEmployeeCSV()">📥 Export CSV</button>
         </div>
       </div>
 
@@ -1058,6 +1191,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         <div class="filter-actions">
           <button class="btn-filter btn-apply" onclick="loadLeaveReport()">🔍 Filter</button>
           <button class="btn-filter btn-reset" onclick="resetLeaveFilters()">↺ Reset</button>
+          <button class="btn-filter btn-export" onclick="exportLeaveCSV()">📥 Export CSV</button>
         </div>
       </div>
 
@@ -1191,10 +1325,113 @@ function switchTab(tab) {
 }
 
 // ────────────────────────────────────────────────────────────
-//  PRINT
+//  PRINT — Fetch all rows first, then open print dialog
 // ────────────────────────────────────────────────────────────
-function printReport() {
-  window.print();
+async function printReport() {
+  var activeSection = document.querySelector('.report-section.active');
+  if (!activeSection) { window.print(); return; }
+  var secId = activeSection.id;
+
+  // Overview: data already loaded into print-only table by loadOverview()
+  if (secId === 'overviewSection') {
+    document.getElementById('ovPrintDate').textContent =
+      'Overview Report — Generated: ' + new Date().toLocaleString('en-PH');
+    window.print();
+    return;
+  }
+
+  var btn = document.querySelector('.btn-print');
+  var origHTML = btn ? btn.innerHTML : '';
+  if (btn) { btn.innerHTML = '⏳ <span>Preparing…</span>'; btn.disabled = true; }
+
+  try {
+    if (secId === 'employeeSection') {
+      // Employee roster: no server-side pagination — fetch all cleanly for print
+      var dept   = document.getElementById('empDept').value;
+      var type   = document.getElementById('empType').value;
+      var status = document.getElementById('empStatus').value;
+      var search = document.getElementById('empSearch').value.trim();
+      var params = '?action=employee_roster';
+      if (dept)   params += '&dept='   + encodeURIComponent(dept);
+      if (type)   params += '&type='   + encodeURIComponent(type);
+      if (status) params += '&status=' + encodeURIComponent(status);
+      if (search) params += '&search=' + encodeURIComponent(search);
+      var j = await fetchJSON(params);
+      if (j.success && j.data.length) {
+        document.getElementById('empTbody').innerHTML = j.data.map(function(r, i) {
+          var empType = r.employment_type === 'Contractual' ? 'COS/Contractual' : r.employment_type;
+          var pos = (r.position_title||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+          return '<tr>'+
+            '<td>'+(i+1)+'</td>'+
+            '<td>'+r.employee_code+'</td>'+
+            '<td>'+r.full_name.replace(/\s+/g,' ').trim()+'</td>'+
+            '<td>'+r.department+'</td>'+
+            '<td>'+pos+'</td>'+
+            '<td>'+empType+'</td>'+
+            '<td>'+r.employment_status+'</td>'+
+            '<td>'+r.gender+'</td>'+
+            '<td>'+fmt(r.date_hired)+'</td>'+
+            '<td>'+(r.contact_number||r.email_address||'—')+'</td>'+
+          '</tr>';
+        }).join('');
+      }
+    } else if (secId === 'leavesSection') {
+      // Leave report: pass print=1 to bypass server-side pagination
+      var period = document.getElementById('lvPeriod').value;
+      var year   = document.getElementById('lvYear').value;
+      var month  = document.getElementById('lvMonth').value;
+      var dept   = document.getElementById('lvDept').value;
+      var status = document.getElementById('lvStatus').value;
+      var type   = document.getElementById('lvType').value;
+      var search = document.getElementById('lvSearch').value.trim();
+      var dfrom  = document.getElementById('lvDateFrom').value;
+      var dto    = document.getElementById('lvDateTo').value;
+      var params = '?action=leave_report&print=1&period=' + period;
+      if (year)   params += '&year='       + year;
+      if (month)  params += '&month='      + month;
+      if (dept)   params += '&dept='       + encodeURIComponent(dept);
+      if (status) params += '&status='     + encodeURIComponent(status);
+      if (type)   params += '&leave_type=' + encodeURIComponent(type);
+      if (search) params += '&search='     + encodeURIComponent(search);
+      if (dfrom)  params += '&date_from='  + encodeURIComponent(dfrom);
+      if (dto)    params += '&date_to='    + encodeURIComponent(dto);
+      var j = await fetchJSON(params);
+      if (j.success && j.data.length) {
+        document.getElementById('lvTbody').innerHTML = j.data.map(function(r, i) {
+          var empType = r.employment_type === 'Contractual' ? 'COS/Contractual' : r.employment_type;
+          var credits = parseFloat(r.credits_left||0).toFixed(1);
+          return '<tr>'+
+            '<td>'+(i+1)+'</td>'+
+            '<td>'+r.employee_name+' / '+r.employee_code+'</td>'+
+            '<td>'+r.department+'</td>'+
+            '<td>'+empType+'</td>'+
+            '<td>'+r.leave_type+'</td>'+
+            '<td>'+fmt(r.date_from)+'</td>'+
+            '<td>'+fmt(r.date_to)+'</td>'+
+            '<td class="num">'+parseFloat(r.days_requested||0).toFixed(1)+'</td>'+
+            '<td>'+r.status+'</td>'+
+            '<td>'+fmt(r.filed_at)+'</td>'+
+            '<td>'+(r.reviewed_at?fmt(r.reviewed_at):'—')+'</td>'+
+            '<td class="num">'+credits+'</td>'+
+            '<td>'+(r.approved_by||'—')+'</td>'+
+          '</tr>';
+        }).join('');
+        document.getElementById('leavePrintMeta').textContent =
+          document.getElementById('leavePrintMeta').textContent + ' | ' + j.data.length + ' total records';
+      }
+    }
+    setTimeout(function() {
+      window.print();
+      if (btn) { btn.innerHTML = origHTML; btn.disabled = false; }
+      // Restore paginated view after the print dialog closes
+      if (secId === 'leavesSection') loadLeaveReport();
+      else if (secId === 'employeeSection') loadEmployeeRoster();
+    }, 200);
+  } catch(err) {
+    console.error('printReport', err);
+    if (btn) { btn.innerHTML = origHTML; btn.disabled = false; }
+    window.print();
+  }
 }
 
 // ────────────────────────────────────────────────────────────
@@ -1217,6 +1454,28 @@ async function loadOverview() {
     document.getElementById('ovActiveSub').textContent   = (e.on_leave||0)+' on leave · '+(e.inactive||0)+' inactive';
     document.getElementById('ovJOSub').textContent       = 'COS: '+(e.contractual||0);
     document.getElementById('ovLeaveSub').textContent    = (l.pending||0)+' pending · '+(l.total||0)+' total';
+    // Populate print-only overview summary table
+    var pt = document.getElementById('ovPrintTbody');
+    if (pt) {
+      pt.innerHTML = [
+        ['Total Employees',  e.total||0,    'Active Departments',  j.departments||0],
+        ['Active',           e.active||0,   'On Leave',            e.on_leave||0],
+        ['Inactive',         e.inactive||0, 'Male',                e.male||0],
+        ['Permanent',        e.permanent||0,'Female',              e.female||0],
+        ['Job Order',        e.job_order||0,'Leave Requests ('+new Date().getFullYear()+')', l.total||0],
+        ['Casual',           e.casual||0,   'Approved Leaves',     l.approved||0],
+        ['COS / Contractual',e.contractual||0,'Pending Leaves',    l.pending||0],
+      ].map(function(row) {
+        return '<tr>'+
+          '<td style="padding:5px 8px">'+row[0]+'</td>'+
+          '<td style="padding:5px 8px;text-align:right;font-weight:bold">'+row[1]+'</td>'+
+          '<td style="padding:5px 8px">'+row[2]+'</td>'+
+          '<td style="padding:5px 8px;text-align:right;font-weight:bold">'+row[3]+'</td>'+
+        '</tr>';
+      }).join('');
+      document.getElementById('ovPrintDate').textContent =
+        'Overview Report — Generated: ' + new Date().toLocaleString('en-PH');
+    }
   } catch(e) { console.error('overview', e); }
 }
 
@@ -1371,7 +1630,7 @@ async function loadEmployeeRoster() {
         '<td style="font-family:monospace;font-size:.80rem;color:var(--gray-600)">'+r.employee_code+'</td>'+
         '<td><div style="font-weight:700;color:var(--gray-800)">'+r.full_name.replace(/\s+/g,' ').trim()+'</div></td>'+
         '<td style="font-size:.80rem;color:var(--gray-600)">'+r.department+'</td>'+
-        '<td style="font-size:.79rem;color:var(--gray-600);max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+r.position_title+'">'+r.position_title+'</td>'+
+        '<td style="font-size:.79rem;color:var(--gray-600);max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+(r.position_title||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')+'">'+(r.position_title||'')+'</td>'+
         '<td><span class="badge '+tb+'">'+empType+'</span></td>'+
         '<td><span class="badge '+sb+'">'+r.employment_status+'</span></td>'+
         '<td style="font-size:.80rem">'+r.gender+'</td>'+
@@ -1415,6 +1674,12 @@ async function loadLeaveReport() {
   var search = document.getElementById('lvSearch').value.trim();
   var dfrom  = document.getElementById('lvDateFrom').value;
   var dto    = document.getElementById('lvDateTo').value;
+
+  // Validate custom date range
+  if (period === 'custom' && dfrom && dto && dfrom > dto) {
+    showToast('Date From must be before or equal to Date To.', 'error');
+    return;
+  }
 
   tbody.innerHTML = '<tr><td colspan="13" class="loading-row">⏳ Loading leave requests…</td></tr>';
 
@@ -1462,7 +1727,7 @@ async function loadLeaveReport() {
     tbody.innerHTML = j.data.map(function(r, i) {
       var sb  = statusBadge[r.status] || 'badge-gray';
       var tb  = typeBadge[r.employment_type] || 'badge-gray';
-      var empType = r.employment_type === 'Contractual' ? 'COS' : r.employment_type;
+      var empType = r.employment_type === 'Contractual' ? 'COS/Contractual' : r.employment_type;
       var credits = parseFloat(r.credits_left||0).toFixed(1);
       var credColor = parseFloat(r.credits_left||0) <= 0 ? 'color:#ef4444;font-weight:800' :
                       parseFloat(r.credits_left||0) <= 3 ? 'color:#f59e0b;font-weight:800' : 'color:#22c55e;font-weight:800';
@@ -1503,6 +1768,55 @@ function resetLeaveFilters() {
   document.getElementById('lvDateTo').value   = '';
   togglePeriodControls();
   loadLeaveReport();
+}
+
+// ────────────────────────────────────────────────────────────
+//  CSV EXPORTS
+// ────────────────────────────────────────────────────────────
+function exportLeaveCSV() {
+  var period = document.getElementById('lvPeriod').value;
+  var year   = document.getElementById('lvYear').value;
+  var month  = document.getElementById('lvMonth').value;
+  var dept   = document.getElementById('lvDept').value;
+  var status = document.getElementById('lvStatus').value;
+  var type   = document.getElementById('lvType').value;
+  var search = document.getElementById('lvSearch').value.trim();
+  var dfrom  = document.getElementById('lvDateFrom').value;
+  var dto    = document.getElementById('lvDateTo').value;
+  var url = API + '?action=export_csv&period=' + period;
+  if (year)   url += '&year='       + year;
+  if (month)  url += '&month='      + month;
+  if (dept)   url += '&dept='       + encodeURIComponent(dept);
+  if (status) url += '&status='     + encodeURIComponent(status);
+  if (type)   url += '&leave_type=' + encodeURIComponent(type);
+  if (search) url += '&search='     + encodeURIComponent(search);
+  if (dfrom)  url += '&date_from='  + encodeURIComponent(dfrom);
+  if (dto)    url += '&date_to='    + encodeURIComponent(dto);
+  window.location.href = url;
+}
+
+function exportEmployeeCSV() {
+  var dept   = document.getElementById('empDept').value;
+  var type   = document.getElementById('empType').value;
+  var status = document.getElementById('empStatus').value;
+  var search = document.getElementById('empSearch').value.trim();
+  var url = API + '?action=export_csv_employees';
+  if (dept)   url += '&dept='   + encodeURIComponent(dept);
+  if (type)   url += '&type='   + encodeURIComponent(type);
+  if (status) url += '&status=' + encodeURIComponent(status);
+  if (search) url += '&search=' + encodeURIComponent(search);
+  window.location.href = url;
+}
+
+function showToast(msg, type) {
+  var t = document.createElement('div');
+  t.className = 'toast ' + (type || 'success');
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(function() {
+    t.style.opacity = '0'; t.style.transition = 'opacity 0.4s';
+    setTimeout(function() { t.remove(); }, 400);
+  }, 3200);
 }
 
 // ────────────────────────────────────────────────────────────

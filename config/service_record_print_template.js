@@ -147,8 +147,8 @@
         </td>
         <td class="sig-right">
           <div class="sig-prep">Conforme:</div>
-          <div class="sig-name">MIGUEL B. DECENA, JR.</div>
-          <div class="sig-pos">Municipal Mayor</div>
+          <div class="sig-name">${(window.SR_MAYOR_NAME||'MIGUEL B. DECENA, JR.')}</div>
+          <div class="sig-pos">${(window.SR_MAYOR_TITLE||'Municipal Mayor')}</div>
         </td>
       </tr>
     </table>

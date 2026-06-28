@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 // ============================================================
 //  LGU ENRILE HRMS — Departments Page
 //  File: Admin/departments.php
@@ -6,7 +6,10 @@
 session_start();
 // ── Session timeout — 8 hours ─────────────────────────────────
 $_sessionLifetime = 8 * 60 * 60;
-if (isset($_SESSION['login_time']) && (time() - strtotime($_SESSION['login_time']) > $_sessionLifetime)) {
+$_loginTime = isset($_SESSION['login_time'])
+    ? (is_numeric($_SESSION['login_time']) ? (int)$_SESSION['login_time'] : (int)strtotime($_SESSION['login_time']))
+    : 0;
+if ($_loginTime && (time() - $_loginTime > $_sessionLifetime)) {
     $_isAjax = !empty($_GET['action']) || !empty($_POST['action']);
     session_unset(); session_destroy();
     if ($_isAjax) {
@@ -74,19 +77,29 @@ if ($action) {
                   WHERE d.is_active = 1
                 ")->fetch();
 
-                // Recent employees per department (for avatar stack)
-                foreach ($rows as &$row) {
-                    $empStmt = $pdo->prepare("
-                        SELECT CONCAT(first_name,' ',last_name) AS full_name
+                // Recent employees per department — single batched query (no N+1)
+                if (!empty($rows)) {
+                    $deptIds   = array_column($rows, 'department_id');
+                    $marks     = implode(',', array_fill(0, count($deptIds), '?'));
+                    $empBatch  = $pdo->prepare("
+                        SELECT department_id, CONCAT(first_name,' ',last_name) AS full_name
                         FROM   employees
-                        WHERE  department_id = ?
+                        WHERE  department_id IN ($marks)
                         ORDER  BY employee_id DESC
-                        LIMIT  5
                     ");
-                    $empStmt->execute([$row['department_id']]);
-                    $row['employees'] = $empStmt->fetchAll(PDO::FETCH_COLUMN);
+                    $empBatch->execute($deptIds);
+                    $empByDept = [];
+                    foreach ($empBatch->fetchAll() as $emp) {
+                        $did = $emp['department_id'];
+                        if (count($empByDept[$did] ?? []) < 5) {
+                            $empByDept[$did][] = $emp['full_name'];
+                        }
+                    }
+                    foreach ($rows as &$row) {
+                        $row['employees'] = $empByDept[$row['department_id']] ?? [];
+                    }
+                    unset($row);
                 }
-                unset($row);
 
                 echo json_encode(['success' => true, 'data' => $rows, 'stats' => $stats]);
                 break;
@@ -106,14 +119,22 @@ if ($action) {
                     else { $headEmployeeId = null; } // employee not found/active — fall back to text
                 }
 
+                // Whitelist allowed icon and color values
+                $allowedIcons  = ['🏢','💰','🏗️','🏥','🌾','👨‍👩‍👧','📐','📚','⚖️','🚒','🛡️','🌍','🖥️','📊','🔧','🏛️'];
+                $allowedColors = ['#2563eb','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4','#ec4899','#f97316','#14b8a6','#6366f1'];
+                $submittedIcon  = trim($_POST['icon']  ?? '🏢');
+                $submittedColor = trim($_POST['color'] ?? '#2563eb');
+                $safeIcon  = in_array($submittedIcon,  $allowedIcons,  true) ? $submittedIcon  : '🏢';
+                $safeColor = in_array($submittedColor, $allowedColors, true) ? $submittedColor : '#2563eb';
+
                 $fields = [
                     'name'             => trim($_POST['name'] ?? ''),
                     'head_name'        => $headName,
                     'head_employee_id' => $headEmployeeId,
                     'description'      => trim($_POST['description'] ?? ''),
-                    'icon'             => trim($_POST['icon']         ?? '🏢'),
-                    'color'            => trim($_POST['color']        ?? '#2563eb'),
-                    'employee_count'   => (int)($_POST['employee_count'] ?? 0),
+                    'icon'             => $safeIcon,
+                    'color'            => $safeColor,
+                    'employee_count'   => max(0, (int)($_POST['employee_count'] ?? 0)),
                     'is_active'        => 1,
                 ];
 
@@ -121,8 +142,12 @@ if ($action) {
                     echo json_encode(['success' => false, 'message' => 'Department Name is required.']);
                     break;
                 }
-                if (empty($fields['head_name']) && empty($fields['head_employee_id'])) {
-                    echo json_encode(['success' => false, 'message' => 'Department Head is required.']);
+                if (strlen($fields['name']) > 150) {
+                    echo json_encode(['success' => false, 'message' => 'Department name is too long (max 150 characters).']);
+                    break;
+                }
+                if (!empty($headName) && strlen($headName) > 255) {
+                    echo json_encode(['success' => false, 'message' => 'Department Head name is too long.']);
                     break;
                 }
 
@@ -164,6 +189,18 @@ if ($action) {
             case 'pending_count':
                 $count = $pdo->query("SELECT COUNT(*) FROM leave_requests WHERE status = 'Pending'")->fetchColumn();
                 echo json_encode(['count' => (int)$count]);
+                break;
+
+            // ── LIST HEADS (for department head dropdown) ──
+            case 'list_heads':
+                $stmt = $pdo->prepare("
+                    SELECT employee_id, CONCAT(first_name,' ',last_name) AS full_name
+                    FROM   employees
+                    WHERE  employment_status = 'Active'
+                    ORDER  BY first_name ASC, last_name ASC
+                ");
+                $stmt->execute();
+                echo json_encode(['success' => true, 'data' => $stmt->fetchAll()]);
                 break;
 
             default:
@@ -470,7 +507,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           <div class="notif-panel" id="adminNotifPanel">
             <div class="notif-hd">
               <div><div class="notif-hd-title">🔔 Notifications</div>
-              <div class="notif-hd-count"><?= $notifCount ?> item<?= $notifCount!==1?'s':'' ?></div></div>
+              <div class="notif-hd-count" id="adminNotifHdCount"><?= $notifCount ?> item<?= $notifCount!==1?'s':'' ?></div></div>
               <button class="notif-mark-all" onclick="clearNotifications()">Mark all read</button>
             </div>
             <div class="notif-list" id="adminNotifList">
@@ -549,7 +586,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         </div>
 
         <div class="form-group">
-          <label>Department Head <span class="req">*</span></label>
+          <label>Department Head</label>
           <select id="fHead" style="width:100%;padding:10px 12px;border:2px solid #e2e8f0;border-radius:8px;font-size:0.95rem;">
             <option value="">— Select Employee —</option>
           </select>
@@ -808,10 +845,14 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
   //  EDIT — fetch from DB first
   // ════════════════════════════════════════════════════════
   async function editDept(id) {
-    // Find in already-loaded data via a fresh fetch
-    const res  = await fetch(`departments.php?action=list&search=`);
-    const json = await res.json();
-    const d    = json.data.find(x => x.department_id == id);
+    // Use already-loaded data; only fall back to server if stale
+    let d = allDepts.find(x => x.department_id == id);
+    if (!d) {
+      const res  = await fetch(`departments.php?action=list&search=`);
+      const json = await res.json();
+      if (json.data) allDepts = json.data;
+      d = (json.data || []).find(x => x.department_id == id);
+    }
     if (!d) { showToast('⚠️ Department not found.', 'info'); return; }
 
     editTarget = id;
@@ -839,8 +880,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     const headId = document.getElementById('fHeadId').value;
 
     document.getElementById('fName').classList.toggle('err', !name);
-    document.getElementById('fHead').classList.toggle('err', !headId);
-    if (!name || !headId) { showToast('⚠️ Please fill in required fields.', 'info'); return; }
+    if (!name) { showToast('⚠️ Please fill in required fields.', 'info'); return; }
 
     const btn = document.getElementById('saveBtn');
     btn.disabled = true; btn.textContent = '⏳ Saving…';
@@ -1033,11 +1073,10 @@ document.addEventListener('click', function(e) {
 document.addEventListener('DOMContentLoaded', applyReadState);
 
 // ── Poll admin notifications every 60 seconds ──────────────────────────────
+function nEsc(s) { const d = document.createElement('div'); d.textContent = String(s ?? ''); return d.innerHTML; }
+
 async function pollAdminNotifications() {
   try {
-    const r = await fetch('leave_requests.php?action=pending_count').then(r=>r.json());
-    if (typeof r.count === 'undefined') return;
-    // Re-fetch full notifications and update panel
     const r2 = await fetch('notif_poll.php').then(r=>r.json()).catch(()=>null);
     if (!r2 || !r2.success) {
       // Fallback: just update the count badge
@@ -1059,11 +1098,16 @@ async function pollAdminNotifications() {
       } else {
         list.innerHTML = notifs.map(n => {
           const isRead = read.includes(n.nid);
-          return `<a class="notif-item ${isRead?'':'unread'}" href="${n.link}" data-nid="${n.nid}" onclick="markNotifRead(this.getAttribute('data-nid'));applyReadState();">
-            <div class="notif-ico" style="background:${n.color}22;">${n.icon}</div>
+          const safeTitle = nEsc(n.title);
+          const safeBody  = nEsc(n.body);
+          const safeIcon  = nEsc(n.icon);
+          const safeColor = /^#[0-9a-fA-F]{3,6}$/.test(n.color) ? n.color : '#94a3b8';
+          const safeLink  = (n.link || '').replace(/["'<>]/g, '');
+          return `<a class="notif-item ${isRead?'':'unread'}" href="${safeLink}" data-nid="${nEsc(n.nid)}" onclick="markNotifRead(this.getAttribute('data-nid'));applyReadState();">
+            <div class="notif-ico" style="background:${safeColor}22;">${safeIcon}</div>
             <div class="notif-body">
-              <div class="notif-title">${n.title}</div>
-              <div class="notif-text">${n.body}</div>
+              <div class="notif-title">${safeTitle}</div>
+              <div class="notif-text">${safeBody}</div>
               ${n.time ? '<div class="notif-time">'+adminFmtTime(n.time)+'</div>' : ''}
             </div>
           </a>`;
@@ -1669,7 +1713,7 @@ function toggleSidebar() {
     cwSending=true;
     var btn=document.getElementById('cwSendBtn');btn.disabled=true;
     var sentMsg=msg;inp.value='';cwResize(inp);
-    var fd=new FormData();fd.append('action','send');fd.append('to',cwAct.user_id);fd.append('message',sentMsg);
+    var fd=new FormData();fd.append('action','send');fd.append('to',cwAct.user_id);fd.append('message',sentMsg);fd.append('csrf_token',CSRF_TOKEN);
     fd.append('csrf_token', CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
@@ -1701,7 +1745,7 @@ function toggleSidebar() {
   function cwSubmitEdit(msgId,newMsg){
     cwSending=true;
     var btn=document.getElementById('cwSendBtn');btn.disabled=true;
-    var fd=new FormData();fd.append('action','edit');fd.append('message_id',msgId);fd.append('message',newMsg);
+    var fd=new FormData();fd.append('action','edit');fd.append('message_id',msgId);fd.append('message',newMsg);fd.append('csrf_token',CSRF_TOKEN);
     fd.append('csrf_token', CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
@@ -1730,7 +1774,7 @@ function toggleSidebar() {
   // ── Unsend ───────────────────────────────────────────────────
   function cwUnsend(msgId){
     if(!confirm('Unsend this message? It will be removed for everyone.'))return;
-    var fd=new FormData();fd.append('action','unsend');fd.append('message_id',msgId);
+    var fd=new FormData();fd.append('action','unsend');fd.append('message_id',msgId);fd.append('csrf_token',CSRF_TOKEN);
     fd.append('csrf_token', CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})

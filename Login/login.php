@@ -456,7 +456,7 @@ if (!empty($_COOKIE['remember_token'])) {
           <img src="../images/Enrile.png" alt="Enrile Logo" class="logo" />
         </div>
         <div class="tagline-block">
-          <h2 class="tagline-main">#AnteraKang<br><span>Enrile</span></h2>
+          <h2 class="tagline-main">#AnteraKang<span>Enrile</span></h2>
           <p class="tagline-sub">Tara na sa Enrile 🌿</p>
           <div class="tagline-dots">
             <span></span>

@@ -60,7 +60,7 @@ try {
         }
     }
 
-    if ($user) {──
+    if ($user) {
         $rawToken  = bin2hex(random_bytes(32));          // 64-char hex — sent in email
         $hashToken = hash('sha256', $rawToken);          // stored in DB (never the raw value)
         $expiresAt = date('Y-m-d H:i:s', time() + 3600); // 1 hour from now

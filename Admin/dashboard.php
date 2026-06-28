@@ -1,8 +1,11 @@
-<?php
+﻿<?php
 session_start();
 // ── Session timeout — 8 hours ─────────────────────────────────
 $_sessionLifetime = 8 * 60 * 60;
-if (isset($_SESSION['login_time']) && (time() - strtotime($_SESSION['login_time']) > $_sessionLifetime)) {
+$_loginTime = isset($_SESSION['login_time'])
+    ? (is_numeric($_SESSION['login_time']) ? (int)$_SESSION['login_time'] : (int)strtotime($_SESSION['login_time']))
+    : 0;
+if ($_loginTime && (time() - $_loginTime > $_sessionLifetime)) {
     $_isAjax = !empty($_GET['action']) || !empty($_POST['action']);
     session_unset(); session_destroy();
     if ($_isAjax) {
@@ -29,14 +32,17 @@ $initials   = strtoupper(implode('', array_map(fn($w)=>$w[0]??'', array_slice(ex
 // U-2: Pass login timestamp to JS for client-side session warning
 $_loginTimeTs = isset($_SESSION['login_time']) ? strtotime($_SESSION['login_time']) : time();
 
-// ── DB connection ──────────────────────────────────────────────────────────
+// ── DB connection + CSRF ─────────────────────────────────────────────────
 $possibleDb = [__DIR__.'/../config/db.php', __DIR__.'/config/db.php'];
 foreach ($possibleDb as $p) { if (file_exists($p)) { require_once $p; break; } }
+$possibleCsrf = [__DIR__.'/../config/csrf.php', __DIR__.'/config/csrf.php'];
+foreach ($possibleCsrf as $p) { if (file_exists($p)) { require_once $p; break; } }
 
 // ── Dashboard data ─────────────────────────────────────────────────────────
 $totalEmp      = 0; $pendingLeave = 0; $approvedLeave = 0; $onLeave = 0;
-$leaveRows     = []; $activityRows = []; $leaveByType = []; $expiringContracts = 0;
-$srRequestRows = []; $pendingSRCount = 0;
+$leaveRows     = []; $leaveByType = []; $expiringContracts = 0;
+$srRequestRows = []; $pendingSRCount = 0; $announcementRows = [];
+$onLeaveRows = []; $upcomingLeaveRows = [];
 $chartApproved = array_fill(1,12,0);
 $chartDenied   = array_fill(1,12,0);
 $chartPending  = array_fill(1,12,0);
@@ -45,7 +51,7 @@ if (isset($pdo)) {
     try {
         // Total active employees
         $totalEmp = (int)$pdo->query(
-            "SELECT COUNT(*) FROM employees WHERE employment_status='Active' OR employment_status IS NULL"
+            "SELECT COUNT(*) FROM employees WHERE employment_status='Active'"
         )->fetchColumn();
 
         // Pending leave requests count
@@ -83,27 +89,6 @@ if (isset($pdo)) {
             LIMIT 10
         ")->fetchAll(PDO::FETCH_ASSOC);
 
-        // Leave decisions — query leave_requests directly (no activity_logs dependency)
-        $activityRows = $pdo->query("
-            SELECT
-                lr.request_id, lr.status, lr.date_from, lr.date_to,
-                lr.days_requested, lr.reviewed_at,
-                lt.name AS leave_type,
-                CONCAT(emp.first_name,' ',emp.last_name) AS employee_name,
-                COALESCE(d.name,'')  AS department,
-                COALESCE(CONCAT(adm.first_name,' ',adm.last_name), admUa.email, 'Admin') AS actor_name
-            FROM leave_requests lr
-            JOIN employees      emp   ON emp.employee_id   = lr.employee_id
-            JOIN leave_types    lt    ON lt.leave_type_id  = lr.leave_type_id
-            LEFT JOIN departments d   ON d.department_id   = emp.department_id
-            LEFT JOIN user_accounts admUa ON admUa.user_id = lr.reviewed_by
-            LEFT JOIN employees     adm   ON adm.user_id   = lr.reviewed_by
-            WHERE lr.status IN ('Approved','Denied')
-              AND lr.reviewed_at IS NOT NULL
-            ORDER BY lr.reviewed_at DESC
-            LIMIT 50
-        ")->fetchAll(PDO::FETCH_ASSOC);
-
         // Monthly chart data
         $chartRaw = $pdo->query("
             SELECT MONTH(date_from) AS mo, status, COUNT(*) AS cnt
@@ -139,7 +124,9 @@ if (isset($pdo)) {
                 WHERE status='Active' AND end_date IS NOT NULL
                 AND DATEDIFF(end_date, CURDATE()) BETWEEN 0 AND 30
             ")->fetchColumn();
-        } catch (Exception $ex) {}
+        } catch (Exception $ex) {
+            error_log('[Dashboard] Contract query error: ' . $ex->getMessage());
+        }
 
         // Pending service record requests
         $pendingSRCount = (int)$pdo->query(
@@ -157,6 +144,51 @@ if (isset($pdo)) {
             WHERE sr.status = 'Pending'
             ORDER BY sr.requested_at DESC
             LIMIT 10
+        ")->fetchAll(PDO::FETCH_ASSOC);
+
+        // Latest published announcements for dashboard panel
+        $announcementRows = $pdo->query("
+            SELECT announcement_id, title, body, category, priority, created_at
+            FROM announcements
+            WHERE status = 'Published'
+              AND (publish_date IS NULL OR publish_date <= CURDATE())
+              AND (expiry_date  IS NULL OR expiry_date  >= CURDATE())
+            ORDER BY pinned DESC, created_at DESC
+            LIMIT 5
+        ")->fetchAll(PDO::FETCH_ASSOC);
+
+        // Employees currently on leave today
+        $onLeaveRows = $pdo->query("
+            SELECT e.first_name, e.last_name, e.position_title,
+                   COALESCE(d.name,'') AS department,
+                   lt.name AS leave_type,
+                   lr.date_from, lr.date_to, lr.days_requested
+            FROM leave_requests lr
+            JOIN employees   e  ON e.employee_id   = lr.employee_id
+            JOIN leave_types lt ON lt.leave_type_id = lr.leave_type_id
+            LEFT JOIN departments d ON d.department_id = e.department_id
+            WHERE lr.status = 'Approved'
+              AND lr.date_from <= CURDATE()
+              AND lr.date_to   >= CURDATE()
+            ORDER BY lr.date_to ASC
+            LIMIT 15
+        ")->fetchAll(PDO::FETCH_ASSOC);
+
+        // Employees with upcoming approved leave (next 30 days)
+        $upcomingLeaveRows = $pdo->query("
+            SELECT e.first_name, e.last_name, e.position_title,
+                   COALESCE(d.name,'') AS department,
+                   lt.name AS leave_type,
+                   lr.date_from, lr.date_to, lr.days_requested
+            FROM leave_requests lr
+            JOIN employees   e  ON e.employee_id   = lr.employee_id
+            JOIN leave_types lt ON lt.leave_type_id = lr.leave_type_id
+            LEFT JOIN departments d ON d.department_id = e.department_id
+            WHERE lr.status = 'Approved'
+              AND lr.date_from > CURDATE()
+              AND lr.date_from <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+            ORDER BY lr.date_from ASC
+            LIMIT 15
         ")->fetchAll(PDO::FETCH_ASSOC);
 
     } catch (Exception $e) {
@@ -218,6 +250,24 @@ function timeAgo($dt) {
 ?>
 
 <?php
+// Compute month-over-month employee count for trend badge
+$empTrendCount = 0;
+$empTrendDir   = 'up';
+if (isset($pdo)) {
+    try {
+        $newThisMonth = (int)$pdo->query("
+            SELECT COUNT(*) FROM employees
+            WHERE employment_status='Active'
+              AND MONTH(date_hired)=MONTH(NOW()) AND YEAR(date_hired)=YEAR(NOW())
+        ")->fetchColumn();
+        $empTrendCount = $newThisMonth;
+        $empTrendDir   = $newThisMonth > 0 ? 'up' : 'warn';
+    } catch (Exception $ex) {
+        error_log('[Dashboard] Trend query: ' . $ex->getMessage());
+    }
+}
+?>
+<?php
 // ── Notifications (topbar bell) ──────────────────────────────────────────
 $notifCount = 0; $notifications = [];
 if (isset($pdo)) { try {
@@ -245,6 +295,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <?= csrf_meta() ?>
   <title>Admin Dashboard | LGU Enrile HRMS</title>
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -673,6 +724,31 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     ══════════════════════════════════ */
     .activity-list { padding: 16px 24px; max-height: 420px; overflow-y: auto; }
 
+    /* ══════════════════════════════════
+       LEAVE STATUS PANELS
+    ══════════════════════════════════ */
+    .leave-status-list { padding: 0 24px 12px; max-height: 320px; overflow-y: auto; }
+    .lsp-item {
+      display: flex; align-items: center; gap: 13px;
+      padding: 12px 0; border-bottom: 1.5px solid var(--gray-100);
+    }
+    .lsp-item:last-child { border-bottom: none; }
+    .lsp-av {
+      width: 40px; height: 40px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.78rem; font-weight: 800; color: #fff; flex-shrink: 0;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+    }
+    .lsp-body { flex: 1; min-width: 0; }
+    .lsp-name { font-size: 0.83rem; font-weight: 800; color: var(--gray-800); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .lsp-sub  { font-size: 0.70rem; color: var(--gray-600); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .lsp-right { text-align: right; flex-shrink: 0; }
+    .lsp-type  { display: inline-block; font-size: 0.69rem; font-weight: 700; padding: 3px 9px; border-radius: 20px; white-space: nowrap; }
+    .lsp-date  { font-size: 0.67rem; color: var(--gray-500); margin-top: 4px; }
+    .lsp-empty { text-align: center; padding: 28px 16px; color: var(--gray-400); font-size: 0.82rem; line-height: 1.7; }
+    .lsp-badge-on   { background: #dcfce7; color: #166534; }
+    .lsp-badge-soon { background: #fef3c7; color: #92400e; }
+
     .activity-item {
       display: flex; gap: 14px;
       padding: 16px 0; border-bottom: 1.5px solid var(--gray-100);
@@ -958,7 +1034,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         <div class="card blue">
           <div class="card-header">
             <div class="card-icon">👥</div>
-            <span class="card-trend up">↑ +3 this month</span>
+            <span class="card-trend <?= $empTrendDir ?>"><?= $empTrendCount > 0 ? '↑ +' . $empTrendCount . ' this month' : 'No new hires' ?></span>
           </div>
           <div class="card-value"><?= $totalEmp ?></div>
           <div class="card-label">Total Employees</div>
@@ -987,6 +1063,95 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           <div class="card-value"><?= $onLeave ?></div>
           <div class="card-label">Employees on Leave</div>
         </div>
+      </div>
+
+      <!-- ROW 1.5 — CURRENTLY ON LEAVE + UPCOMING LEAVE -->
+      <div class="row-2" style="margin-bottom:22px;">
+
+        <!-- Currently on Leave -->
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">🏖️ Currently on Leave</div>
+              <div class="panel-sub"><?= count($onLeaveRows) ?> employee<?= count($onLeaveRows) !== 1 ? 's' : '' ?> on leave today</div>
+            </div>
+            <a class="panel-action" href="leave_requests.php">View all →</a>
+          </div>
+          <div class="leave-status-list">
+            <?php if (empty($onLeaveRows)): ?>
+              <div class="lsp-empty">
+                <div style="font-size:2rem;margin-bottom:6px;">☀️</div>
+                <div>No employees on leave today.</div>
+              </div>
+            <?php else: ?>
+              <?php foreach ($onLeaveRows as $_lr):
+                $_lrName  = htmlspecialchars($_lr['first_name'].' '.$_lr['last_name']);
+                $_lrIni   = dashIni($_lr['first_name'].' '.$_lr['last_name']);
+                $_lrColor = dashColor($_lr['first_name'].' '.$_lr['last_name'], $avColors);
+                $_lrSub   = trim(htmlspecialchars($_lr['position_title'] ?: '').($_lr['department'] ? ' · '.htmlspecialchars($_lr['department']) : ''));
+                $_lrType  = htmlspecialchars($_lr['leave_type']);
+                $_lrReturn = date('M j', strtotime($_lr['date_to']));
+                $_lrDays  = (int)$_lr['days_requested'];
+              ?>
+              <div class="lsp-item">
+                <div class="lsp-av" style="background:<?= $_lrColor ?>"><?= $_lrIni ?></div>
+                <div class="lsp-body">
+                  <div class="lsp-name"><?= $_lrName ?></div>
+                  <?php if ($_lrSub): ?><div class="lsp-sub"><?= $_lrSub ?></div><?php endif; ?>
+                </div>
+                <div class="lsp-right">
+                  <span class="lsp-type lsp-badge-on"><?= $_lrType ?></span>
+                  <div class="lsp-date">Returns <?= $_lrReturn ?> · <?= $_lrDays ?> day<?= $_lrDays !== 1 ? 's' : '' ?></div>
+                </div>
+              </div>
+              <?php endforeach; ?>
+            <?php endif; ?>
+          </div>
+        </div>
+
+        <!-- Upcoming Leave (next 30 days) -->
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">📅 Upcoming Leave</div>
+              <div class="panel-sub"><?= count($upcomingLeaveRows) ?> approved leave<?= count($upcomingLeaveRows) !== 1 ? 's' : '' ?> in the next 30 days</div>
+            </div>
+            <a class="panel-action" href="leave_requests.php">View all →</a>
+          </div>
+          <div class="leave-status-list">
+            <?php if (empty($upcomingLeaveRows)): ?>
+              <div class="lsp-empty">
+                <div style="font-size:2rem;margin-bottom:6px;">✅</div>
+                <div>No upcoming leave in the next 30 days.</div>
+              </div>
+            <?php else: ?>
+              <?php foreach ($upcomingLeaveRows as $_ul):
+                $_ulName  = htmlspecialchars($_ul['first_name'].' '.$_ul['last_name']);
+                $_ulIni   = dashIni($_ul['first_name'].' '.$_ul['last_name']);
+                $_ulColor = dashColor($_ul['first_name'].' '.$_ul['last_name'], $avColors);
+                $_ulSub   = trim(htmlspecialchars($_ul['position_title'] ?: '').($_ul['department'] ? ' · '.htmlspecialchars($_ul['department']) : ''));
+                $_ulType  = htmlspecialchars($_ul['leave_type']);
+                $_ulFrom  = date('M j', strtotime($_ul['date_from']));
+                $_ulTo    = date('M j', strtotime($_ul['date_to']));
+                $_ulDays  = (int)$_ul['days_requested'];
+                $_ulIn    = max(1, (int)ceil((strtotime($_ul['date_from']) - time()) / 86400));
+              ?>
+              <div class="lsp-item">
+                <div class="lsp-av" style="background:<?= $_ulColor ?>"><?= $_ulIni ?></div>
+                <div class="lsp-body">
+                  <div class="lsp-name"><?= $_ulName ?></div>
+                  <?php if ($_ulSub): ?><div class="lsp-sub"><?= $_ulSub ?></div><?php endif; ?>
+                </div>
+                <div class="lsp-right">
+                  <span class="lsp-type lsp-badge-soon"><?= $_ulType ?></span>
+                  <div class="lsp-date"><?= $_ulFrom ?> – <?= $_ulTo ?> · in <?= $_ulIn ?>d</div>
+                </div>
+              </div>
+              <?php endforeach; ?>
+            <?php endif; ?>
+          </div>
+        </div>
+
       </div>
 
       <!-- ROW 2 — CHART + QUICK ACTIONS -->
@@ -1095,50 +1260,34 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
             <a class="panel-action" href="announcements.php">See all →</a>
           </div>
           <div class="announce-list" id="announceList">
+<?php
+$_annPriorityDot = ['Urgent' => 'red', 'High' => 'orange', 'Normal' => 'blue'];
+$_annPriorityTag = ['Urgent' => 'urgent', 'High' => 'warning', 'Normal' => 'info'];
+$_annPriorityLbl = ['Urgent' => 'URGENT', 'High' => 'REMINDER', 'Normal' => 'INFO'];
+$_annCatLbl      = ['HR Notice' => 'HR NOTICE', 'Policy' => 'POLICY', 'Event' => 'EVENT', 'Holiday' => 'HOLIDAY'];
+if (!empty($announcementRows)):
+    foreach ($announcementRows as $_ann):
+        $_dot = $_annPriorityDot[$_ann['priority']] ?? 'blue';
+        $_tag = $_annPriorityTag[$_ann['priority']] ?? 'info';
+        $_lbl = $_annPriorityLbl[$_ann['priority']] ?? ($_annCatLbl[$_ann['category']] ?? strtoupper($ann['category'] ?? 'INFO'));
+?>
             <div class="announce-item">
-              <div class="announce-dot blue"></div>
+              <div class="announce-dot <?= htmlspecialchars($_dot) ?>"></div>
               <div class="announce-body">
                 <div class="announce-title">
-                  <span class="announce-tag info">INFO</span>
-                  Leave Filing Deadline
+                  <span class="announce-tag <?= htmlspecialchars($_tag) ?>"><?= htmlspecialchars($_lbl) ?></span>
+                  <?= htmlspecialchars($_ann['title']) ?>
                 </div>
-                <div class="announce-text">All leave requests for April must be submitted by March 28, 2025. Late submissions will not be accommodated.</div>
-                <div class="announce-meta">Posted by Admin · March 5, 2025</div>
+                <div class="announce-text"><?= htmlspecialchars($_ann['body']) ?></div>
+                <div class="announce-meta">Posted · <?= htmlspecialchars(date('M j, Y', strtotime($_ann['created_at']))) ?></div>
               </div>
             </div>
-            <div class="announce-item">
-              <div class="announce-dot red"></div>
-              <div class="announce-body">
-                <div class="announce-title">
-                  <span class="announce-tag urgent">URGENT</span>
-                  Updated Leave Policy
-                </div>
-                <div class="announce-text">Effective April 1, the CSC-revised sick leave rules apply. HR staff must review the updated guidelines.</div>
-                <div class="announce-meta">Posted by Admin · March 3, 2025</div>
-              </div>
-            </div>
-            <div class="announce-item">
-              <div class="announce-dot green"></div>
-              <div class="announce-body">
-                <div class="announce-title">
-                  <span class="announce-tag success">NOTICE</span>
-                  System Maintenance
-                </div>
-                <div class="announce-text">The HR system will be under maintenance on March 10, 2025 from 6PM–9PM. Please plan accordingly.</div>
-                <div class="announce-meta">Posted by Admin · March 1, 2025</div>
-              </div>
-            </div>
-            <div class="announce-item">
-              <div class="announce-dot orange"></div>
-              <div class="announce-body">
-                <div class="announce-title">
-                  <span class="announce-tag warning">REMINDER</span>
-                  Performance Evaluation
-                </div>
-                <div class="announce-text">Q1 performance evaluations are due by March 31. Department heads must submit all ratings on time.</div>
-                <div class="announce-meta">Posted by Admin · Feb 28, 2025</div>
-              </div>
-            </div>
+<?php
+    endforeach;
+else:
+?>
+            <div style="text-align:center;color:var(--gray-400);font-size:0.82rem;padding:24px 16px;">No announcements posted yet.</div>
+<?php endif; ?>
           </div>
           <div class="announce-form">
             <textarea id="announceInput" placeholder="Write a new announcement…"></textarea>
@@ -1156,112 +1305,23 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
 
       </div>
 
-      <!-- ROW 4 — LEAVE DECISION LOG -->
-      <style>
-        .lact-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;padding:18px 20px;}
-        .lact-card{background:var(--white);border:1.5px solid var(--gray-200);border-radius:var(--radius);padding:16px 18px;display:flex;flex-direction:column;gap:10px;transition:box-shadow .2s;position:relative;overflow:hidden;}
-        .lact-card:hover{box-shadow:var(--shadow-md);}
-        .lact-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:4px;border-radius:var(--radius) 0 0 var(--radius);}
-        .lact-card.approved::before{background:linear-gradient(180deg,#22c55e,#86efac);}
-        .lact-card.denied::before{background:linear-gradient(180deg,#ef4444,#fca5a5);}
-        .lact-top{display:flex;align-items:center;gap:10px;}
-        .lact-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:.70rem;font-weight:800;letter-spacing:.03em;}
-        .lact-badge.approved{background:#dcfce7;color:#166534;}
-        .lact-badge.denied{background:#fee2e2;color:#991b1b;}
-        .lact-emp-av{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:800;color:#fff;flex-shrink:0;box-shadow:0 2px 6px rgba(0,0,0,.13);}
-        .lact-emp-info{flex:1;min-width:0;}
-        .lact-emp-name{font-size:.85rem;font-weight:800;color:var(--gray-800);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-        .lact-emp-dept{font-size:.68rem;color:var(--gray-400);margin-top:1px;}
-        .lact-divider{height:1px;background:var(--gray-100);}
-        .lact-details{display:flex;gap:8px;flex-wrap:wrap;}
-        .lact-chip{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:7px;background:var(--gray-50);border:1px solid var(--gray-200);font-size:.70rem;font-weight:700;color:var(--gray-600);}
-        .lact-footer{display:flex;align-items:center;justify-content:space-between;margin-top:2px;}
-        .lact-admin{font-size:.68rem;color:var(--gray-400);}
-        .lact-time{font-size:.66rem;color:var(--gray-400);font-weight:700;}
-        .lact-empty{grid-column:1/-1;text-align:center;padding:40px 20px;color:var(--gray-400);}
-        .lact-empty-ic{font-size:2.4rem;opacity:.25;margin-bottom:10px;}
-        .lact-empty p{font-size:.80rem;font-weight:600;}
-      </style>
-      <div style="margin-bottom:22px;">
-        <div class="panel">
-          <div class="panel-header">
-            <div>
-              <div class="panel-title">✅ Leave Request Decisions</div>
-              <div class="panel-sub">Approved &amp; denied leave requests by admin</div>
-            </div>
-            <div style="display:flex;align-items:center;gap:10px;">
-              <span id="actRefreshDot" title="Live updates" style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block;box-shadow:0 0 0 3px rgba(34,197,94,.18);"></span>
-              <a class="panel-action" href="leave_requests.php">View all requests →</a>
-            </div>
-          </div>
-          <div class="lact-grid" id="activityLog">
-            <?php if (empty($activityRows)): ?>
-            <div class="lact-empty">
-              <div class="lact-empty-ic">📋</div>
-              <p>No leave decisions yet.<br>Approved or denied requests will appear here.</p>
-            </div>
-            <?php else: foreach ($activityRows as $ar):
-              $isApproved = ($ar['status'] === 'Approved');
-              $statusCls  = $isApproved ? 'approved' : 'denied';
-              $statusLbl  = $isApproved ? '✓ Approved' : '✗ Denied';
-              $empName    = htmlspecialchars($ar['employee_name'] ?? 'Employee');
-              $empIni     = dashIni($empName);
-              $empCol     = dashColor($empName, $avColors);
-              $dept       = htmlspecialchars($ar['department'] ?? '');
-              $ltype      = htmlspecialchars($ar['leave_type'] ?? 'Leave');
-              $days       = $ar['days_requested'] ? $ar['days_requested'].' '.((int)$ar['days_requested']===1?'day':'days') : '';
-              $dfrom      = !empty($ar['date_from']) ? date('M j', strtotime($ar['date_from'])) : '';
-              $dto        = !empty($ar['date_to'])   ? date('M j', strtotime($ar['date_to']))   : '';
-              $dateRange  = ($dfrom && $dto && $dfrom!==$dto) ? "$dfrom – $dto" : ($dfrom ?: '');
-              $actor      = htmlspecialchars($ar['actor_name'] ?? 'Admin');
-              $atime      = timeAgo($ar['reviewed_at'] ?? '');
-            ?>
-            <div class="lact-card <?= $statusCls ?>">
-              <div class="lact-top">
-                <div class="lact-emp-av" style="background:<?= $empCol ?>;"><?= $empIni ?></div>
-                <div class="lact-emp-info">
-                  <div class="lact-emp-name"><?= $empName ?></div>
-                  <?php if ($dept): ?><div class="lact-emp-dept"><?= $dept ?></div><?php endif; ?>
-                </div>
-                <span class="lact-badge <?= $statusCls ?>"><?= $statusLbl ?></span>
-              </div>
-              <div class="lact-divider"></div>
-              <div class="lact-details">
-                <?php if ($ltype): ?><span class="lact-chip">📁 <?= $ltype ?></span><?php endif; ?>
-                <?php if ($dateRange): ?><span class="lact-chip">📅 <?= $dateRange ?></span><?php endif; ?>
-                <?php if ($days): ?><span class="lact-chip">⏱ <?= $days ?></span><?php endif; ?>
-              </div>
-              <div class="lact-footer">
-                <span class="lact-admin">by <?= $actor ?></span>
-                <span class="lact-time"><?= $atime ?></span>
-              </div>
-            </div>
-            <?php endforeach; endif; ?>
-          </div>
-        </div>
-      </div>
     </div><!-- .content -->
   </div><!-- .main -->
 
   <script>
+    // XSS-safe HTML escape helper
+    function dEsc(s) {
+      const n = document.createElement('div');
+      n.textContent = String(s ?? '');
+      return n.innerHTML;
+    }
+
+    const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]')?.content ?? '';
+
     // Date
     const d = new Date();
     document.getElementById('currentDate').textContent =
       d.toLocaleDateString('en-PH', { weekday:'short', year:'numeric', month:'short', day:'numeric' });
-
-    // Auto-refresh activity every 30s
-    function refreshActivity() {
-      fetch('dashboard_activity.php')
-        .then(function(r){ return r.json(); })
-        .then(function(j){
-          if (!j.success || !j.html) return;
-          var log = document.getElementById('activityLog');
-          if (log) log.innerHTML = j.html;
-          var dot = document.getElementById('actRefreshDot');
-          if (dot){ dot.style.background='#2563eb'; setTimeout(function(){ dot.style.background='#22c55e'; }, 600); }
-        }).catch(function(){});
-    }
-    setInterval(refreshActivity, 30000);
 
     // Sidebar toggle
     
@@ -1349,12 +1409,9 @@ document.addEventListener('DOMContentLoaded', applyReadState);
 // ── Poll admin notifications every 60 seconds ──────────────────────────────
 async function pollAdminNotifications() {
   try {
-    const r = await fetch('leave_requests.php?action=pending_count').then(r=>r.json());
-    if (typeof r.count === 'undefined') return;
-    // Re-fetch full notifications and update panel
     const r2 = await fetch('notif_poll.php').then(r=>r.json()).catch(()=>null);
     if (!r2 || !r2.success) {
-      // Fallback: just update the count badge
+      // Fallback: just update the count badge from current DOM state
       const unread = getUnreadCount();
       const cnt = document.getElementById('adminNotifCount');
       if (cnt) {
@@ -1372,13 +1429,17 @@ async function pollAdminNotifications() {
         list.innerHTML = '<div class="notif-empty"><div class="ne-icon">🔔</div><p>All caught up!</p></div>';
       } else {
         list.innerHTML = notifs.map(n => {
-          const isRead = read.includes(n.nid);
-          return `<a class="notif-item ${isRead?'':'unread'}" href="${n.link}" data-nid="${n.nid}" onclick="markNotifRead(this.getAttribute('data-nid'));applyReadState();">
-            <div class="notif-ico" style="background:${n.color}22;">${n.icon}</div>
+          const isRead  = read.includes(n.nid);
+          const safeNid = dEsc(String(n.nid || ''));
+          const safeColor = /^#[0-9a-fA-F]{3,6}$/.test(n.color) ? n.color : '#94a3b8';
+          const safeLinkRaw = String(n.link || '#');
+          const safeLink = /^[a-zA-Z0-9_./?=&#%-]+$/.test(safeLinkRaw) ? safeLinkRaw : '#';
+          return `<a class="notif-item ${isRead?'':'unread'}" href="${safeLink}" data-nid="${safeNid}" onclick="markNotifRead(this.getAttribute('data-nid'));applyReadState();">
+            <div class="notif-ico" style="background:${safeColor}22;">${dEsc(n.icon)}</div>
             <div class="notif-body">
-              <div class="notif-title">${n.title}</div>
-              <div class="notif-text">${n.body}</div>
-              ${n.time ? '<div class="notif-time">'+adminFmtTime(n.time)+'</div>' : ''}
+              <div class="notif-title">${dEsc(n.title)}</div>
+              <div class="notif-text">${dEsc(n.body)}</div>
+              ${n.time ? '<div class="notif-time">'+adminFmtTime(dEsc(n.time))+'</div>' : ''}
             </div>
           </a>`;
         }).join('');
@@ -1496,68 +1557,72 @@ function toggleSidebar() {
           .then(function(r){ return r.json(); })
           .then(function(j){
             actionsCell.innerHTML = '<span style="font-size:0.72rem;color:var(--gray-400);font-weight:700;">Processed</span>';
-            if (action === 'approve') addActivity('green','✅','Leave Approved', empName + ' — leave approved');
-            else addActivity('red','✗','Leave Denied', empName + ' — leave denied');
           })
           .catch(function(){
             actionsCell.innerHTML = '<span style="font-size:0.72rem;color:var(--gray-400);font-weight:700;">Processed</span>';
-            if (action === 'approve') addActivity('green','✅','Leave Approved', empName + ' — leave approved');
-            else addActivity('red','✗','Leave Denied', empName + ' — leave denied');
           });
       } else {
         actionsCell.innerHTML = '<span style="font-size:0.72rem;color:var(--gray-400);font-weight:700;">Processed</span>';
-        if (action === 'approve') addActivity('green','✅','Leave Approved', empName + ' — leave approved');
-        else addActivity('red','✗','Leave Denied', empName + ' — leave denied');
       }
-    }
-
-    // Add to activity log
-    function addActivity(color, icon, title, desc) {
-      const log = document.getElementById('activityLog');
-      const now = 'Just now';
-      const item = document.createElement('div');
-      item.className = 'activity-item';
-      item.style.animation = 'cardIn 0.3s ease both';
-      item.innerHTML = `<div class="act-dot ${color}">${icon}</div>
-        <div class="act-text"><strong>${title}</strong><p>${desc}</p></div>
-        <div class="act-time">${now}</div>`;
-      log.prepend(item);
-    }
-
-    // Clear activity
-    function clearActivity() {
-      document.getElementById('activityLog').innerHTML =
-        '<p style="text-align:center;color:var(--gray-400);font-size:0.80rem;padding:20px;">No recent activity.</p>';
     }
 
     // Post announcement
     function postAnnouncement() {
       const input = document.getElementById('announceInput');
+      const btn   = document.querySelector('.post-btn');
       const type  = document.getElementById('announceType').value;
       const text  = input.value.trim();
       if (!text) return;
 
-      const typeLabels = { info:'INFO', success:'NOTICE', warning:'REMINDER', urgent:'URGENT' };
-      const dotColors  = { info:'blue', success:'green', warning:'orange', urgent:'red' };
-      const today = new Date().toLocaleDateString('en-PH', {month:'short', day:'numeric', year:'numeric'});
+      const typeLabels   = { info:'INFO', success:'NOTICE', warning:'REMINDER', urgent:'URGENT' };
+      const typePriority = { info:'Normal', success:'Normal', warning:'High', urgent:'Urgent' };
+      const typeCategory = { info:'General', success:'General', warning:'General', urgent:'Urgent' };
+      const dotColors    = { info:'blue', success:'green', warning:'orange', urgent:'red' };
+      const safeType     = ['info','success','warning','urgent'].includes(type) ? type : 'info';
 
-      const item = document.createElement('div');
-      item.className = 'announce-item';
-      item.style.animation = 'cardIn 0.3s ease both';
-      item.innerHTML = `
-        <div class="announce-dot ${dotColors[type]}"></div>
-        <div class="announce-body">
-          <div class="announce-title">
-            <span class="announce-tag ${type}">${typeLabels[type]}</span>
-            New Announcement
-          </div>
-          <div class="announce-text">${text}</div>
-          <div class="announce-meta">Posted by Admin · ${today}</div>
-        </div>`;
+      if (btn) { btn.disabled = true; btn.textContent = 'Posting…'; }
 
-      document.getElementById('announceList').prepend(item);
-      input.value = '';
-      addActivity('blue', '📢', 'Announcement Posted', text.substring(0, 50) + (text.length > 50 ? '…' : ''));
+      const fd = new FormData();
+      fd.append('action',     'save');
+      fd.append('csrf_token', CSRF_TOKEN);
+      fd.append('title',      text.substring(0, 80));
+      fd.append('body',       text);
+      fd.append('category',   typeCategory[safeType]);
+      fd.append('priority',   typePriority[safeType]);
+      fd.append('audience',   'All');
+      fd.append('status',     'Published');
+
+      fetch('announcements.php', { method:'POST', body:fd, credentials:'same-origin' })
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          if (!j.success) {
+            alert(j.message || 'Failed to post announcement.');
+            return;
+          }
+          const today = new Date().toLocaleDateString('en-PH', {month:'short', day:'numeric', year:'numeric'});
+          const item  = document.createElement('div');
+          item.className = 'announce-item';
+          item.style.animation = 'cardIn 0.3s ease both';
+          item.innerHTML = `
+            <div class="announce-dot ${dEsc(dotColors[safeType])}"></div>
+            <div class="announce-body">
+              <div class="announce-title">
+                <span class="announce-tag ${dEsc(safeType)}">${dEsc(typeLabels[safeType])}</span>
+                New Announcement
+              </div>
+              <div class="announce-text"></div>
+              <div class="announce-meta">Posted · ${dEsc(today)}</div>
+            </div>`;
+          item.querySelector('.announce-text').textContent = text;
+          document.getElementById('announceList').prepend(item);
+          input.value = '';
+        })
+        .catch(function(){
+          alert('Network error. Please try again.');
+        })
+        .finally(function(){
+          if (btn) { btn.disabled = false; btn.textContent = '📢 Post'; }
+        });
     }
   </script>
 
@@ -2151,7 +2216,7 @@ function toggleSidebar() {
     cwSending=true;
     var btn=document.getElementById('cwSendBtn');btn.disabled=true;
     var sentMsg=msg;inp.value='';cwResize(inp);
-    var fd=new FormData();fd.append('action','send');fd.append('to',cwAct.user_id);fd.append('message',sentMsg);
+    var fd=new FormData();fd.append('action','send');fd.append('to',cwAct.user_id);fd.append('message',sentMsg);fd.append('csrf_token',CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
       .then(function(j){
@@ -2182,7 +2247,7 @@ function toggleSidebar() {
   function cwSubmitEdit(msgId,newMsg){
     cwSending=true;
     var btn=document.getElementById('cwSendBtn');btn.disabled=true;
-    var fd=new FormData();fd.append('action','edit');fd.append('message_id',msgId);fd.append('message',newMsg);
+    var fd=new FormData();fd.append('action','edit');fd.append('message_id',msgId);fd.append('message',newMsg);fd.append('csrf_token',CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
       .then(function(j){
@@ -2210,7 +2275,7 @@ function toggleSidebar() {
   // ── Unsend ───────────────────────────────────────────────────
   function cwUnsend(msgId){
     if(!confirm('Unsend this message? It will be removed for everyone.'))return;
-    var fd=new FormData();fd.append('action','unsend');fd.append('message_id',msgId);
+    var fd=new FormData();fd.append('action','unsend');fd.append('message_id',msgId);fd.append('csrf_token',CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
       .then(function(j){

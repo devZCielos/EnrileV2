@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 // ============================================================
 //  LGU ENRILE HRMS — Service Records Viewer (Admin)
 //  File: Admin/service_records.php
@@ -594,6 +594,16 @@ $roleLabel  = $roleLabels[$_SESSION['user_role']] ?? 'Admin';
 <!-- ══ TOAST ══ -->
 <div class="toast-wrap" id="toastWrap"></div>
 
+<?php
+$_srMayorRow   = null;
+try { $_srMayorRow = $pdo->query("SELECT first_name, last_name, position_title FROM employees WHERE is_mayor=1 AND employment_status='Active' LIMIT 1")->fetch(PDO::FETCH_ASSOC); } catch (Exception $_e) {}
+$_srMayorName  = $_srMayorRow ? strtoupper(trim($_srMayorRow['first_name'].' '.$_srMayorRow['last_name'])) : 'MIGUEL B. DECENA, JR.';
+$_srMayorTitle = $_srMayorRow ? ($_srMayorRow['position_title'] ?: 'Municipal Mayor') : 'Municipal Mayor';
+?>
+<script>
+var SR_MAYOR_NAME  = <?= json_encode($_srMayorName) ?>;
+var SR_MAYOR_TITLE = <?= json_encode($_srMayorTitle) ?>;
+</script>
 <script src="../config/service_record_print_template.js?v=1"></script>
 
 <script>
@@ -1094,8 +1104,8 @@ function buildSRPageHTML(emp, records, pageNum, totalPages, sliceStart, sliceEnd
         </td>
         <td class="sig-right">
           <div class="sig-prep">Conforme:</div>
-          <div class="sig-name">MIGUEL B. DECENA, JR.</div>
-          <div class="sig-pos">Municipal Mayor</div>
+          <div class="sig-name">${(window.SR_MAYOR_NAME||'MIGUEL B. DECENA, JR.')}</div>
+          <div class="sig-pos">${(window.SR_MAYOR_TITLE||'Municipal Mayor')}</div>
         </td>
       </tr>
     </table>
@@ -1442,9 +1452,6 @@ document.addEventListener('DOMContentLoaded', applyReadState);
 // ── Poll admin notifications every 60 seconds ──────────────────────────────
 async function pollAdminNotifications() {
   try {
-    const r = await fetch('leave_requests.php?action=pending_count').then(r=>r.json());
-    if (typeof r.count === 'undefined') return;
-    // Re-fetch full notifications and update panel
     const r2 = await fetch('notif_poll.php').then(r=>r.json()).catch(()=>null);
     if (!r2 || !r2.success) {
       // Fallback: just update the count badge
@@ -2056,7 +2063,7 @@ function toggleSidebar() {
     cwSending=true;
     var btn=document.getElementById('cwSendBtn');btn.disabled=true;
     var sentMsg=msg;inp.value='';cwResize(inp);
-    var fd=new FormData();fd.append('action','send');fd.append('to',cwAct.user_id);fd.append('message',sentMsg);
+    var fd=new FormData();fd.append('action','send');fd.append('to',cwAct.user_id);fd.append('message',sentMsg);fd.append('csrf_token',CSRF_TOKEN);
     fd.append('csrf_token', CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
@@ -2088,7 +2095,7 @@ function toggleSidebar() {
   function cwSubmitEdit(msgId,newMsg){
     cwSending=true;
     var btn=document.getElementById('cwSendBtn');btn.disabled=true;
-    var fd=new FormData();fd.append('action','edit');fd.append('message_id',msgId);fd.append('message',newMsg);
+    var fd=new FormData();fd.append('action','edit');fd.append('message_id',msgId);fd.append('message',newMsg);fd.append('csrf_token',CSRF_TOKEN);
     fd.append('csrf_token', CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
@@ -2117,7 +2124,7 @@ function toggleSidebar() {
   // ── Unsend ───────────────────────────────────────────────────
   function cwUnsend(msgId){
     if(!confirm('Unsend this message? It will be removed for everyone.'))return;
-    var fd=new FormData();fd.append('action','unsend');fd.append('message_id',msgId);
+    var fd=new FormData();fd.append('action','unsend');fd.append('message_id',msgId);fd.append('csrf_token',CSRF_TOKEN);
     fd.append('csrf_token', CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})

@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 // ============================================================
 //  LGU ENRILE HRMS — Employees Page
 //  File: Admin/employees.php
@@ -8,7 +8,10 @@ session_start();
 
 // ── Session timeout — 8 hours ─────────────────────────────────
 $_sessionLifetime = 8 * 60 * 60;
-if (isset($_SESSION['login_time']) && (time() - strtotime($_SESSION['login_time']) > $_sessionLifetime)) {
+$_loginTime = isset($_SESSION['login_time'])
+    ? (is_numeric($_SESSION['login_time']) ? (int)$_SESSION['login_time'] : (int)strtotime($_SESSION['login_time']))
+    : 0;
+if ($_loginTime && (time() - $_loginTime > $_sessionLifetime)) {
     $_isAjax = !empty($_GET['action']) || !empty($_POST['action']);
     session_unset(); session_destroy();
     if ($_isAjax) {
@@ -31,6 +34,12 @@ if (!in_array($_SESSION['user_role'] ?? '', $allowedRoles)) {
 
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
+
+// ── Auto-migration: add is_mayor column if it doesn't exist yet ──────────
+try { $pdo->query("SELECT is_mayor FROM employees LIMIT 0"); }
+catch (PDOException $_e) {
+    $pdo->exec("ALTER TABLE employees ADD COLUMN is_mayor TINYINT(1) NOT NULL DEFAULT 0");
+}
 
 // ════════════════════════════════════════════════════════════
 //  AJAX HANDLER  — ?action=...
@@ -159,6 +168,17 @@ if ($action) {
                 $deptStmt->execute([trim($_POST['dept'] ?? '')]);
                 $deptId = $deptStmt->fetchColumn() ?: null;
 
+                // Require a valid department if one was submitted
+                if (!empty($_POST['dept']) && $deptId === false) {
+                    echo json_encode(['success' => false, 'message' => 'Invalid department selected.']);
+                    break;
+                }
+
+                // ── If designating as mayor, clear the flag from all other employees first ──
+                if (!empty($_POST['is_mayor'])) {
+                    $pdo->exec("UPDATE employees SET is_mayor = 0 WHERE is_mayor = 1");
+                }
+
                 // ── FIX: field keys now match actual DB column names ──
                 $fields = [
                     'employee_code'     => trim($_POST['emp_code']    ?? ''),
@@ -178,6 +198,7 @@ if ($action) {
                     'date_hired'        => $_POST['date_hired']  ?: date('Y-m-d'), // NOT NULL — default to today
                     'salary_grade'      => trim($_POST['salary_grade'] ?? ''),
                     'gsis_number'       => trim($_POST['gsis']         ?? ''),
+                    'is_mayor'          => !empty($_POST['is_mayor']) ? 1 : 0,
                 ];
 
                 if (empty($fields['first_name']) || empty($fields['last_name']) ||
@@ -186,9 +207,42 @@ if ($action) {
                     break;
                 }
 
-                $leaveSelection = isset($_POST['leave_selection'])
-                  ? json_decode($_POST['leave_selection'], true)
-                  : null;
+                // Email format validation
+                if (!empty($fields['email_address']) && !filter_var($fields['email_address'], FILTER_VALIDATE_EMAIL)) {
+                    echo json_encode(['success' => false, 'message' => 'Invalid email address format.']);
+                    break;
+                }
+
+                // Input length validation
+                $lengthLimits = [
+                    'first_name' => 100, 'last_name' => 100, 'middle_name' => 100,
+                    'employee_code' => 50, 'position_title' => 150,
+                    'contact_number' => 30, 'email_address' => 191,
+                    'home_address' => 500, 'salary_grade' => 30, 'gsis_number' => 50,
+                ];
+                foreach ($lengthLimits as $field => $maxLen) {
+                    if (strlen($fields[$field] ?? '') > $maxLen) {
+                        echo json_encode(['success' => false, 'message' => ucfirst(str_replace('_', ' ', $field)) . ' is too long (max ' . $maxLen . ' characters).']);
+                        break 2;
+                    }
+                }
+
+                // Validate and decode leave_selection
+                $leaveSelection = null;
+                if (isset($_POST['leave_selection'])) {
+                    $decoded = json_decode($_POST['leave_selection'], true);
+                    if (!is_array($decoded)) {
+                        echo json_encode(['success' => false, 'message' => 'Invalid leave selection data.']);
+                        break;
+                    }
+                    // Ensure all keys are positive integers and values are non-negative numbers
+                    $leaveSelection = [];
+                    foreach ($decoded as $k => $v) {
+                        $k = (int)$k;
+                        $v = max(0, (int)$v);
+                        if ($k > 0) $leaveSelection[$k] = $v;
+                    }
+                }
 
                 if ($id) {
                     $setCols = implode(', ', array_map(fn($k) => "$k = ?", array_keys($fields)));
@@ -206,20 +260,20 @@ if ($action) {
                     }
                     // ── Auto-create contract if employment_type is Contractual/JO/Casual ──
                     if (in_array($fields['employment_type'], ['Contractual', 'Job Order', 'Casual'])) {
-                        $chk = $pdo->prepare("SELECT contract_id FROM contracts WHERE employee_id = ? LIMIT 1");
-                        $chk->execute([$id]);
-                        if (!$chk->fetchColumn()) {
-                            $cIns = $pdo->prepare("
-                                INSERT INTO contracts (employee_id, contract_type, position_title, department_id, start_date, status, created_by)
-                                VALUES (?, ?, ?, ?, ?, 'Active', ?)
-                            ");
-                            $cIns->execute([$id, $fields['employment_type'], $fields['position_title'], $deptId, $fields['date_hired'], (int)$_SESSION['user_id']]);
-                        }
+                        // Atomic insert: only inserts if no contract exists (avoids race condition)
+                        $pdo->prepare("
+                            INSERT INTO contracts (employee_id, contract_type, position_title, department_id, start_date, status, created_by)
+                            SELECT ?, ?, ?, ?, ?, 'Active', ?
+                            FROM DUAL
+                            WHERE NOT EXISTS (SELECT 1 FROM contracts WHERE employee_id = ? LIMIT 1)
+                        ")->execute([$id, $fields['employment_type'], $fields['position_title'], $deptId, $fields['date_hired'], (int)$_SESSION['user_id'], $id]);
                     }
 
                         // Update current-year leave entitlements when admin edits leave selection
                         if (is_array($leaveSelection)) {
                           $year = (int)date('Y');
+                          // Fetch max_days for capping
+                          $ltMaxMap = $pdo->query("SELECT leave_type_id, max_days FROM leave_types")->fetchAll(PDO::FETCH_KEY_PAIR);
                           $upsert = $pdo->prepare("
                             INSERT INTO leave_balances (employee_id, leave_type_id, calendar_year, total_credits, used_days)
                             VALUES (?, ?, ?, ?, 0)
@@ -229,8 +283,10 @@ if ($action) {
                           $selectedIds = [];
                           foreach ($leaveSelection as $ltId => $days) {
                             $ltId = (int)$ltId;
-                            $days = max(0, (int)$days);
                             if (!$ltId) continue;
+                            // Cap days at max_days for this leave type
+                            $maxDays = isset($ltMaxMap[$ltId]) ? (int)$ltMaxMap[$ltId] : PHP_INT_MAX;
+                            $days = min(max(0, (int)$days), $maxDays);
                             $selectedIds[] = $ltId;
                             $upsert->execute([$id, $ltId, $year, $days]);
                           }
@@ -290,8 +346,14 @@ if ($action) {
                 $id = (int)($_POST['id'] ?? 0);
                 if (!$id) { echo json_encode(['success' => false, 'message' => 'Invalid ID.']); break; }
 
+                // Remove all related records before deleting the employee
                 $pdo->prepare("DELETE FROM leave_balances  WHERE employee_id = ?")->execute([$id]);
                 $pdo->prepare("DELETE FROM leave_requests  WHERE employee_id = ?")->execute([$id]);
+                $pdo->prepare("DELETE FROM contracts       WHERE employee_id = ?")->execute([$id]);
+                // Nullify service_records (may have FK) rather than hard-delete
+                $pdo->prepare("DELETE FROM service_records WHERE employee_id = ?")->execute([$id]);
+                // Disassociate user account before deleting employee
+                $pdo->prepare("UPDATE user_accounts ua JOIN employees e ON e.user_id = ua.user_id SET ua.employee_id = NULL WHERE e.employee_id = ?")->execute([$id]);
                 $pdo->prepare("DELETE FROM employees       WHERE employee_id = ?")->execute([$id]);
 
                 echo json_encode(['success' => true, 'message' => 'Employee record deleted.']);
@@ -674,6 +736,12 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
             <label>GSIS / SSS No.</label>
             <input type="text" id="fGsis" placeholder="Government ID No."/>
           </div>
+          <div class="form-group form-full" style="grid-column:1/-1;margin-top:4px;">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);background:var(--gray-50);">
+              <input type="checkbox" id="fIsMayor" style="width:16px;height:16px;cursor:pointer;accent-color:var(--primary);flex-shrink:0;"/>
+              <span style="font-weight:700;color:var(--secondary);font-size:.875rem;">&#11088; Designate as Municipal Mayor <small style="font-weight:600;color:var(--gray-400);font-size:.75rem;">(name will appear on leave &amp; service record forms)</small></span>
+            </label>
+          </div>
         </div>
 
         <div id="fLeaveSection" style="display:none;">
@@ -754,6 +822,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
   let debounceTimer  = null;
 
   const fmt = d => d ? new Date(d).toLocaleDateString('en-PH',{year:'numeric',month:'short',day:'numeric'}) : '—';
+  const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   const ini = (fn,ln) => ((fn||'?')[0] + (ln||'?')[0]).toUpperCase();
   const avatarColor = str => COLORS[Math.abs([...str].reduce((a,c)=>a+c.charCodeAt(0),0)) % COLORS.length];
 
@@ -809,29 +878,34 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     empty.style.display = 'none';
     tbody.innerHTML = json.data.map(e => {
       const c  = avatarColor(e.employee_code || e.last_name);
-      const av = ini(e.first_name, e.last_name);
+      const av = esc(ini(e.first_name, e.last_name));
       return `
         <tr onclick="viewEmp(${e.employee_id})">
           <td>
             <div class="emp-cell">
-              <div class="emp-avatar" style="background:${c};">${av}</div>
+              <div class="emp-avatar" style="background:${esc(c)};">${av}</div>
               <div>
-                <div class="emp-name">${e.first_name} ${e.last_name}</div>
-                <div class="emp-id">${e.employee_code}</div>
+                <div class="emp-name">${esc(e.first_name)} ${esc(e.last_name)}</div>
+                <div class="emp-id">${esc(e.employee_code)}</div>
               </div>
             </div>
           </td>
-          <td><span class="badge badge-dept">${e.department || '—'}</span></td>
-          <td style="color:var(--gray-600);font-size:0.82rem;">${e.position_title || '—'}</td>
-          <td>${typeBadge(e.employment_type)}</td>
-          <td style="color:var(--gray-600);font-size:0.82rem;">${e.contact_number || '—'}</td>
+          <td><span class="badge badge-dept">${esc(e.department) || '—'}</span></td>
+          <td style="color:var(--gray-600);font-size:0.82rem;">${esc(e.position_title) || '—'}</td>
+          <td>${typeBadge(esc(e.employment_type))}</td>
+          <td style="color:var(--gray-600);font-size:0.82rem;">${esc(e.contact_number) || '—'}</td>
           <td style="color:var(--gray-600);font-size:0.82rem;">${fmt(e.date_hired)}</td>
-          <td>${statusBadge(e.employment_status)}</td>
+          <td>${statusBadge(esc(e.employment_status))}</td>
           <td onclick="event.stopPropagation()" style="text-align:center;">
             <div class="row-actions" style="justify-content:center;">
               <button class="icon-btn view"   onclick="viewEmp(${e.employee_id})"   title="View">👁️</button>
               <button class="icon-btn edit"   onclick="editEmp(${e.employee_id})"   title="Edit">✏️</button>
-              <button class="icon-btn delete" onclick="deleteEmp(${e.employee_id},'${e.first_name} ${e.last_name}','${e.employee_code}')" title="Delete">🗑️</button>
+              <button class="icon-btn delete"
+                data-empid="${e.employee_id}"
+                data-empname="${esc(e.first_name)} ${esc(e.last_name)}"
+                data-empcode="${esc(e.employee_code)}"
+                onclick="deleteEmp(this.dataset.empid, this.dataset.empname, this.dataset.empcode)"
+                title="Delete">🗑️</button>
             </div>
           </td>
         </tr>`;
@@ -1044,12 +1118,22 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
 
   function editFromView() { closeModal('modalView'); editEmp(viewTargetId); }
 
+  let _cachedLeaveTypes = null;
+
   async function loadLeaveTypes(selectedLeaves = null) {
     const container = document.getElementById('fLeaveTypes');
     container.innerHTML = '<p style="color:var(--gray-400);font-size:.78rem;grid-column:1/-1;">Loading leave types…</p>';
     try {
-      const res  = await fetch('employees.php?action=leave_types');
-      const json = await res.json();
+      if (!_cachedLeaveTypes) {
+        const res  = await fetch('employees.php?action=leave_types');
+        const json = await res.json();
+        if (!json.success || !json.data.length) {
+          container.innerHTML = '<p style="color:var(--gray-400);font-size:.78rem;grid-column:1/-1;">No leave types configured.</p>';
+          return;
+        }
+        _cachedLeaveTypes = json.data;
+      }
+      const json = { success: true, data: _cachedLeaveTypes };
       if (!json.success || !json.data.length) {
         container.innerHTML = '<p style="color:var(--gray-400);font-size:.78rem;grid-column:1/-1;">No leave types configured.</p>';
         return;
@@ -1081,7 +1165,8 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
             </div>
           </label>`;
       }).join('');
-    } catch(e) {
+    } catch(err) {
+      _cachedLeaveTypes = null;
       container.innerHTML = '<p style="color:#ef4444;font-size:.78rem;grid-column:1/-1;">Failed to load leave types.</p>';
     }
   }
@@ -1106,6 +1191,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
       if (el) el.selectedIndex = 0;
     });
     document.getElementById('fStatus').value = 'Active';
+    document.getElementById('fIsMayor').checked = false;
     document.getElementById('fLeaveSection').style.display = 'none';
     document.getElementById('fLeaveTypes').innerHTML = '';
   }
@@ -1128,10 +1214,6 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
       }
     })();
 
-    // Show and populate leave entitlements
-    document.getElementById('fLeaveSection').style.display = 'block';
-    loadLeaveTypes();
-
     openModal('modalForm');
   }
 
@@ -1142,9 +1224,8 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     const e = json.data;
 
     clearForm();
-    document.getElementById('fLeaveSection').style.display = 'block';
     document.getElementById('formTitle').textContent = 'Edit Employee';
-    document.getElementById('formSub').textContent   = `Editing: ${e.first_name} ${e.last_name} (including leave entitlements)`;
+    document.getElementById('formSub').textContent   = `Editing: ${e.first_name} ${e.last_name}`;
 
     document.getElementById('fId').value          = e.employee_id;
     document.getElementById('fFirstName').value   = e.first_name    || '';
@@ -1164,6 +1245,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     document.getElementById('fDateHired').value   = e.date_hired    || '';
     document.getElementById('fSalaryGrade').value = e.salary_grade  || '';
     document.getElementById('fGsis').value        = e.gsis_number   || '';
+    document.getElementById('fIsMayor').checked   = !!parseInt(e.is_mayor || 0);
 
     const leaveSelection = {};
     (e.leave_balances || []).forEach(lb => {
@@ -1210,6 +1292,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     body.append('date_hired',   document.getElementById('fDateHired').value);
     body.append('salary_grade', document.getElementById('fSalaryGrade').value.trim());
     body.append('gsis',         document.getElementById('fGsis').value.trim());
+    body.append('is_mayor',     document.getElementById('fIsMayor').checked ? '1' : '0');
 
     // Collect leave entitlements when leave cards are loaded in the modal
     const leaveSectionEl = document.getElementById('fLeaveSection');
@@ -1378,9 +1461,6 @@ document.addEventListener('DOMContentLoaded', applyReadState);
 // ── Poll admin notifications every 60 seconds ──────────────────────────────
 async function pollAdminNotifications() {
   try {
-    const r = await fetch('leave_requests.php?action=pending_count').then(r=>r.json());
-    if (typeof r.count === 'undefined') return;
-    // Re-fetch full notifications and update panel
     const r2 = await fetch('notif_poll.php').then(r=>r.json()).catch(()=>null);
     if (!r2 || !r2.success) {
       // Fallback: just update the count badge
@@ -2017,7 +2097,7 @@ function toggleSidebar() {
     cwSending=true;
     var btn=document.getElementById('cwSendBtn');btn.disabled=true;
     var sentMsg=msg;inp.value='';cwResize(inp);
-    var fd=new FormData();fd.append('action','send');fd.append('to',cwAct.user_id);fd.append('message',sentMsg);
+    var fd=new FormData();fd.append('action','send');fd.append('to',cwAct.user_id);fd.append('message',sentMsg);fd.append('csrf_token',CSRF_TOKEN);
     fd.append('csrf_token', CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
@@ -2049,7 +2129,7 @@ function toggleSidebar() {
   function cwSubmitEdit(msgId,newMsg){
     cwSending=true;
     var btn=document.getElementById('cwSendBtn');btn.disabled=true;
-    var fd=new FormData();fd.append('action','edit');fd.append('message_id',msgId);fd.append('message',newMsg);
+    var fd=new FormData();fd.append('action','edit');fd.append('message_id',msgId);fd.append('message',newMsg);fd.append('csrf_token',CSRF_TOKEN);
     fd.append('csrf_token', CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})
@@ -2078,7 +2158,7 @@ function toggleSidebar() {
   // ── Unsend ───────────────────────────────────────────────────
   function cwUnsend(msgId){
     if(!confirm('Unsend this message? It will be removed for everyone.'))return;
-    var fd=new FormData();fd.append('action','unsend');fd.append('message_id',msgId);
+    var fd=new FormData();fd.append('action','unsend');fd.append('message_id',msgId);fd.append('csrf_token',CSRF_TOKEN);
     fd.append('csrf_token', CSRF_TOKEN);
     fetch(CW_API,{method:'POST',body:fd})
       .then(function(r){return r.json();})

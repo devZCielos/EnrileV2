@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
 require_once __DIR__ . '/_shared/helpers.php';
@@ -879,12 +879,19 @@ if ($action) {
                             FROM leave_notifications
                             WHERE employee_id = ? AND is_sent = 0
                               AND target_date <= CURDATE()
+                              AND read_at IS NULL
                             ORDER BY target_date DESC LIMIT 5");
                         $lnStmt->execute([$employeeId]);
-                        foreach ($lnStmt->fetchAll(PDO::FETCH_ASSOC) as $ln) {
+                        $lnRows = $lnStmt->fetchAll(PDO::FETCH_ASSOC);
+                        // Mark fetched records as delivered (is_sent=1)
+                        $lnIds = array_column($lnRows, 'notification_id');
+                        if ($lnIds) {
+                            $ph = implode(',', array_fill(0, count($lnIds), '?'));
+                            $pdo->prepare("UPDATE leave_notifications SET is_sent=1 WHERE notification_id IN ($ph)")->execute($lnIds);
+                        }
+                        foreach ($lnRows as $ln) {
                             $icon = $ln['notification_type'] === 'LEAVE_ENDING' ? '⏰' : '📋';
                             $color = $ln['notification_type'] === 'LEAVE_ENDING' ? '#f59e0b' : '#8b5cf6';
-                            
                             $notifs[] = [
                                 'icon'  => $icon,
                                 'color' => $color,
@@ -892,6 +899,7 @@ if ($action) {
                                 'body'  => htmlspecialchars($ln['message']),
                                 'time'  => $ln['created_at'],
                                 'page'  => 'requests',
+                                'db_id' => (int)$ln['notification_id'],
                                 'nid'   => md5('notif' . $ln['notification_id'] . $ln['created_at']),
                             ];
                         }
@@ -927,6 +935,16 @@ if ($action) {
 
                 } catch (Exception $ex) {} }
                 echo json_encode(['success'=>true,'count'=>$nCount,'notifications'=>$notifs]);
+                break;
+
+            // ── MARK LEAVE NOTIFICATION AS READ ──────────────────────
+            case 'mark_notif_read':
+                $nid = (int)($_POST['notification_id'] ?? 0);
+                if ($nid && $employeeId) {
+                    $pdo->prepare("UPDATE leave_notifications SET read_at=NOW(), is_sent=1 WHERE notification_id=? AND employee_id=?")
+                        ->execute([$nid, $employeeId]);
+                }
+                echo json_encode(['success'=>true]);
                 break;
 
             // ── SERVICE RECORD ──────────────────────────────────────
@@ -983,6 +1001,12 @@ if ($action) {
                 break;
 
             case 'get_saln':
+                $empTypeCheck = $pdo->prepare("SELECT employment_type FROM employees WHERE employee_id = ?");
+                $empTypeCheck->execute([$employeeId]);
+                $empType = $empTypeCheck->fetchColumn() ?: 'Unknown';
+                if ($empType !== 'Permanent') {
+                    echo json_encode(['success'=>false,'message'=>'SALN is only available to Permanent employees.']); break;
+                }
                 $year = (int)($_GET['year'] ?? date('Y'));
                 $stmt = $pdo->prepare("SELECT * FROM saln_records WHERE employee_id = ? AND saln_year = ? LIMIT 1");
                 $stmt->execute([$employeeId, $year]);
@@ -994,6 +1018,12 @@ if ($action) {
                 break;
 
             case 'save_saln':
+                $empTypeCheck = $pdo->prepare("SELECT employment_type FROM employees WHERE employee_id = ?");
+                $empTypeCheck->execute([$employeeId]);
+                $empType = $empTypeCheck->fetchColumn() ?: 'Unknown';
+                if ($empType !== 'Permanent') {
+                    echo json_encode(['success'=>false,'message'=>'SALN is only available to Permanent employees.']); break;
+                }
                 if (!$employeeId) {
                     echo json_encode(['success'=>false,'message'=>"LINK_ERROR: Your user account (user_id=$userId) is not linked to any employee record. Go to Admin → Employees and set the User Account field for your employee profile."]);
                     break;
@@ -1163,6 +1193,10 @@ $isSwitched  = !empty($_SESSION['switched_from_admin']);
 $origRole    = $isSwitched ? ($_SESSION['original_role'] ?? 'admin') : '';
 $roleLabels  = ['admin'=>'Administrator','hr_staff'=>'HR Staff','dept_head'=>'Department Head'];
 $origRoleLabel = $roleLabels[$origRole] ?? ucfirst($origRole);
+// ── Resolve employment type for sidebar/page-level checks ──
+$_empTypeRow = $pdo->prepare("SELECT employment_type FROM employees WHERE user_id = ?");
+$_empTypeRow->execute([(int)$_SESSION['user_id']]);
+$employmentType = $_empTypeRow->fetchColumn() ?: 'Permanent';
 
 
 ?>
@@ -1226,10 +1260,12 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     .saln-table-scroll {
       width: 100%;
       overflow-x: auto;
+      overflow-y: visible;
+      -webkit-overflow-scrolling: touch;
       margin-bottom: 18px;
     }
     .saln-tbl {
-      min-width: 1200px;
+      width: 100%;
     }
     :root {
       --primary:#2563eb; --primary-dk:#1e40af; --primary-lt:#eff6ff;
@@ -1267,6 +1303,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     .sb-item.active::before{content:'';position:absolute;left:0;top:22%;bottom:22%;width:3px;border-radius:2px;background:#fff;}
     .sb-icon{width:28px;height:28px;border-radius:7px;background:rgba(255,255,255,.10);display:flex;align-items:center;justify-content:center;font-size:.88rem;flex-shrink:0;transition:background .2s;}
     .sb-item.active .sb-icon,.sb-item:hover .sb-icon{background:rgba(255,255,255,.22);}
+    .sb-item:disabled{opacity:.40;cursor:not-allowed;pointer-events:none;}
     .sb-sub{padding-left:28px;font-size:.80rem;}
     .sb-label{font-size:.60rem;font-weight:800;color:rgba(255,255,255,.35);text-transform:uppercase;letter-spacing:.15em;padding:10px 12px 3px;margin-top:4px;}
     /* PDS / SALN form styles */
@@ -1284,7 +1321,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     .repeater-row .fg{flex:1;margin:0;}
     .repeater-row .rem-btn{padding:9px 10px;border:1.5px solid #fecaca;background:#fef2f2;color:#dc2626;border-radius:var(--r-sm);cursor:pointer;font-size:.8rem;flex-shrink:0;margin-top:22px;}
     /* SALN table-based repeater */
-    .saln-tbl{width:100%;border-collapse:collapse;font-size:.78rem;margin-bottom:6px;}
+    .saln-tbl{border-collapse:collapse;font-size:.78rem;margin-bottom:6px;}
     .saln-tbl thead th{background:#f1f5f9;border:1.5px solid var(--g200);padding:6px 10px;font-size:.65rem;font-weight:800;color:var(--g600);text-transform:uppercase;letter-spacing:.05em;text-align:left;white-space:nowrap;}
     .saln-tbl tbody td{border:1.5px solid var(--g200);padding:3px 4px;vertical-align:middle;}
     .saln-tbl tbody input,.saln-tbl tbody select{width:100%;padding:6px 8px;border:1.5px solid var(--g300);border-radius:6px;font-family:'Nunito',sans-serif;font-size:.78rem;color:var(--g800);background:#fff;outline:none;box-sizing:border-box;transition:border-color .2s;}
@@ -1350,8 +1387,9 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     .tb-btn .notif{position:absolute;top:-2px;right:-2px;width:14px;height:14px;background:#ef4444;border-radius:50%;font-size:.52rem;color:#fff;font-weight:800;display:none;align-items:center;justify-content:center;border:2px solid rgba(255,255,255,.3);}
 
     /* PAGE SYSTEM */
-    .page{display:none;padding:22px 26px;animation:fadeUp .35s ease both;width:100%;box-sizing:border-box;}
-    .page.active{display:block;}
+    .page{display:none;padding:22px 26px;width:100%;box-sizing:border-box;}
+    .page.active{display:block;animation:pageFadeIn .35s ease both;}
+    @keyframes pageFadeIn{from{opacity:0;}to{opacity:1;}}
     @keyframes fadeUp{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:translateY(0);}}
 
     /* SHARED */
@@ -2172,12 +2210,16 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     <button class="sb-item" onclick="goPage('file',this)"><div class="sb-icon">📝</div>File Leave Request</button>
     <button class="sb-item" onclick="goPage('balances',this)"><div class="sb-icon">⚖️</div>Leave Balances</button>
     <?php if ($_SESSION['user_role'] === 'dept_head'): ?>
-      <button class="sb-item" onclick="goPage('dept_head_leaves',this)"><div class="sb-icon">🗂️</div>Dept Head Leave Approval</button>
+      <button class="sb-item" onclick="goPage('dept_head_leaves',this)"><div class="sb-icon">🗂️</div>Dept Head Leave Approval<span class="sb-badge" id="dhPendBadge"></span></button>
     <?php endif; ?>
     <div class="sb-label">Documents</div>
     <button class="sb-item" onclick="goPage('documents',this)"><div class="sb-icon">📁</div>All Documents</button>
     <button class="sb-item sb-sub" onclick="goPage('pds',this)"><div class="sb-icon">📋</div>PDS</button>
+    <?php if ($employmentType === 'Permanent'): ?>
     <button class="sb-item sb-sub" onclick="goPage('saln',this)"><div class="sb-icon">📊</div>SALN</button>
+    <?php else: ?>
+    <button class="sb-item sb-sub" disabled title="SALN is only available to Permanent employees"><div class="sb-icon">📊</div>SALN</button>
+    <?php endif; ?>
     <button class="sb-item sb-sub annex-link" onclick="goPage('annex_b',this)"><div class="sb-icon">🅱️</div>Annex B</button>
     <button class="sb-item sb-sub annex-link" onclick="goPage('annex_c',this)"><div class="sb-icon">🇨</div>Annex C</button>
     <button class="sb-item sb-sub" onclick="goPage('service_record',this)"><div class="sb-icon">📜</div>Service Record</button>
@@ -3244,20 +3286,21 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
         <div class="form-section-body">
           <div style="font-weight:700;margin-bottom:6px;">a. Real Properties</div>
           <div class="saln-table-scroll">
-            <table class="saln-tbl">
+            <table class="saln-tbl" style="min-width:1100px;">
             <thead style="background:#f1f5f9;">
               <tr>
                 <th style="min-width:170px;">Description<br><span style="font-weight:normal;font-size:5pt;">(e.g. lot, house and lot, condominium and improvements)</span></th>
                 <th style="min-width:120px;">Kind<br><span style="font-weight:normal;font-size:5pt;">(e.g. residential, commercial, industrial, agricultural, and mixed use)</span></th>
                 <th style="min-width:140px;">Exact Location</th>
-                <th style="min-width:120px;">Assessed Value<br></th>
-                <th style="min-width:140px;">Current Fair<br>Market Value</th>
+                <th style="min-width:120px;">Assessed Value</th>
+                <th style="min-width:140px;">Current Fair Market Value</th>
                 <th style="min-width:110px;">Acquisition Year</th>
                 <th style="min-width:120px;">Acquisition Mode</th>
                 <th style="min-width:140px;">Acquisition Cost</th>
+                <th class="del-cell" style="border:none;background:transparent;"></th>
               </tr>
             </thead>
-            <tbody>
+            <tbody id="annexB-real-tbody">
               <tr>
                 <td><input type="text" placeholder="e.g. House and Lot" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. Residential" aria-label="Kind" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
@@ -3267,6 +3310,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
                 <td><input type="number" placeholder="e.g. 2025" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. Purchase" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
                 <td><input type="number" placeholder="e.g. 950000" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
               <tr>
                 <td><input type="text"  aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
@@ -3277,6 +3321,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
                 <td><input type="number"  aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
                 <td><input type="text"  aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
                 <td><input type="number"  aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
               <tr>
                 <td><input type="text" placeholder="" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
@@ -3287,6 +3332,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
                 <td><input type="number" placeholder="" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
                 <td><input type="number" placeholder="" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
               <tr>
                 <td><input type="text" placeholder="" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
@@ -3297,70 +3343,79 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
                 <td><input type="number" placeholder="" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
                 <td><input type="number" placeholder="" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
             </tbody>
             </table>
           </div>
-          
+          <button type="button" onclick="annexBAddRow('real')" style="margin-top:6px;padding:4px 14px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;">+ Add Real Property</button>
+
           <div style="font-weight:700;margin:10px 0 6px;">b. Personal Properties</div>
           <div class="saln-table-scroll">
-            <table class="saln-tbl">
-            <thead><tr><th>Description</th><th>Value</th><th>Remarks</th></tr></thead>
-            <tbody>
-              <tr><td><input type="text" placeholder="e.g. Jewelry" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 50000" aria-label="Value" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Gift from family" aria-label="Remarks"/></td></tr>
-              <tr><td><input type="text" placeholder="e.g. Vehicle" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 300000" aria-label="Value" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Car loan" aria-label="Remarks"/></td></tr>
-              <tr><td><input type="text"  aria-label="Description"/></td><td><input type="number"  aria-label="Value" min="0" step="any"/></td><td><input type="text"  aria-label="Remarks"/></td></tr>
-              <tr><td><input type="text"  aria-label="Description"/></td><td><input type="number"  aria-label="Value" min="0" step="any"/></td><td><input type="text"  aria-label="Remarks"/></td></tr>
+            <table class="saln-tbl" style="width:100%;">
+            <thead><tr><th>Description</th><th>Value</th><th>Remarks</th><th class="del-cell" style="border:none;background:transparent;"></th></tr></thead>
+            <tbody id="annexB-personal-tbody">
+              <tr><td><input type="text" placeholder="e.g. Jewelry" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 50000" aria-label="Value" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Gift from family" aria-label="Remarks"/></td><td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td></tr>
+              <tr><td><input type="text" placeholder="e.g. Vehicle" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 300000" aria-label="Value" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Car loan" aria-label="Remarks"/></td><td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td></tr>
+              <tr><td><input type="text"  aria-label="Description"/></td><td><input type="number"  aria-label="Value" min="0" step="any"/></td><td><input type="text"  aria-label="Remarks"/></td><td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td></tr>
+              <tr><td><input type="text"  aria-label="Description"/></td><td><input type="number"  aria-label="Value" min="0" step="any"/></td><td><input type="text"  aria-label="Remarks"/></td><td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td></tr>
             </tbody>
             </table>
           </div>
+          <button type="button" onclick="annexBAddRow('personal')" style="margin-top:6px;padding:4px 14px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;">+ Add Personal Property</button>
         </div>
         <div class="form-section-hd">2. LIABILITIES</div>
         <div class="form-section-body">
           <div class="saln-table-scroll">
-            <table class="saln-tbl">
-            <thead><tr><th>Description</th><th>Amount</th><th>Remarks</th></tr></thead>
-            <tbody>
-              <tr><td><input type="text" placeholder="e.g. Bank Loan" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 100000" aria-label="Amount" min="0" step="any"/></td><td><input type="text" placeholder="e.g. For car purchase" aria-label="Remarks"/></td></tr>
-              <tr><td><input type="text" placeholder="e.g. Credit Card" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 20000" aria-label="Amount" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Personal expenses" aria-label="Remarks"/></td></tr>
+            <table class="saln-tbl" style="width:100%;">
+            <thead><tr><th>Description</th><th>Amount</th><th>Remarks</th><th class="del-cell" style="border:none;background:transparent;"></th></tr></thead>
+            <tbody id="annexB-liab-tbody">
+              <tr><td><input type="text" placeholder="e.g. Bank Loan" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 100000" aria-label="Amount" min="0" step="any"/></td><td><input type="text" placeholder="e.g. For car purchase" aria-label="Remarks"/></td><td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td></tr>
+              <tr><td><input type="text" placeholder="e.g. Credit Card" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 20000" aria-label="Amount" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Personal expenses" aria-label="Remarks"/></td><td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td></tr>
             </tbody>
             </table>
           </div>
+          <button type="button" onclick="annexBAddRow('liab')" style="margin-top:6px;padding:4px 14px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;">+ Add Liability</button>
         </div>
         <div class="form-section-hd">3. BUSINESS INTERESTS AND FINANCIAL CONNECTIONS</div>
         <div class="form-section-body">
           <div class="saln-table-scroll">
-            <table class="saln-tbl">
+            <table class="saln-tbl" style="min-width:820px;">
             <thead style="background:#f1f5f9;">
               <tr>
                 <th style="min-width:200px;">NAME OF ENTITY/BUSINESS ENTERPRISE</th>
                 <th style="min-width:180px;">BUSINESS ADDRESS</th>
                 <th style="min-width:220px;">NATURE OF BUSINESS INTEREST &/OR FINANCIAL CONNECTION</th>
                 <th style="min-width:180px;">DATE OF ACQUISITION OF INTEREST OR CONNECTION</th>
+                <th class="del-cell" style="border:none;background:transparent;"></th>
               </tr>
             </thead>
-            <tbody>
+            <tbody id="annexB-biz-tbody">
               <tr>
                 <td><input type="text" placeholder="e.g. ABC Corp." aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. Manila" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. Shareholder" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. 2022-05-01" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
               <tr>
                 <td><input type="text" placeholder="e.g. XYZ Lending" aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. Tuguegarao" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. Investor" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. 2023-01-15" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
               <tr>
                 <td><input type="text" placeholder="" aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
             </tbody>
             </table>
           </div>
+          <button type="button" onclick="annexBAddRow('biz')" style="margin-top:6px;padding:4px 14px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;">+ Add Business Interest</button>
         </div>
       </div>
       <div style="text-align:right;margin-top:20px;padding-bottom:30px;display:flex;gap:8px;justify-content:flex-end;">
@@ -3379,20 +3434,21 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
         <div class="form-section-body">
           <div style="font-weight:700;margin-bottom:6px;">a. Real Properties</div>
           <div class="saln-table-scroll">
-            <table class="saln-tbl">
+            <table class="saln-tbl" style="min-width:1100px;">
             <thead style="background:#f1f5f9;">
               <tr>
                 <th style="min-width:170px;">Description<br><span style="font-weight:normal;font-size:5pt;">(e.g. lot, house and lot, condominium and improvements)</span></th>
                 <th style="min-width:120px;">Kind<br><span style="font-weight:normal;font-size:5pt;">(e.g. residential, commercial, industrial, agricultural, and mixed use)</span></th>
                 <th style="min-width:140px;">Exact Location</th>
-                <th style="min-width:120px;">Assessed Value<br></th>
-                <th style="min-width:140px;">Current Fair<br>Market Value</th>
+                <th style="min-width:120px;">Assessed Value</th>
+                <th style="min-width:140px;">Current Fair Market Value</th>
                 <th style="min-width:110px;">Acquisition Year</th>
                 <th style="min-width:120px;">Acquisition Mode</th>
                 <th style="min-width:140px;">Acquisition Cost</th>
+                <th class="del-cell" style="border:none;background:transparent;"></th>
               </tr>
             </thead>
-            <tbody>
+            <tbody id="annexC-real-tbody">
               <tr>
                 <td><input type="text" placeholder="e.g. House and Lot" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. Residential" aria-label="Kind" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
@@ -3402,6 +3458,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
                 <td><input type="number" placeholder="e.g. 2025" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. Purchase" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
                 <td><input type="number" placeholder="e.g. 950000" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
               <tr>
                 <td><input type="text"  aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
@@ -3412,6 +3469,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
                 <td><input type="number"  aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
                 <td><input type="text"  aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
                 <td><input type="number"  aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
               <tr>
                 <td><input type="text" placeholder="" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
@@ -3422,6 +3480,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
                 <td><input type="number" placeholder="" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
                 <td><input type="number" placeholder="" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
               <tr>
                 <td><input type="text" placeholder="" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
@@ -3432,70 +3491,79 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
                 <td><input type="number" placeholder="" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>
                 <td><input type="number" placeholder="" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
             </tbody>
             </table>
           </div>
-          
+          <button type="button" onclick="annexCAddRow('real')" style="margin-top:6px;padding:4px 14px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;">+ Add Real Property</button>
+
           <div style="font-weight:700;margin:10px 0 6px;">b. Personal Properties</div>
           <div class="saln-table-scroll">
-            <table class="saln-tbl">
-            <thead><tr><th>Description</th><th>Value</th><th>Remarks</th></tr></thead>
-            <tbody>
-              <tr><td><input type="text" placeholder="e.g. Jewelry" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 50000" aria-label="Value" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Gift from family" aria-label="Remarks"/></td></tr>
-              <tr><td><input type="text" placeholder="e.g. Vehicle" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 300000" aria-label="Value" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Car loan" aria-label="Remarks"/></td></tr>
-              <tr><td><input type="text"  aria-label="Description"/></td><td><input type="number"  aria-label="Value" min="0" step="any"/></td><td><input type="text"  aria-label="Remarks"/></td></tr>
-              <tr><td><input type="text"  aria-label="Description"/></td><td><input type="number"  aria-label="Value" min="0" step="any"/></td><td><input type="text"  aria-label="Remarks"/></td></tr>
+            <table class="saln-tbl" style="width:100%;">
+            <thead><tr><th>Description</th><th>Value</th><th>Remarks</th><th class="del-cell" style="border:none;background:transparent;"></th></tr></thead>
+            <tbody id="annexC-personal-tbody">
+              <tr><td><input type="text" placeholder="e.g. Jewelry" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 50000" aria-label="Value" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Gift from family" aria-label="Remarks"/></td><td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td></tr>
+              <tr><td><input type="text" placeholder="e.g. Vehicle" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 300000" aria-label="Value" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Car loan" aria-label="Remarks"/></td><td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td></tr>
+              <tr><td><input type="text"  aria-label="Description"/></td><td><input type="number"  aria-label="Value" min="0" step="any"/></td><td><input type="text"  aria-label="Remarks"/></td><td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td></tr>
+              <tr><td><input type="text"  aria-label="Description"/></td><td><input type="number"  aria-label="Value" min="0" step="any"/></td><td><input type="text"  aria-label="Remarks"/></td><td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td></tr>
             </tbody>
             </table>
           </div>
+          <button type="button" onclick="annexCAddRow('personal')" style="margin-top:6px;padding:4px 14px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;">+ Add Personal Property</button>
         </div>
         <div class="form-section-hd">2. LIABILITIES</div>
         <div class="form-section-body">
           <div class="saln-table-scroll">
-            <table class="saln-tbl">
-            <thead><tr><th>Description</th><th>Amount</th><th>Remarks</th></tr></thead>
-            <tbody>
-              <tr><td><input type="text" placeholder="e.g. Bank Loan" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 100000" aria-label="Amount" min="0" step="any"/></td><td><input type="text" placeholder="e.g. For car purchase" aria-label="Remarks"/></td></tr>
-              <tr><td><input type="text" placeholder="e.g. Credit Card" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 20000" aria-label="Amount" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Personal expenses" aria-label="Remarks"/></td></tr>
+            <table class="saln-tbl" style="width:100%;">
+            <thead><tr><th>Description</th><th>Amount</th><th>Remarks</th><th class="del-cell" style="border:none;background:transparent;"></th></tr></thead>
+            <tbody id="annexC-liab-tbody">
+              <tr><td><input type="text" placeholder="e.g. Bank Loan" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 100000" aria-label="Amount" min="0" step="any"/></td><td><input type="text" placeholder="e.g. For car purchase" aria-label="Remarks"/></td><td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td></tr>
+              <tr><td><input type="text" placeholder="e.g. Credit Card" aria-label="Description"/></td><td><input type="number" placeholder="e.g. 20000" aria-label="Amount" min="0" step="any"/></td><td><input type="text" placeholder="e.g. Personal expenses" aria-label="Remarks"/></td><td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td></tr>
             </tbody>
             </table>
           </div>
+          <button type="button" onclick="annexCAddRow('liab')" style="margin-top:6px;padding:4px 14px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;">+ Add Liability</button>
         </div>
         <div class="form-section-hd">3. BUSINESS INTERESTS AND FINANCIAL CONNECTIONS</div>
         <div class="form-section-body">
           <div class="saln-table-scroll">
-            <table class="saln-tbl">
+            <table class="saln-tbl" style="min-width:820px;">
             <thead style="background:#f1f5f9;">
               <tr>
                 <th style="min-width:200px;">NAME OF ENTITY/BUSINESS ENTERPRISE</th>
                 <th style="min-width:180px;">BUSINESS ADDRESS</th>
                 <th style="min-width:220px;">NATURE OF BUSINESS INTEREST &/OR FINANCIAL CONNECTION</th>
                 <th style="min-width:180px;">DATE OF ACQUISITION OF INTEREST OR CONNECTION</th>
+                <th class="del-cell" style="border:none;background:transparent;"></th>
               </tr>
             </thead>
-            <tbody>
+            <tbody id="annexC-biz-tbody">
               <tr>
                 <td><input type="text" placeholder="e.g. ABC Corp." aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. Manila" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. Shareholder" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. 2022-05-01" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
               <tr>
                 <td><input type="text" placeholder="e.g. XYZ Lending" aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. Tuguegarao" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. Investor" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="e.g. 2023-01-15" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
               <tr>
                 <td><input type="text" placeholder="" aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>
                 <td><input type="text" placeholder="" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>
+                <td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>
               </tr>
             </tbody>
             </table>
           </div>
+          <button type="button" onclick="annexCAddRow('biz')" style="margin-top:6px;padding:4px 14px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;">+ Add Business Interest</button>
         </div>
       </div>
       <div style="text-align:right;margin-top:20px;padding-bottom:30px;display:flex;gap:8px;justify-content:flex-end;">
@@ -3578,13 +3646,13 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
           <div><div style="font-size:1rem;font-weight:800;color:#fff;font-family:'Playfair Display',serif;">✅ Approve Leave</div><div style="font-size:.73rem;color:rgba(255,255,255,.65);margin-top:2px;">Confirm approval and forward to HR</div></div>
           <button onclick="document.getElementById('dhModalApprove').style.display='none';" style="width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.18);border:none;color:#fff;font-size:1rem;cursor:pointer;">✕</button>
         </div>
-        <div style="padding:24px 22px;text-align:center;">
-          <div style="font-size:2.4rem;margin-bottom:10px;">✅</div>
+        <div style="padding:20px 22px 10px;text-align:center;">
+          <div style="font-size:2.4rem;margin-bottom:8px;">✅</div>
           <h4 style="font-size:.95rem;font-weight:800;color:var(--g800);margin-bottom:6px;">Approve this leave request?</h4>
-          <p id="dhApproveText" style="font-size:.82rem;color:var(--g600);line-height:1.6;margin-bottom:12px;"></p>
-          <textarea id="dhApproveRemark" placeholder="Optional remarks for HR…" style="width:100%;padding:9px 12px;border:1.5px solid var(--g200);border-radius:9px;font-family:'Nunito',sans-serif;font-size:.84rem;resize:none;height:72px;outline:none;"></textarea>
+          <p id="dhApproveText" style="font-size:.82rem;color:var(--g600);line-height:1.6;margin-bottom:10px;"></p>
+          <textarea id="dhApproveRemark" placeholder="Optional remarks for HR…" style="width:100%;padding:9px 12px;border:1.5px solid var(--g200);border-radius:9px;font-family:'Nunito',sans-serif;font-size:.84rem;resize:none;height:68px;outline:none;"></textarea>
         </div>
-        <div style="display:flex;justify-content:flex-end;gap:10px;padding:12px 22px 16px;border-top:1px solid var(--g100);">
+        <div style="display:flex;justify-content:flex-end;gap:10px;padding:10px 22px 14px;border-top:1px solid var(--g100);">
           <button onclick="document.getElementById('dhModalApprove').style.display='none';" style="padding:9px 20px;border:1.5px solid var(--g200);background:#fff;border-radius:9px;font-family:'Nunito',sans-serif;font-size:.83rem;font-weight:700;cursor:pointer;">Cancel</button>
           <button id="dhApproveBtn" onclick="dhConfirmApprove()" style="padding:9px 22px;background:linear-gradient(135deg,#22c55e,#15803d);color:#fff;border:none;border-radius:9px;font-family:'Nunito',sans-serif;font-size:.83rem;font-weight:700;cursor:pointer;">✅ Yes, Approve</button>
         </div>
@@ -3597,13 +3665,13 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
           <div><div style="font-size:1rem;font-weight:800;color:#fff;font-family:'Playfair Display',serif;">✗ Deny Leave</div><div style="font-size:.73rem;color:rgba(255,255,255,.65);margin-top:2px;">Confirm denial of this request</div></div>
           <button onclick="document.getElementById('dhModalDeny').style.display='none';" style="width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.18);border:none;color:#fff;font-size:1rem;cursor:pointer;">✕</button>
         </div>
-        <div style="padding:24px 22px;text-align:center;">
-          <div style="font-size:2.4rem;margin-bottom:10px;">⚠️</div>
+        <div style="padding:20px 22px 10px;text-align:center;">
+          <div style="font-size:2.4rem;margin-bottom:8px;">⚠️</div>
           <h4 style="font-size:.95rem;font-weight:800;color:var(--g800);margin-bottom:6px;">Deny this leave request?</h4>
-          <p id="dhDenyText" style="font-size:.82rem;color:var(--g600);line-height:1.6;margin-bottom:12px;"></p>
-          <textarea id="dhDenyRemark" placeholder="Please state the reason for denial…" style="width:100%;padding:9px 12px;border:1.5px solid var(--g200);border-radius:9px;font-family:'Nunito',sans-serif;font-size:.84rem;resize:none;height:72px;outline:none;"></textarea>
+          <p id="dhDenyText" style="font-size:.82rem;color:var(--g600);line-height:1.6;margin-bottom:10px;"></p>
+          <textarea id="dhDenyRemark" placeholder="Please state the reason for denial…" style="width:100%;padding:9px 12px;border:1.5px solid var(--g200);border-radius:9px;font-family:'Nunito',sans-serif;font-size:.84rem;resize:none;height:68px;outline:none;"></textarea>
         </div>
-        <div style="display:flex;justify-content:flex-end;gap:10px;padding:12px 22px 16px;border-top:1px solid var(--g100);">
+        <div style="display:flex;justify-content:flex-end;gap:10px;padding:10px 22px 14px;border-top:1px solid var(--g100);">
           <button onclick="document.getElementById('dhModalDeny').style.display='none';" style="padding:9px 20px;border:1.5px solid var(--g200);background:#fff;border-radius:9px;font-family:'Nunito',sans-serif;font-size:.83rem;font-weight:700;cursor:pointer;">Cancel</button>
           <button id="dhDenyBtn" onclick="dhConfirmDeny()" style="padding:9px 22px;background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;border:none;border-radius:9px;font-family:'Nunito',sans-serif;font-size:.83rem;font-weight:700;cursor:pointer;">✗ Yes, Deny</button>
         </div>
@@ -3777,6 +3845,16 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
 
 <!-- ══ Shared Print Utilities (Official CS Form 212) ══ -->
 <script src="../config/print-utilities.js?v=<?= time(); ?>"></script>
+<?php
+$_epMayorRow   = null;
+try { $_epMayorRow = $pdo->query("SELECT first_name, last_name, position_title FROM employees WHERE is_mayor=1 AND employment_status='Active' LIMIT 1")->fetch(PDO::FETCH_ASSOC); } catch (Exception $_e) {}
+$_epMayorName  = $_epMayorRow ? strtoupper(trim($_epMayorRow['first_name'].' '.$_epMayorRow['last_name'])) : 'MIGUEL B. DECENA, JR.';
+$_epMayorTitle = $_epMayorRow ? ($_epMayorRow['position_title'] ?: 'Municipal Mayor') : 'Municipal Mayor';
+?>
+<script>
+var SR_MAYOR_NAME  = <?= json_encode($_epMayorName) ?>;
+var SR_MAYOR_TITLE = <?= json_encode($_epMayorTitle) ?>;
+</script>
 <script src="../config/service_record_print_template.js?v=1"></script>
 
 <script>
@@ -3875,6 +3953,9 @@ let docDebounce = null;
     // Poll leave requests immediately then every 30 seconds
     try { pollLeaveRequests(); } catch(e) { console.warn(e); }
     setInterval(function(){ try { pollLeaveRequests(); } catch(e){} }, 30000);
+    // Poll dept-head pending count badge immediately then every 30 seconds
+    try { updateDhBadge(); } catch(e) {}
+    setInterval(function(){ try { updateDhBadge(); } catch(e){} }, 30000);
 })();
 
 // ════════════════════════════════════════════════════════
@@ -4081,6 +4162,9 @@ async function loadDeptHeadLeaves(page) {
     document.getElementById('dh-sc-approved').textContent = approvedCount;
     document.getElementById('dh-sc-denied').textContent   = deniedCount;
     document.getElementById('dh-sc-total').textContent    = all.length;
+    // Update sidebar badge
+    const dhBadge = document.getElementById('dhPendBadge');
+    if (dhBadge) { dhBadge.textContent = pendingCount || ''; dhBadge.style.display = pendingCount ? 'inline-block' : 'none'; }
 
     // Pagination
     const total  = rows.length;
@@ -4231,6 +4315,20 @@ async function dhConfirmDeny() {
 
 function escapeHtml(str) {
   return String(str || '').replace(/[&<>"']/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
+}
+
+// Fetch and update the dept-head pending badge without rendering the table
+async function updateDhBadge() {
+  const badge = document.getElementById('dhPendBadge');
+  if (!badge) return;
+  try {
+    const j = await fetch('Employee_portal.php?action=dept_head_pending_leaves').then(r => r.json());
+    if (j.success) {
+      const count = (j.data || []).filter(r => r.status === 'Pending Dept Head').length;
+      badge.textContent = count || '';
+      badge.style.display = count ? 'inline-block' : 'none';
+    }
+  } catch(e) {}
 }
 
 // ════════════════════════════════════════════════════════
@@ -4454,7 +4552,7 @@ function buildAndPrintMySR(emp, records) {
       <div class="footer-cert">Issued in compliance with Executive Order No. 54 dated August 10, 1954 and in accordance with Circular No. 58, dated August 10, 1954 of the system.</div>
       <table class="sig-tbl"><tr>
         <td class="sig-left"><div class="sig-prep">Prepared by:</div><div class="sig-name">EMIROSE P. MADRIAGA</div><div class="sig-pos">HRMO III</div></td>
-        <td class="sig-right"><div class="sig-prep">Conforme:</div><div class="sig-name">MIGUEL B. DECENA, JR.</div><div class="sig-pos">Municipal Mayor</div></td>
+        <td class="sig-right"><div class="sig-prep">Conforme:</div><div class="sig-name">${(window.SR_MAYOR_NAME||'MIGUEL B. DECENA, JR.')}</div><div class="sig-pos">${(window.SR_MAYOR_TITLE||'Municipal Mayor')}</div></td>
       </tr></table>
       <div class="page-num">Page ${p+1} of ${totalPages}</div>
     </div>`;
@@ -4566,7 +4664,7 @@ async function pollEpNotifications() {
       } else {
         list.innerHTML = notifs.map(n => {
           const isRead = read.includes(n.nid);
-          return '<div class="np-item '+(isRead?'':' unread')+'" data-nid="'+n.nid+'" onclick="epNotifClick(\''  +n.nid+ '\',\''  +n.page+ '\',this)">'+
+          return '<div class="np-item '+(isRead?'':' unread')+'" data-nid="'+n.nid+'" data-dbid="'+(n.db_id||'')+'" onclick="epNotifClick(\''  +n.nid+ '\',\''  +n.page+ '\',this)">'+
             '<div class="np-ico" style="background:'+n.color+'22;">'+n.icon+'</div>'+
             '<div class="np-body"><div class="np-title">'+n.title+'</div>'+
             '<div class="np-text">'+n.body+'</div>'+
@@ -4586,9 +4684,9 @@ async function pollEpNotifications() {
 
 // ── Poll for latest leave requests/statuses every 30 seconds ───────────────
 async function pollLeaveRequests() {
-  // Only poll if the requests page is visible/active
-  const main = document.querySelector('.main');
-  if (!main || !main.innerHTML.includes('My Leave Requests')) return;
+  // Only poll if the requests page is currently active
+  const reqPage = document.getElementById('page-requests');
+  if (!reqPage || !reqPage.classList.contains('active')) return;
   try {
     // Use the same logic as loadRequests, but only update if on the requests page
     const res  = await fetch(`Employee_portal.php?action=requests&status=${curReqTab}`);
@@ -4655,6 +4753,14 @@ function clearEpNotif() {
   const read = getEpReadNotifs();
   ids.forEach(id => { if (id && !read.includes(id)) read.push(id); });
   saveEpReadNotifs(read);
+  // Mark any DB-backed (leave_notifications) items as read server-side
+  document.querySelectorAll('.np-item[data-dbid]').forEach(el => {
+    const dbid = el.getAttribute('data-dbid');
+    if (dbid) {
+      fetch('Employee_portal.php', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body: 'action=mark_notif_read&notification_id=' + encodeURIComponent(dbid) }).catch(()=>{});
+    }
+  });
   document.querySelectorAll('.np-item.unread').forEach(el => el.classList.remove('unread'));
   const cnt = document.getElementById('epNotifCnt');
   if (cnt) { cnt.classList.remove('show'); cnt.textContent = ''; }
@@ -4662,10 +4768,16 @@ function clearEpNotif() {
   if (p) p.classList.remove('open');
 }
 function epNotifClick(nid, page, el) {
-  // Mark this one as read
+  // Mark this one as read in localStorage
   const read = getEpReadNotifs();
   if (nid && !read.includes(nid)) { read.push(nid); saveEpReadNotifs(read); }
   el.classList.remove('unread');
+  // Mark as read server-side if it came from leave_notifications DB
+  const dbid = el.getAttribute('data-dbid');
+  if (dbid) {
+    fetch('Employee_portal.php', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body: 'action=mark_notif_read&notification_id=' + encodeURIComponent(dbid) }).catch(()=>{});
+  }
   applyEpReadState();
   if (page) {
     const btn = document.querySelector(`.sb-item[onclick*="'${page}'"]`);
@@ -5255,9 +5367,19 @@ function calcDays() {
   var f = document.getElementById('flFrom').value;
   var t = document.getElementById('flTo').value;
   if (f && t) {
-    var diff = Math.max(0, Math.round((new Date(t) - new Date(f)) / 864e5) + 1);
-    document.getElementById('daysNum').textContent = diff;
-    renderCalPreview(f, t, diff);
+    // Count only weekdays (Mon–Fri); weekends are excluded from leave day counts
+    var start = new Date(f + 'T00:00:00');
+    var end   = new Date(t + 'T00:00:00');
+    var days  = 0;
+    var cur   = new Date(start);
+    while (cur <= end) {
+      var dow = cur.getDay(); // 0=Sun, 6=Sat
+      if (dow !== 0 && dow !== 6) days++;
+      cur.setDate(cur.getDate() + 1);
+    }
+    days = Math.max(0, days);
+    document.getElementById('daysNum').textContent = days;
+    renderCalPreview(f, t, days);
   } else {
     document.getElementById('daysNum').textContent = '0';
     renderCalPreview(null, null, 0);
@@ -6731,6 +6853,104 @@ function printSALN() {
 }
 
 // ════════════════════════════════════════════════════════
+//  ANNEX B / C — Row Add / Remove
+// ════════════════════════════════════════════════════════
+function annexBRemoveRow(btn) {
+  var tbody = btn.closest('tbody');
+  var rows = tbody.querySelectorAll('tr');
+  if (rows.length <= 1) { showToast('At least one row is required.', 'info'); return; }
+  btn.closest('tr').remove();
+}
+
+function annexBAddRow(type) {
+  var tbody, html;
+  var rmBtn = '<td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>';
+  if (type === 'real') {
+    tbody = document.getElementById('annexB-real-tbody');
+    html = '<tr>'
+      + '<td><input type="text" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>'
+      + '<td><input type="text" aria-label="Kind" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>'
+      + '<td><input type="text" aria-label="Exact Location" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>'
+      + '<td><input type="number" aria-label="Assessed Value" min="0" step="any" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>'
+      + '<td><input type="number" aria-label="Current Fair Market Value" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>'
+      + '<td><input type="number" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>'
+      + '<td><input type="text" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>'
+      + '<td><input type="number" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>'
+      + rmBtn + '</tr>';
+  } else if (type === 'personal') {
+    tbody = document.getElementById('annexB-personal-tbody');
+    html = '<tr>'
+      + '<td><input type="text" aria-label="Description"/></td>'
+      + '<td><input type="number" aria-label="Value" min="0" step="any"/></td>'
+      + '<td><input type="text" aria-label="Remarks"/></td>'
+      + rmBtn + '</tr>';
+  } else if (type === 'liab') {
+    tbody = document.getElementById('annexB-liab-tbody');
+    html = '<tr>'
+      + '<td><input type="text" aria-label="Description"/></td>'
+      + '<td><input type="number" aria-label="Amount" min="0" step="any"/></td>'
+      + '<td><input type="text" aria-label="Remarks"/></td>'
+      + rmBtn + '</tr>';
+  } else if (type === 'biz') {
+    tbody = document.getElementById('annexB-biz-tbody');
+    html = '<tr>'
+      + '<td><input type="text" aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>'
+      + '<td><input type="text" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>'
+      + '<td><input type="text" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>'
+      + '<td><input type="text" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>'
+      + rmBtn + '</tr>';
+  }
+  if (tbody && html) {
+    tbody.insertAdjacentHTML('beforeend', html);
+    tbody.lastElementChild.querySelector('input').focus();
+  }
+}
+
+function annexCAddRow(type) {
+  var tbody, html;
+  var rmBtn = '<td class="del-cell"><button type="button" class="del-btn" onclick="annexBRemoveRow(this)" title="Remove row">&#x2715;</button></td>';
+  if (type === 'real') {
+    tbody = document.getElementById('annexC-real-tbody');
+    html = '<tr>'
+      + '<td><input type="text" aria-label="Description" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>'
+      + '<td><input type="text" aria-label="Kind" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>'
+      + '<td><input type="text" aria-label="Exact Location" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>'
+      + '<td><input type="number" aria-label="Assessed Value" min="0" step="any" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>'
+      + '<td><input type="number" aria-label="Current Fair Market Value" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>'
+      + '<td><input type="number" aria-label="Acquisition Year" min="1900" max="2100" style="width:100%;min-width:90px;box-sizing:border-box;"/></td>'
+      + '<td><input type="text" aria-label="Acquisition Mode" style="width:100%;min-width:100px;box-sizing:border-box;"/></td>'
+      + '<td><input type="number" aria-label="Acquisition Cost" min="0" step="any" style="width:100%;min-width:120px;box-sizing:border-box;"/></td>'
+      + rmBtn + '</tr>';
+  } else if (type === 'personal') {
+    tbody = document.getElementById('annexC-personal-tbody');
+    html = '<tr>'
+      + '<td><input type="text" aria-label="Description"/></td>'
+      + '<td><input type="number" aria-label="Value" min="0" step="any"/></td>'
+      + '<td><input type="text" aria-label="Remarks"/></td>'
+      + rmBtn + '</tr>';
+  } else if (type === 'liab') {
+    tbody = document.getElementById('annexC-liab-tbody');
+    html = '<tr>'
+      + '<td><input type="text" aria-label="Description"/></td>'
+      + '<td><input type="number" aria-label="Amount" min="0" step="any"/></td>'
+      + '<td><input type="text" aria-label="Remarks"/></td>'
+      + rmBtn + '</tr>';
+  } else if (type === 'biz') {
+    tbody = document.getElementById('annexC-biz-tbody');
+    html = '<tr>'
+      + '<td><input type="text" aria-label="Name of Entity/Business Enterprise" style="width:100%;min-width:180px;box-sizing:border-box;"/></td>'
+      + '<td><input type="text" aria-label="Business Address" style="width:100%;min-width:150px;box-sizing:border-box;"/></td>'
+      + '<td><input type="text" aria-label="Nature of Business Interest" style="width:100%;min-width:200px;box-sizing:border-box;"/></td>'
+      + '<td><input type="text" aria-label="Date of Acquisition" style="width:100%;min-width:140px;box-sizing:border-box;"/></td>'
+      + rmBtn + '</tr>';
+  }
+  if (tbody && html) {
+    tbody.insertAdjacentHTML('beforeend', html);
+    tbody.lastElementChild.querySelector('input').focus();
+  }
+}
+
+// ════════════════════════════════════════════════════════
 //  ANNEX B / C — Save & Print
 // ════════════════════════════════════════════════════════
 function saveAnnex(which) {
@@ -7622,7 +7842,7 @@ function salnEnsureTable(containerId, cols) {
     cols.forEach(function(c) {
       var th = document.createElement('th');
       th.textContent = c.label;
-      if (c.w) th.style.width = c.w;
+      if (c.w) { th.style.minWidth = c.w; th.style.whiteSpace = 'nowrap'; }
       tr.appendChild(th);
     });
     var thDel = document.createElement('th'); thDel.className='del-cell';
@@ -7631,7 +7851,17 @@ function salnEnsureTable(containerId, cols) {
     tbl.appendChild(thead);
     var tbody = document.createElement('tbody');
     tbl.appendChild(tbody);
-    container.insertBefore(tbl, container.firstChild);
+    // Set explicit width/min-width so scroll container knows when to show scrollbar
+    var totalW = cols.reduce(function(s,c){ return s + (c.w ? parseInt(c.w) : 120); }, 0) + 40;
+    if (totalW > 700) {
+      tbl.style.minWidth = totalW + 'px';
+    } else {
+      tbl.style.width = '100%';
+    }
+    var scroll = document.createElement('div');
+    scroll.className = 'saln-table-scroll';
+    scroll.appendChild(tbl);
+    container.insertBefore(scroll, container.firstChild);
   }
   return tbl.querySelector('tbody');
 }
@@ -7653,6 +7883,7 @@ function salnAddRow(containerId, cols, values) {
     }
     inp.setAttribute('data-field', c.key);
     if (values && values[c.key] !== undefined) inp.value = values[c.key];
+    if (c.w) { td.style.minWidth = c.w; inp.style.width = '100%'; inp.style.boxSizing = 'border-box'; }
     td.appendChild(inp);
     tr.appendChild(td);
   });
@@ -7671,44 +7902,44 @@ function addSalnChild(v)  {
 }
 function addReal(v) {
   salnAddRow('saln_real_list', [
-    {key:'description',    label:'Description'},
-    {key:'kind',           label:'Kind'},
-    {key:'location',       label:'Exact Location'},
-    {key:'assessed_value', label:'Assessed Value (₱)', type:'number'},
-    {key:'market_value',   label:'Market Value (₱)', type:'number'},
-    {key:'acq_year',       label:'Acq. Year', type:'number', w:'70px'},
-    {key:'acq_mode',       label:'Mode', options:['Bought','Inherited','Gift','Others'], w:'90px'},
-    {key:'acq_cost',       label:'Acq. Cost (₱)', type:'number'},
+    {key:'description',    label:'Description',              w:'160px'},
+    {key:'kind',           label:'Kind',                     w:'110px'},
+    {key:'location',       label:'Exact Location',           w:'150px'},
+    {key:'assessed_value', label:'Assessed Value (₱)',       type:'number', w:'150px'},
+    {key:'market_value',   label:'Market Value (₱)',         type:'number', w:'150px'},
+    {key:'acq_year',       label:'Acq. Year',                type:'number', w:'90px'},
+    {key:'acq_mode',       label:'Mode', options:['Bought','Inherited','Gift','Others'], w:'110px'},
+    {key:'acq_cost',       label:'Acq. Cost (₱)',            type:'number', w:'140px'},
   ], v);
 }
 function addPersonal(v) {
   salnAddRow('saln_personal_list', [
-    {key:'description', label:'Description'},
-    {key:'acq_year',    label:'Acquisition Year', type:'number', w:'130px'},
-    {key:'acq_cost',    label:'Acquisition Cost / Amount (₱)', type:'number', w:'180px'},
+    {key:'description', label:'Description',                    w:'200px'},
+    {key:'acq_year',    label:'Acquisition Year',  type:'number', w:'130px'},
+    {key:'acq_cost',    label:'Acquisition Cost / Amount (₱)', type:'number', w:'220px'},
   ], v);
 }
 function addLiab(v) {
   salnAddRow('saln_liab_list', [
-    {key:'nature',   label:'Nature'},
-    {key:'creditor', label:'Name of Creditor'},
-    {key:'balance',  label:'Outstanding Balance (₱)', type:'number', w:'170px'},
+    {key:'nature',   label:'Nature',            w:'160px'},
+    {key:'creditor', label:'Name of Creditor',  w:'200px'},
+    {key:'balance',  label:'Outstanding Balance (₱)', type:'number', w:'220px'},
   ], v);
 }
 function addBiz(v) {
   salnAddRow('saln_biz_list', [
-    {key:'entity_name',   label:'Name of Entity / Business Enterprise'},
-    {key:'biz_address',   label:'Business Address'},
-    {key:'nature',        label:'Nature of Interest / Connection'},
-    {key:'date_acquired', label:'Date Acquired', type:'date', w:'140px'},
+    {key:'entity_name',   label:'Name of Entity / Business Enterprise', w:'220px'},
+    {key:'biz_address',   label:'Business Address',                     w:'180px'},
+    {key:'nature',        label:'Nature of Interest / Connection',      w:'220px'},
+    {key:'date_acquired', label:'Date Acquired', type:'date',           w:'150px'},
   ], v);
 }
 function addRel(v) {
   salnAddRow('saln_rel_list', [
-    {key:'name',           label:'Name of Relative'},
-    {key:'relationship',   label:'Relationship', w:'120px'},
-    {key:'position',       label:'Position'},
-    {key:'agency_address', label:'Agency / Office & Address'},
+    {key:'name',           label:'Name of Relative',          w:'180px'},
+    {key:'relationship',   label:'Relationship',              w:'130px'},
+    {key:'position',       label:'Position',                  w:'160px'},
+    {key:'agency_address', label:'Agency / Office & Address', w:'220px'},
   ], v);
 }
 
@@ -8189,7 +8420,7 @@ function addRel(v) {
     const btn=document.getElementById('cwSendBtn');btn.disabled=true;
     const sentMsg=msg;inp.value='';cwAutoResize(inp);
     try{
-      const body=new FormData();body.append('action','send');body.append('to',cwActive.user_id);body.append('message',sentMsg);
+      const body=new FormData();body.append('action','send');body.append('to',cwActive.user_id);body.append('message',sentMsg);body.append('csrf_token',CSRF_TOKEN);
       const r=await fetch(CW_API,{method:'POST',body});const j=await r.json();
       if(j.success){cwAppendMsgs([j.data]);cwLastTime=j.data.message_id;cwLoadContacts();}
     }catch(e){}
@@ -8213,7 +8444,7 @@ function addRel(v) {
     cwSendingFlag=true;
     const btn=document.getElementById('cwSendBtn');btn.disabled=true;
     try{
-      const body=new FormData();body.append('action','edit');body.append('message_id',msgId);body.append('message',newMsg);
+      const body=new FormData();body.append('action','edit');body.append('message_id',msgId);body.append('message',newMsg);body.append('csrf_token',CSRF_TOKEN);
       const r=await fetch(CW_API,{method:'POST',body});const j=await r.json();
       if(j.success){
         const row=document.querySelector(`.cw-mrow[data-msgid="${msgId}"]`);
@@ -8234,7 +8465,7 @@ function addRel(v) {
 
   async function cwUnsend(msgId){
     if(!confirm('Unsend this message? It will be removed for everyone.'))return;
-    const body=new FormData();body.append('action','unsend');body.append('message_id',msgId);
+    const body=new FormData();body.append('action','unsend');body.append('message_id',msgId);body.append('csrf_token',CSRF_TOKEN);
     try{
       const r=await fetch(CW_API,{method:'POST',body});const j=await r.json();
       if(j.success){
