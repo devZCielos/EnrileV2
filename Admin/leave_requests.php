@@ -137,10 +137,14 @@ if ($action) {
                        lr.reviewed_by, lr.reviewed_at,
                        e.employee_id, e.first_name, e.last_name, e.position_title,
                        lt.leave_type_id, lt.name AS leave_type,
+                       COALESCE(lb.remaining_days, 0) AS leave_balance,
                        d.name AS department
                   FROM leave_requests lr
                   JOIN employees   e  ON lr.employee_id   = e.employee_id
                   JOIN leave_types lt ON lr.leave_type_id = lt.leave_type_id
+                  LEFT JOIN leave_balances lb ON lb.employee_id = lr.employee_id
+                    AND lb.leave_type_id = lr.leave_type_id
+                    AND lb.calendar_year = YEAR(lr.filed_at)
                   LEFT JOIN departments d ON e.department_id = d.department_id
                   $wSql
                   $orderBy
@@ -184,7 +188,7 @@ if ($action) {
                         lt.name AS leave_type,
                         lt.leave_type_id,
                         COALESCE(d.name, '')          AS department,
-                        COALESCE(d.head_name, '')     AS dept_head_name,
+                        COALESCE(CONCAT(dh.first_name, ' ', dh.last_name), d.head_name, '') AS dept_head_name,
                         COALESCE(lb.total_credits, 0) AS vl_total,
                         COALESCE(lb.used_days, 0)     AS vl_used,
                         COALESCE(lb.remaining_days, 0)AS vl_remaining
@@ -192,6 +196,7 @@ if ($action) {
                       JOIN employees   e  ON lr.employee_id   = e.employee_id
                       JOIN leave_types lt ON lr.leave_type_id = lt.leave_type_id
                       LEFT JOIN departments d   ON e.department_id    = d.department_id
+                      LEFT JOIN employees dh     ON dh.employee_id     = d.head_employee_id
                       LEFT JOIN leave_balances lb
                         ON lb.employee_id   = lr.employee_id
                        AND lb.leave_type_id = lr.leave_type_id
@@ -792,6 +797,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
               <tr>
                 <th onclick="sortBy('name')">Employee ↕</th>
                 <th onclick="sortBy('type')">Leave Type ↕</th>
+                <th>Leave Balance</th>
                 <th onclick="sortBy('from')">Date From ↕</th>
                 <th onclick="sortBy('to')">Date To ↕</th>
                 <th onclick="sortBy('days')">Days ↕</th>
@@ -802,7 +808,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
               </tr>
             </thead>
             <tbody id="leaveBody">
-              <tr><td colspan="9" style="text-align:center;padding:40px;color:var(--gray-400);">Loading…</td></tr>
+              <tr><td colspan="10" style="text-align:center;padding:40px;color:var(--gray-400);">Loading…</td></tr>
             </tbody>
           </table>
           <div class="empty-state" id="emptyState" style="display:none;">
@@ -1285,6 +1291,7 @@ function renderTable(rows){
     return `<tr>
       <td><div class="emp-cell"><div class="emp-avatar" style="background:${c};">${av}</div><div><div class="emp-name">${name}</div><div class="emp-dept">${r.department||'—'}</div></div></div></td>
       <td>${typeBadge(r.leave_type)}</td>
+      <td><span class="days-pill">${parseFloat(r.leave_balance || 0).toFixed(2)} days</span></td>
       <td style="font-size:0.80rem;color:var(--gray-600);">${fmt(r.date_from)}</td>
       <td style="font-size:0.80rem;color:var(--gray-600);">${fmt(r.date_to)}</td>
       <td><span class="days-pill">${r.days_requested} day${r.days_requested!=1?'s':''}</span></td>

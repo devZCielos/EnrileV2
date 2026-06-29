@@ -142,10 +142,16 @@ if ($action) {
             }
             // Get all relevant leave requests for employees in this department (pending, approved, denied)
             $query = "
-              SELECT lr.*, lt.name AS type_name, e.first_name, e.last_name
+              SELECT lr.*, lt.name AS type_name, e.first_name, e.last_name,
+                     d.name AS department,
+                     COALESCE(lb.remaining_days, 0) AS leave_balance
               FROM leave_requests lr
               JOIN employees e ON e.employee_id = lr.employee_id
               JOIN leave_types lt ON lt.leave_type_id = lr.leave_type_id
+              LEFT JOIN departments d ON d.department_id = e.department_id
+              LEFT JOIN leave_balances lb ON lb.employee_id = lr.employee_id
+                AND lb.leave_type_id = lr.leave_type_id
+                AND lb.calendar_year = YEAR(lr.filed_at)
               WHERE e.department_id = ?
                 AND lr.status IN ('Pending Dept Head', 'Pending HR', 'Denied by Dept Head')
               ORDER BY lr.filed_at ASC
@@ -3660,6 +3666,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
             <tr style="background:var(--g50);">
               <th style="padding:11px 16px;text-align:left;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);white-space:nowrap;">Employee</th>
               <th style="padding:11px 16px;text-align:left;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);white-space:nowrap;">Leave Type</th>
+              <th style="padding:11px 16px;text-align:left;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);white-space:nowrap;">Leave Balance</th>
               <th style="padding:11px 16px;text-align:left;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);white-space:nowrap;">Date From</th>
               <th style="padding:11px 16px;text-align:left;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);white-space:nowrap;">Date To</th>
               <th style="padding:11px 16px;text-align:left;font-size:.69rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);white-space:nowrap;">Days</th>
@@ -3669,7 +3676,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
             </tr>
           </thead>
           <tbody id="dhTableBody">
-            <tr><td colspan="8" style="text-align:center;padding:40px;color:var(--g400);">Loading…</td></tr>
+            <tr><td colspan="9" style="text-align:center;padding:40px;color:var(--g400);">Loading…</td></tr>
           </tbody>
         </table>
         <div id="dhEmptyState" style="display:none;padding:52px 20px;text-align:center;">
@@ -4156,13 +4163,13 @@ async function loadDeptHeadLeaves(page) {
   if (page) dhCurrentPage = page;
   const tbody = document.getElementById('dhTableBody');
   const empty = document.getElementById('dhEmptyState');
-  tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--g400);">Loading…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--g400);">Loading…</td></tr>';
   empty.style.display = 'none';
 
   try {
     const res = await fetch('Employee_portal.php?action=dept_head_pending_leaves').then(r => r.json());
     if (!res.success) {
-      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:40px;color:#ef4444;">${res.message||'Failed to load.'}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:40px;color:#ef4444;">${res.message||'Failed to load.'}</td></tr>`;
       return;
     }
 
@@ -4286,6 +4293,9 @@ async function loadDeptHeadLeaves(page) {
         <td style="padding:13px 16px;border-bottom:1px solid var(--g100);vertical-align:middle;">
           <span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;font-size:.70rem;font-weight:700;background:${tc}22;color:${tc};">${r.type_name}</span>
         </td>
+        <td style="padding:13px 16px;border-bottom:1px solid var(--g100);vertical-align:middle;white-space:nowrap;">
+          <span style="display:inline-block;padding:3px 10px;background:var(--g100);border-radius:20px;font-size:.72rem;font-weight:800;color:var(--g600);">${parseFloat(r.leave_balance || 0).toFixed(2)} days</span>
+        </td>
         <td style="padding:13px 16px;border-bottom:1px solid var(--g100);font-size:.80rem;color:var(--g600);vertical-align:middle;white-space:nowrap;">${fmtD(r.date_from)}</td>
         <td style="padding:13px 16px;border-bottom:1px solid var(--g100);font-size:.80rem;color:var(--g600);vertical-align:middle;white-space:nowrap;">${fmtD(r.date_to)}</td>
         <td style="padding:13px 16px;border-bottom:1px solid var(--g100);vertical-align:middle;">
@@ -4302,7 +4312,7 @@ async function loadDeptHeadLeaves(page) {
       </tr>`;
     }).join('');
   } catch(e) {
-    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:40px;color:#ef4444;">Network error loading leave requests.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:40px;color:#ef4444;">Network error loading leave requests.</td></tr>`;
   }
 }
 

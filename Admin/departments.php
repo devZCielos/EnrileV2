@@ -50,7 +50,7 @@ if ($action) {
 
                 $stmt = $pdo->prepare("
                     SELECT d.department_id, d.name, d.head_name, d.description,
-                           d.icon, d.color, d.employee_count, d.is_active,
+                         d.head_employee_id, d.icon, d.color, d.employee_count, d.is_active,
                            COUNT(e.employee_id) AS actual_count
                     FROM   departments d
                     LEFT JOIN employees e ON e.department_id = d.department_id
@@ -134,7 +134,8 @@ if ($action) {
                     'description'      => trim($_POST['description'] ?? ''),
                     'icon'             => $safeIcon,
                     'color'            => $safeColor,
-                    'employee_count'   => max(0, (int)($_POST['employee_count'] ?? 0)),
+                  // Auto-sync employee count from actual employee assignments.
+                  'employee_count'   => 0,
                     'is_active'        => 1,
                 ];
 
@@ -152,6 +153,10 @@ if ($action) {
                 }
 
                 if ($id) {
+                  $countStmt = $pdo->prepare("SELECT COUNT(*) FROM employees WHERE department_id = ?");
+                  $countStmt->execute([$id]);
+                  $fields['employee_count'] = (int)$countStmt->fetchColumn();
+
                     // UPDATE
                     $set  = implode(', ', array_map(fn($k) => "$k = ?", array_keys($fields)));
                     $stmt = $pdo->prepare("UPDATE departments SET $set WHERE department_id = ?");
@@ -599,8 +604,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         </div>
 
         <div class="form-group">
-          <label>Number of Employees</label>
-          <input type="number" id="fCount" min="0" placeholder="e.g. 5"/>
+          <label>Number of Employees (Auto-counted)</label>
+          <input type="number" id="fCount" min="0" readonly style="background:var(--gray-50);" placeholder="Auto from assigned employees"/>
         </div>
 
         <div class="form-group">
@@ -717,7 +722,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
   function renderFilteredDepts() {
     let list = allDepts.slice();
     if (activeFilter === 'employees') {
-      list = list.filter(d => ((parseInt(d.actual_count, 10) || parseInt(d.employee_count, 10) || 0) > 0));
+      list = list.filter(d => ((parseInt(d.actual_count, 10) || 0) > 0));
     }
     if (activeFilter === 'heads') {
       list = list.filter(d => {
@@ -760,7 +765,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
         return `<div class="emp-avatar-sm" style="background:${avatarColor(name)};" title="${name}">${initials}</div>`;
       }).join('') + (more > 0 ? `<div class="emp-more">+${more}</div>` : '');
 
-      const empCount = d.actual_count > 0 ? d.actual_count : (d.employee_count || 0);
+      const empCount = parseInt(d.actual_count, 10) || 0;
 
       return `
         <div class="dept-card" style="animation-delay:${i*0.06}s;">
@@ -861,7 +866,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     document.getElementById('fId').value    = d.department_id;
     document.getElementById('fName').value  = d.name        || '';
     document.getElementById('fDesc').value  = d.description || '';
-    document.getElementById('fCount').value = d.employee_count || 0;
+    document.getElementById('fCount').value = d.actual_count || 0;
     document.getElementById('fName').classList.remove('err');
     document.getElementById('fHead').classList.remove('err');
     selIcon  = d.icon  || '🏢';
@@ -892,7 +897,6 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     body.append('name',              name);
     body.append('head_employee_id',  headId);
     body.append('description',       document.getElementById('fDesc').value.trim());
-    body.append('employee_count',    document.getElementById('fCount').value || 0);
     body.append('icon',              selIcon);
     body.append('color',             selColor);
 
