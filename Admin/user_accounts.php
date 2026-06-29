@@ -759,7 +759,6 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           <option value="1">Active</option>
           <option value="0">Inactive</option>
         </select>
-        <button class="add-btn" onclick="openAdd()">➕ Add Account</button>
       </div>
 
       <!-- TABLE -->

@@ -100,7 +100,7 @@ try {
             if(!$with){echo json_encode(['success'=>false,'message'=>'Missing contact.']);break;}
             $params=[$me,$with,$with,$me]; $sinceSQL='';
             if($since){$sinceSQL='AND message_id > ?';$params[]=$since;}
-            $rows=$pdo->prepare("SELECT message_id,sender_id,receiver_id,message,is_read,sent_at FROM chat_messages WHERE((sender_id=? AND receiver_id=?)OR(sender_id=? AND receiver_id=?)) $sinceSQL ORDER BY sent_at ASC LIMIT 300");
+            $rows=$pdo->prepare("SELECT message_id,sender_id,receiver_id,message,is_read,is_unsent,is_edited,sent_at FROM chat_messages WHERE((sender_id=? AND receiver_id=?)OR(sender_id=? AND receiver_id=?)) $sinceSQL ORDER BY sent_at ASC LIMIT 300");
             $rows->execute($params);
             $pdo->prepare("UPDATE chat_messages SET is_read=1 WHERE sender_id=? AND receiver_id=? AND is_read=0")->execute([$with,$me]);
             echo json_encode(['success'=>true,'data'=>$rows->fetchAll(PDO::FETCH_ASSOC),'server_time'=>date('Y-m-d H:i:s')]);

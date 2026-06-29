@@ -73,8 +73,10 @@ function padArray(arr, minLength) {
 //  Matches the official CSC Excel form layout exactly
 //  IMPROVED VERSION with Enhanced Page 4
 // ============================================================
-function buildPDSPrintHTML(d, empRow) {
+function buildPDSPrintHTML(d, empRow, opts) {
   'use strict';
+
+  const fitModeEnabled = !(opts && typeof opts === 'object' && opts.fitMode === false);
 
   // ── helpers ────────────────────────────────────────────────
   const sj  = s => { try { return s ? JSON.parse(s) : {}; } catch(e) { return {}; } };
@@ -141,8 +143,54 @@ function buildPDSPrintHTML(d, empRow) {
   const CSS = `
     *{box-sizing:border-box;margin:0;padding:0;}
     body{font-family:"Arial Narrow",Arial,sans-serif;font-size:7.5pt;color:#000;background:#fff;}
-    @page{size:A4 portrait;margin:0.9in 0.3in 0.3in 0.4in;}
-    @media print{body{margin:0;padding:0;}.pg{page-break-after:always;page-break-inside:avoid;}.pg:last-child{page-break-after:avoid;}}
+    @page{size:8.5in 13in;margin:0.15in;}
+    @media print{
+      html,body{width:8.5in;margin:0;padding:0;}
+      body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+      .pg{
+        width:100%;
+        margin:0;
+        page-break-after:always;
+        break-after:page;
+        page-break-inside:avoid;
+        break-inside:avoid-page;
+      }
+      .pg:last-child{page-break-after:avoid;break-after:auto;}
+
+      /* Dedicated print-fit mode for PDS preview/printing stability */
+      body.pds-fit-mode{font-size:8.2pt;}
+      body.pds-fit-mode .pg{padding:0.01in 0.01in 0 0.01in;}
+      body.pds-fit-mode td,
+      body.pds-fit-mode th{padding:1pt 2pt;line-height:1.1;}
+      body.pds-fit-mode .hdr{font-size:6.3pt;}
+      body.pds-fit-mode .sec{font-size:8pt;}
+      body.pds-fit-mode .pg-foot{font-size:5pt;margin-top:0.5pt;}
+      body.pds-fit-mode table{margin-top:0 !important;margin-bottom:0 !important;}
+
+      /* Page 1 normalization: match short rows to the same cell feel as name rows */
+      body.pds-fit-mode .pg.page1 tr[style*="height:13pt"],
+      body.pds-fit-mode .pg.page1 tr[style*="height:14pt"],
+      body.pds-fit-mode .pg.page1 tr[style*="height:15pt"],
+      body.pds-fit-mode .pg.page1 tr[style*="height:20pt"],
+      body.pds-fit-mode .pg.page1 tr[style*="height:21pt"]{
+        height:20pt !important;
+      }
+      body.pds-fit-mode .pg.page1 td,
+      body.pds-fit-mode .pg.page1 th{
+        vertical-align:middle !important;
+      }
+
+      /* Page 2 normalization: keep dense body rows visually consistent and on one page */
+      body.pds-fit-mode .pg.page2 tr[style*="height:16pt"],
+      body.pds-fit-mode .pg.page2 tr[style*="height:18pt"]{
+        height:20pt !important;
+      }
+
+      /* Page 3 normalization: same fit strategy as page 2 */
+      body.pds-fit-mode .pg.page3 tr[style*="height:16pt"]{
+        height:20pt !important;
+      }
+    }
     table{border-collapse:collapse;table-layout:fixed;width:100%;}
     td,th{overflow:hidden;font-size:7pt;vertical-align:middle;padding:1pt 2pt;}
     .all{border:0.5pt solid #000;}
@@ -174,7 +222,7 @@ function buildPDSPrintHTML(d, empRow) {
       const displayLvl = lvl === 'Graduate Studies' ? `GRADUATE<br>STUDIES` :
                          lvl === 'Vocational/Trade Course' ? `VOCATIONAL /<br>TRADE COURSE` :
                          lvl.toUpperCase();
-      return `<tr style="height:14pt;">
+      return `<tr style="height:13pt;">
         <td class="all" style="font-size:5.5pt;font-weight:700;vertical-align:middle;padding:0 1pt;text-align:center;">${displayLvl}</td>
         <td class="all" style="font-size:6.5pt;vertical-align:middle;padding:0 1pt;">${esc(e.school)}&nbsp;</td>
         <td class="all" style="font-size:6.5pt;vertical-align:middle;padding:0 1pt;">${esc(e.degree)}&nbsp;</td>
@@ -193,7 +241,7 @@ function buildPDSPrintHTML(d, empRow) {
       <td class="all" style="text-align:center;font-size:6.5pt;padding:0 1pt;width:38%;">${esc(ch.dob ? fmtD(ch.dob) : '')}&nbsp;</td>
     </tr>`).join('');
 
-    return `<div class="pg">
+    return `<div class="pg page1">
 <!-- ── HEADER ── -->
 <table style="margin-bottom:0;border-collapse:collapse;">
   <tr>
@@ -557,10 +605,10 @@ function buildPDSPrintHTML(d, empRow) {
 
   // ── PAGE 2 — Civil Service Eligibility + Work Experience ───
   const PAGE2 = () => {
-    const csPad = pad(cs, 8);
+    const csPad = pad(cs, 9);
     // Excel Page 2: Work Experience has NO monthly salary / salary grade columns
     // Columns: From | To | Position Title | Dept/Agency | Status of Appointment | Gov't Service Y/N
-    const wePad = pad(we, 28);
+    const wePad = pad(we, 29);
 
     const csRows = csPad.map(e => `<tr style="height:18pt;">
       <td class="all" style="font-size:6.5pt;padding:1pt 2pt;">${esc(e.eligibility)}&nbsp;</td>
@@ -580,7 +628,7 @@ function buildPDSPrintHTML(d, empRow) {
       <td class="all" style="width:8%;text-align:center;font-size:6.5pt;">${esc(e.govt_service)}&nbsp;</td>
     </tr>`).join('');
 
-    return `<div class="pg">
+    return `<div class="pg page2">
 <table style="margin-bottom:0;"><tr><td class="sec" style="padding:1pt 4pt;font-style:italic;">IV. CIVIL SERVICE ELIGIBILITY</td></tr></table>
 <table style="margin-bottom:0;">
   <thead>
@@ -637,8 +685,8 @@ function buildPDSPrintHTML(d, empRow) {
 
   // ── PAGE 3 — Voluntary Work + L&D + Other Info ────────────
   const PAGE3 = () => {
-    const vwPad = pad(vw, 10);
-    const trPad = pad(tr, 20);
+    const vwPad = pad(vw, 11);
+    const trPad = pad(tr, 17);
 
     const vwRows = vwPad.map(e => `<tr style="height:16pt;">
       <td class="all" style="width:38%;font-size:6.5pt;">${esc(e.org_name)}&nbsp;</td>
@@ -657,7 +705,7 @@ function buildPDSPrintHTML(d, empRow) {
       <td class="all" style="width:22%;font-size:6.5pt;">${esc(e.conducted_by)}&nbsp;</td>
     </tr>`).join('');
 
-    const SKILL_ROWS = 7;
+    const SKILL_ROWS = 9;
     const skillsPad    = pad(skills.map(s=>({v:s})), SKILL_ROWS);
     const distinctPad  = pad(distinctions.map(s=>({v:s})), SKILL_ROWS);
     const memberPad    = pad(memberships.map(s=>({v:s})), SKILL_ROWS);
@@ -667,7 +715,7 @@ function buildPDSPrintHTML(d, empRow) {
       <td class="all" style="font-size:6.5pt;">${esc(memberPad[i] ? memberPad[i].v : '')}&nbsp;</td>
     </tr>`).join('');
 
-    return `<div class="pg">
+    return `<div class="pg page3">
 <table style="margin-bottom:0;"><tr><td class="sec">VI. VOLUNTARY WORK OR INVOLVEMENT IN CIVIC / NON-GOVERNMENT / PEOPLE / VOLUNTARY ORGANIZATION/S</td></tr></table>
 <table style="margin-bottom:0;">
   <thead>
@@ -1005,7 +1053,7 @@ function buildPDSPrintHTML(d, empRow) {
   <title>PDS — CS Form 212 (Revised 2025)</title>
   <style>${CSS}</style>
 </head>
-<body>
+<body class="${fitModeEnabled ? 'pds-fit-mode' : ''}">
 ${PAGE1()}
 ${PAGE2()}
 ${PAGE3()}

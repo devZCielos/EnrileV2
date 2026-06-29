@@ -99,12 +99,35 @@ if ($action) {
     $userId = (int)$_SESSION['user_id'];
 
     try {
-        // Resolve employee_id from user_id
+        // Resolve employee_id from direct link first.
         $empRow = $pdo->prepare("SELECT employee_id FROM employees WHERE user_id = ?");
         $empRow->execute([$userId]);
         $employeeId = (int)($empRow->fetchColumn() ?: 0);
 
+        // Fallback: use user_accounts.employee_id then back-link employees.user_id.
+        if (!$employeeId) {
+          $uaEmp = $pdo->prepare("SELECT employee_id FROM user_accounts WHERE user_id = ? LIMIT 1");
+          $uaEmp->execute([$userId]);
+          $linkedEmpId = (int)($uaEmp->fetchColumn() ?: 0);
+          if ($linkedEmpId) {
+            $employeeId = $linkedEmpId;
+            $pdo->prepare("UPDATE employees SET user_id = ? WHERE employee_id = ? AND (user_id IS NULL OR user_id = 0)")
+              ->execute([$userId, $employeeId]);
+          }
+        }
+
         switch ($action) {
+          // ── SESSION / LINKAGE CHECK ─────────────────────
+          case 'whoami':
+            echo json_encode([
+              'success' => true,
+              'session_user_id' => $userId,
+              'session_user_email' => $_SESSION['user_email'] ?? null,
+              'session_user_role' => $_SESSION['user_role'] ?? null,
+              'resolved_employee_id' => $employeeId ?: null,
+            ]);
+            break;
+
           // ── DEPT HEAD: View pending leave requests in their department ──
           case 'dept_head_pending_leaves':
             if ($_SESSION['user_role'] !== 'dept_head') {
@@ -206,6 +229,23 @@ if ($action) {
                 ");
                 $stmt->execute([$userId]);
                 $row = $stmt->fetch();
+                if (!$row) {
+                  // Fallback 1: link through user_accounts.employee_id
+                  $stmtUa = $pdo->prepare(" 
+                    SELECT e.*, d.name AS department_name
+                    FROM   user_accounts u
+                    JOIN   employees e   ON e.employee_id = u.employee_id
+                    LEFT JOIN departments d ON d.department_id = e.department_id
+                    WHERE  u.user_id = ?
+                    LIMIT  1
+                  ");
+                  $stmtUa->execute([$userId]);
+                  $row = $stmtUa->fetch();
+                  if ($row) {
+                    $pdo->prepare("UPDATE employees SET user_id = ? WHERE employee_id = ? AND (user_id IS NULL OR user_id = 0)")
+                      ->execute([$userId, $row['employee_id']]);
+                  }
+                }
                 if (!$row) {
                     // Try matching by email as fallback
                     $stmt2 = $pdo->prepare("
@@ -539,7 +579,12 @@ if ($action) {
 
                 // ── Check for past dates ──────────────────────────────────
                 $today = (new DateTime())->format('Y-m-d');
-                if ($dateFrom < $today) {
+                $ltNameStmt = $pdo->prepare("SELECT name FROM leave_types WHERE leave_type_id = ? LIMIT 1");
+                $ltNameStmt->execute([$leaveTypeId]);
+                $leaveTypeName = strtolower((string)($ltNameStmt->fetchColumn() ?: ''));
+                $isSickLeave = (strpos($leaveTypeName, 'sick') !== false);
+
+                if (!$isSickLeave && $dateFrom < $today) {
                     echo json_encode(['success' => false, 'message' => '🚫 Cannot apply for leave on past dates. Please select today or a future date.']); break;
                 }
                 
@@ -1032,6 +1077,21 @@ if ($action) {
                 $year = (int)($data['saln_year'] ?? date('Y'));
                 $existing = $pdo->prepare("SELECT saln_id FROM saln_records WHERE employee_id = ? AND saln_year = ? LIMIT 1");
                 $existing->execute([$employeeId, $year]); $existingId = $existing->fetchColumn();
+
+                // Compute SALN financial totals server-side from row data.
+                $snRealAssets = array_sum(array_map(
+                  fn($r) => (float)($r['market_value'] ?? $r['assessed_value'] ?? 0),
+                  $data['real_properties'] ?? []
+                ));
+                $snPersonalAssets = array_sum(array_map(
+                  fn($r) => (float)($r['acq_cost'] ?? 0),
+                  $data['personal_properties'] ?? []
+                ));
+                $snLiabilities = array_sum(array_map(
+                  fn($r) => (float)($r['balance'] ?? 0),
+                  $data['liabilities'] ?? []
+                ));
+
                 $fields = [
                     'as_of_date'          => $data['as_of_date']   ?? null,
                     'filing_type'         => $data['filing_type']  ?? null,
@@ -1047,32 +1107,16 @@ if ($action) {
                     'relatives_govt'      => json_encode($data['relatives_govt']      ?? []),
                     'no_biz'              => !empty($data['no_biz']) ? 1 : 0,
                     'no_rel'              => !empty($data['no_rel']) ? 1 : 0,
-                    'real_subtotal'       => ($data['real_subtotal']    ?? '') !== '' ? (float)$data['real_subtotal']    : null,
-                    'personal_subtotal'   => ($data['personal_subtotal']?? '') !== '' ? (float)$data['personal_subtotal']: null,
-                    'total_assets'        => ($data['total_assets']     ?? '') !== '' ? (float)$data['total_assets']     : null,
-                    'total_liabilities'   => ($data['total_liabilities']?? '') !== '' ? (float)$data['total_liabilities']: null,
-                    // P2-12: net_worth is computed server-side from JSON arrays, never trusted from client
-                    'net_worth'           => null, // overwritten below
+                    'real_subtotal'       => $snRealAssets,
+                    'personal_subtotal'   => $snPersonalAssets,
+                    'total_assets'        => $snRealAssets + $snPersonalAssets,
+                    'total_liabilities'   => $snLiabilities,
+                    'net_worth'           => ($snRealAssets + $snPersonalAssets) - $snLiabilities,
                     'gov_id'              => $data['gov_id']     ?? null,
                     'gov_id_no'           => $data['gov_id_no']  ?? null,
                     'gov_id_issued'       => $data['gov_id_issued'] ?? null,
                     'updated_at'          => date('Y-m-d H:i:s'),
                 ];
-
-                // P2-12 — Compute net_worth server-side
-                $snRealAssets = array_sum(array_map(
-                    fn($r) => (float)($r['market_value'] ?? $r['assessed_value'] ?? 0),
-                    $data['real_properties'] ?? []
-                ));
-                $snPersonalAssets = array_sum(array_map(
-                    fn($r) => (float)($r['acq_cost'] ?? 0),
-                    $data['personal_properties'] ?? []
-                ));
-                $snLiabilities = array_sum(array_map(
-                    fn($r) => (float)($r['balance'] ?? 0),
-                    $data['liabilities'] ?? []
-                ));
-                $fields['net_worth'] = ($snRealAssets + $snPersonalAssets) - $snLiabilities;
 
                 if ($existingId) {
                     $set = implode(', ', array_map(fn($k) => "$k = ?", array_keys($fields)));
@@ -4084,6 +4128,11 @@ function goPage(name, btn) {
   if (name === 'annex_b')  loadAnnex('annex_b');
   if (name === 'annex_c')  loadAnnex('annex_c');
   if (name === 'dept_head_leaves') loadDeptHeadLeaves();
+
+  // Always open selected page from the top.
+  window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  var mainPane = document.querySelector('.main');
+  if (mainPane) mainPane.scrollTop = 0;
 }
 // ════════════════════════════════════════════════════════
 //  DEPT HEAD LEAVE APPROVAL
@@ -5588,12 +5637,14 @@ async function submitLeave() {
   if(!ok){showToast('⚠️ Please complete all required fields.','info');return;}
   if(days<1){showToast('⚠️ Date To must be on or after Date From.','info');return;}
   
-  // Check if dates are in the past (cannot file leave for past dates)
+  // Past-date filing is allowed for sick leave only.
   const today = new Date();
   today.setHours(0,0,0,0);
   const fromDate = new Date(from);
   fromDate.setHours(0,0,0,0);
-  if (fromDate < today) {
+  const selectedTypeName = ((selTypeName || '') + '').toLowerCase();
+  const isSickLeave = selectedTypeName.indexOf('sick') >= 0;
+  if (!isSickLeave && fromDate < today) {
     showToast('🚫 Cannot apply for leave on past dates. Please select today or a future date.','error');
     document.getElementById('flFrom').classList.add('err');
     return;
@@ -5852,8 +5903,10 @@ function oiAddRow(listId, tplId, value, isDefault) {
     if (delBtn) delBtn.remove();
   }
   list.appendChild(clone);
-  var inputs = list.querySelectorAll('.oi-inp');
-  inputs[inputs.length - 1].focus();
+  if (!isDefault) {
+    var inputs = list.querySelectorAll('.oi-inp');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+  }
 }
 function oiDelRow(btn) {
   btn.closest('.oi-row').remove();
@@ -6659,6 +6712,50 @@ function calcNetWorth() {
   document.getElementById('saln_net_worth').value = (assets - liab).toFixed(2);
 }
 
+function salnNum(v) {
+  var n = parseFloat((v === undefined || v === null ? '' : String(v)).replace(/,/g, ''));
+  return isNaN(n) ? 0 : n;
+}
+
+function recalcSalnTotals() {
+  var realRows = Array.from(document.querySelectorAll('#saln_real_list .saln-tbl tbody tr'));
+  var personalRows = Array.from(document.querySelectorAll('#saln_personal_list .saln-tbl tbody tr'));
+  var liabRows = Array.from(document.querySelectorAll('#saln_liab_list .saln-tbl tbody tr'));
+
+  var realSubtotal = realRows.reduce(function(sum, tr) {
+    var marketEl = tr.querySelector('[data-field="market_value"]');
+    var assessedEl = tr.querySelector('[data-field="assessed_value"]');
+    var market = salnNum(marketEl ? marketEl.value : 0);
+    var assessed = salnNum(assessedEl ? assessedEl.value : 0);
+    return sum + (market || assessed);
+  }, 0);
+
+  var personalSubtotal = personalRows.reduce(function(sum, tr) {
+    var costEl = tr.querySelector('[data-field="acq_cost"]');
+    return sum + salnNum(costEl ? costEl.value : 0);
+  }, 0);
+
+  var totalLiabilities = liabRows.reduce(function(sum, tr) {
+    var balEl = tr.querySelector('[data-field="balance"]');
+    return sum + salnNum(balEl ? balEl.value : 0);
+  }, 0);
+
+  var totalAssets = realSubtotal + personalSubtotal;
+  var netWorth = totalAssets - totalLiabilities;
+
+  var realSubtotalEl = document.getElementById('saln_real_subtotal');
+  var personalSubtotalEl = document.getElementById('saln_personal_subtotal');
+  var totalAssetsEl = document.getElementById('saln_total_assets');
+  var totalLiabEl = document.getElementById('saln_total_liab');
+  var netWorthEl = document.getElementById('saln_net_worth');
+
+  if (realSubtotalEl) realSubtotalEl.value = realSubtotal.toFixed(2);
+  if (personalSubtotalEl) personalSubtotalEl.value = personalSubtotal.toFixed(2);
+  if (totalAssetsEl) totalAssetsEl.value = totalAssets.toFixed(2);
+  if (totalLiabEl) totalLiabEl.value = totalLiabilities.toFixed(2);
+  if (netWorthEl) netWorthEl.value = netWorth.toFixed(2);
+}
+
 async function loadSALN(year) {
   if (year) salnCurrentYear = year;
   const r = await fetch('Employee_portal.php?action=get_saln&year=' + salnCurrentYear);
@@ -6737,6 +6834,8 @@ async function loadSALN(year) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('input', calcNetWorth);
   });
+
+  recalcSalnTotals();
 }
 
 function renderSalnYearTabs() {
@@ -6759,6 +6858,8 @@ function addSalnYear() {
 }
 
 async function saveSALN() {
+  recalcSalnTotals();
+
   var year = parseInt(document.getElementById('saln_as_of').value.substring(0,4)) || salnCurrentYear;
   var payload = {
     saln_year:    year,
@@ -7034,9 +7135,13 @@ function printAnnex(which) {
   };
 
   const fmtM = x => {
-    if (!x) return '';
+    if (x === '' || x === null || x === undefined) return '';
     const n = parseFloat(String(x).replace(/[^0-9.-]/g,''));
     return isNaN(n) ? x : '₱' + n.toLocaleString('en-PH',{minimumFractionDigits:2});
+  };
+  const toNum = x => {
+    const n = parseFloat(String(x === undefined || x === null ? '' : x).replace(/[^0-9.-]/g, ''));
+    return isNaN(n) ? 0 : n;
   };
 
   // ── SHARED CSS — matches official form exactly ───────────────
@@ -7076,6 +7181,17 @@ function printAnnex(which) {
     const pers = getRowsFromTable(getNthTable(page, 2), 3, 5);
     const liab = getRowsFromTable(getNthTable(page, 3), 3, 5);
     const biz  = getRowsFromTable(getNthTable(page, 4), 4, 3);
+
+    const annexBRealSubtotal = real.reduce((sum, r) => {
+      const marketRaw = String(r[4] ?? '').trim();
+      const assessedRaw = String(r[3] ?? '').trim();
+      if (marketRaw !== '') return sum + toNum(marketRaw);
+      if (assessedRaw !== '') return sum + toNum(assessedRaw);
+      return sum;
+    }, 0);
+    const annexBPersonalSubtotal = pers.reduce((sum, r) => sum + toNum(r[2]), 0);
+    const annexBTotalAssets = annexBRealSubtotal + annexBPersonalSubtotal;
+    const annexBTotalLiabilities = liab.reduce((sum, r) => sum + toNum(r[2]), 0);
 
     // Get declarant name fields if available
     const getVal = (sel) => (page.querySelector(sel)||{}).value || '';
@@ -7182,7 +7298,7 @@ function printAnnex(which) {
   <tbody>${realRows}</tbody>
 </table>
 <table style="margin-bottom:8pt;"><tr class="subtotal-row">
-  <td colspan="8">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">&nbsp;</span></td>
+  <td colspan="8">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">${fmtM(annexBRealSubtotal)}&nbsp;</span></td>
 </tr></table>
 
 <div class="section-sub">b.&nbsp;&nbsp;Personal Properties</div>
@@ -7197,8 +7313,8 @@ function printAnnex(which) {
   <tbody>${persRows}</tbody>
 </table>
 <table style="margin-bottom:8pt;">
-  <tr class="subtotal-row"><td colspan="3">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">&nbsp;</span></td></tr>
-  <tr class="total-row"><td colspan="3">Total Assets: <span style="display:inline-block;border-bottom:2pt solid #000;min-width:100pt;">&nbsp;</span></td></tr>
+  <tr class="subtotal-row"><td colspan="3">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">${fmtM(annexBPersonalSubtotal)}&nbsp;</span></td></tr>
+  <tr class="total-row"><td colspan="3">Total Assets: <span style="display:inline-block;border-bottom:2pt solid #000;min-width:100pt;">${fmtM(annexBTotalAssets)}&nbsp;</span></td></tr>
 </table>
 
 <!-- 2. LIABILITIES -->
@@ -7214,7 +7330,7 @@ function printAnnex(which) {
   <tbody>${liabRows}</tbody>
 </table>
 <table style="margin-bottom:4pt;"><tr class="total-row">
-  <td colspan="3">Total Liabilities: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">&nbsp;</span></td>
+  <td colspan="3">Total Liabilities: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">${fmtM(annexBTotalLiabilities)}&nbsp;</span></td>
 </tr></table>
 
 <div class="double-rule"></div>
@@ -7257,6 +7373,17 @@ function printAnnex(which) {
     const pers = getRowsFromTable(getNthTable(page, 2), 3, 5);
     const liab = getRowsFromTable(getNthTable(page, 3), 3, 5);
     const biz  = getRowsFromTable(getNthTable(page, 4), 4, 3);
+
+    const annexCRealSubtotal = real.reduce((sum, r) => {
+      const marketRaw = String(r[4] ?? '').trim();
+      const assessedRaw = String(r[3] ?? '').trim();
+      if (marketRaw !== '') return sum + toNum(marketRaw);
+      if (assessedRaw !== '') return sum + toNum(assessedRaw);
+      return sum;
+    }, 0);
+    const annexCPersonalSubtotal = pers.reduce((sum, r) => sum + toNum(r[2]), 0);
+    const annexCTotalAssets = annexCRealSubtotal + annexCPersonalSubtotal;
+    const annexCTotalLiabilities = liab.reduce((sum, r) => sum + toNum(r[2]), 0);
 
     const realRows = real.map(r => `<tr class="data-row">
       <td style="width:15%;">${r[0]||''}&nbsp;</td>
@@ -7360,7 +7487,7 @@ function printAnnex(which) {
   <tbody>${realRows}</tbody>
 </table>
 <table style="margin-bottom:8pt;"><tr class="subtotal-row">
-  <td colspan="8">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">&nbsp;</span></td>
+  <td colspan="8">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">${fmtM(annexCRealSubtotal)}&nbsp;</span></td>
 </tr></table>
 
 <div class="section-sub">b.&nbsp;&nbsp;Personal Properties</div>
@@ -7375,8 +7502,8 @@ function printAnnex(which) {
   <tbody>${persRows}</tbody>
 </table>
 <table style="margin-bottom:8pt;">
-  <tr class="subtotal-row"><td colspan="3">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">&nbsp;</span></td></tr>
-  <tr class="total-row"><td colspan="3">Total Assets: <span style="display:inline-block;border-bottom:2pt solid #000;min-width:100pt;">&nbsp;</span></td></tr>
+  <tr class="subtotal-row"><td colspan="3">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">${fmtM(annexCPersonalSubtotal)}&nbsp;</span></td></tr>
+  <tr class="total-row"><td colspan="3">Total Assets: <span style="display:inline-block;border-bottom:2pt solid #000;min-width:100pt;">${fmtM(annexCTotalAssets)}&nbsp;</span></td></tr>
 </table>
 
 <!-- 2. LIABILITIES -->
@@ -7392,7 +7519,7 @@ function printAnnex(which) {
   <tbody>${liabRows}</tbody>
 </table>
 <table style="margin-bottom:4pt;"><tr class="total-row">
-  <td colspan="3">Total Liabilities: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">&nbsp;</span></td>
+  <td colspan="3">Total Liabilities: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">${fmtM(annexCTotalLiabilities)}&nbsp;</span></td>
 </tr></table>
 
 <div class="double-rule"></div>
@@ -7436,6 +7563,10 @@ function buildSALNPrintHTML(d, emp, openPrint) {
   const fmtM = x => { if(x===''||x===null||x===undefined) return ''; const n=parseFloat(x); return isNaN(n)?'':'₱'+n.toLocaleString('en-PH',{minimumFractionDigits:2}); };
   const padR = (arr,min,fn) => { const n=Math.max(min,(arr||[]).length); let h=''; for(let i=0;i<n;i++) h+=fn((arr||[])[i]||{}); return h; };
   const cb   = checked => (checked===true||checked==='1'||checked===1||checked==='Yes') ? '☑' : '☐';
+  const nVal = x => {
+    const n = parseFloat(String(x === undefined || x === null ? '' : x).replace(/[^0-9.-]/g, ''));
+    return isNaN(n) ? 0 : n;
+  };
 
   const dec = sj(d.declarant_info)      || {};
   const sp  = sj(d.spouse_info)         || {};
@@ -7445,6 +7576,15 @@ function buildSALNPrintHTML(d, emp, openPrint) {
   const lb  = sj(d.liabilities)         || [];
   const biz = sj(d.biz_interests)       || [];
   const rel = sj(d.relatives_govt)      || [];
+
+  const derivedRealSubtotal = rp.reduce((sum, p) => sum + (nVal(p.market_value) || nVal(p.assessed_value)), 0);
+  const derivedPersonalSubtotal = pp.reduce((sum, p) => sum + nVal(p.acq_cost), 0);
+  const derivedTotalLiabilities = lb.reduce((sum, l) => sum + nVal(l.balance), 0);
+  const realSubtotal = (d.real_subtotal !== '' && d.real_subtotal !== null && d.real_subtotal !== undefined) ? nVal(d.real_subtotal) : derivedRealSubtotal;
+  const personalSubtotal = (d.personal_subtotal !== '' && d.personal_subtotal !== null && d.personal_subtotal !== undefined) ? nVal(d.personal_subtotal) : derivedPersonalSubtotal;
+  const totalAssets = (d.total_assets !== '' && d.total_assets !== null && d.total_assets !== undefined) ? nVal(d.total_assets) : (realSubtotal + personalSubtotal);
+  const totalLiabilities = (d.total_liabilities !== '' && d.total_liabilities !== null && d.total_liabilities !== undefined) ? nVal(d.total_liabilities) : derivedTotalLiabilities;
+  const netWorth = (d.net_worth !== '' && d.net_worth !== null && d.net_worth !== undefined) ? nVal(d.net_worth) : (totalAssets - totalLiabilities);
 
   const isAssumption = d.filing_type==='Assumption';
   const isAnnual     = d.filing_type==='Annual';
@@ -7671,7 +7811,7 @@ function buildSALNPrintHTML(d, emp, openPrint) {
   ${realRows}
   <tr>
     <td colspan="7" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:right;">Subtotal:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;border-bottom:2pt solid #000;">${fmtM(d.real_subtotal)}&nbsp;</td>
+    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;border-bottom:2pt solid #000;">${fmtM(realSubtotal)}&nbsp;</td>
   </tr>
 </table>
 
@@ -7686,11 +7826,11 @@ function buildSALNPrintHTML(d, emp, openPrint) {
   ${persRows}
   <tr>
     <td colspan="2" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:right;">Subtotal:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;border-bottom:2pt solid #000;">${fmtM(d.personal_subtotal)}&nbsp;</td>
+    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;border-bottom:2pt solid #000;">${fmtM(personalSubtotal)}&nbsp;</td>
   </tr>
   <tr>
     <td colspan="2" style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;text-transform:uppercase;">Total Assets:</td>
-    <td style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;border-bottom:2pt solid #000;">${fmtM(d.total_assets)}&nbsp;</td>
+    <td style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;border-bottom:2pt solid #000;">${fmtM(totalAssets)}&nbsp;</td>
   </tr>
 </table>
 
@@ -7716,11 +7856,11 @@ function buildSALNPrintHTML(d, emp, openPrint) {
   ${liabRows}
   <tr>
     <td colspan="2" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;text-transform:uppercase;">Total Liabilities:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;border-bottom:2pt solid #000;">${fmtM(d.total_liabilities)}&nbsp;</td>
+    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;border-bottom:2pt solid #000;">${fmtM(totalLiabilities)}&nbsp;</td>
   </tr>
   <tr>
     <td colspan="2" style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7pt;font-weight:700;text-transform:uppercase;">Net Worth: Total Assets less Total Liabilities =</td>
-    <td style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;border-bottom:2.5pt double #000;">${fmtM(d.net_worth)}&nbsp;</td>
+    <td style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;border-bottom:2.5pt double #000;">${fmtM(netWorth)}&nbsp;</td>
   </tr>
 </table>
 
@@ -7883,15 +8023,17 @@ function salnAddRow(containerId, cols, values) {
     }
     inp.setAttribute('data-field', c.key);
     if (values && values[c.key] !== undefined) inp.value = values[c.key];
+    inp.addEventListener('input', recalcSalnTotals);
     if (c.w) { td.style.minWidth = c.w; inp.style.width = '100%'; inp.style.boxSizing = 'border-box'; }
     td.appendChild(inp);
     tr.appendChild(td);
   });
   var tdDel = document.createElement('td'); tdDel.className='del-cell';
   var btn = document.createElement('button'); btn.className='del-btn'; btn.type='button'; btn.textContent='✕';
-  btn.onclick = function(){ tr.remove(); if(!tbody.rows.length){ var t=tbody.closest('.saln-tbl'); if(t) t.remove(); } };
+  btn.onclick = function(){ tr.remove(); if(!tbody.rows.length){ var t=tbody.closest('.saln-tbl'); if(t) t.remove(); } recalcSalnTotals(); };
   tdDel.appendChild(btn); tr.appendChild(tdDel);
   tbody.appendChild(tr);
+  recalcSalnTotals();
 }
 
 function addSalnChild(v)  {

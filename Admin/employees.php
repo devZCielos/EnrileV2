@@ -164,6 +164,10 @@ if ($action) {
             case 'save':
                 $id = (int)($_POST['employee_id'] ?? 0);
 
+              $contactInPost = array_key_exists('contact', $_POST);
+              $emailInPost   = array_key_exists('email', $_POST);
+              $addressInPost = array_key_exists('address', $_POST);
+
                 $deptStmt = $pdo->prepare("SELECT department_id FROM departments WHERE name = ? LIMIT 1");
                 $deptStmt->execute([trim($_POST['dept'] ?? '')]);
                 $deptId = $deptStmt->fetchColumn() ?: null;
@@ -188,9 +192,9 @@ if ($action) {
                     'gender'            => $_POST['gender']      ?? 'Male',        // NOT NULL — default to Male
                     'date_of_birth'     => $_POST['dob']         ?: null,
                     'civil_status'      => $_POST['civil']       ?? null,
-                    'contact_number'    => trim($_POST['contact']     ?? ''),
-                    'email_address'     => trim($_POST['email']       ?? ''),      // FIXED: was 'personal_email'
-                    'home_address'      => trim($_POST['address']     ?? ''),      // FIXED: was 'address'
+                  'contact_number'    => $contactInPost ? trim($_POST['contact'] ?? '') : null,
+                  'email_address'     => $emailInPost   ? trim($_POST['email']   ?? '') : null,
+                  'home_address'      => $addressInPost ? trim($_POST['address'] ?? '') : null,
                     'department_id'     => $deptId,
                     'position_title'    => trim($_POST['position']    ?? ''),
                     'employment_type'   => $_POST['emp_type']    ?? 'Permanent',
@@ -207,10 +211,25 @@ if ($action) {
                     break;
                 }
 
+                // Salary grade should be numeric 1-33.
+                if ($fields['salary_grade'] !== '') {
+                  $sg = (int)$fields['salary_grade'];
+                  if ((string)$sg !== $fields['salary_grade'] || $sg < 1 || $sg > 33) {
+                    echo json_encode(['success' => false, 'message' => 'Salary grade must be between 1 and 33.']);
+                    break;
+                  }
+                }
+
                 // Email format validation
-                if (!empty($fields['email_address']) && !filter_var($fields['email_address'], FILTER_VALIDATE_EMAIL)) {
+                if ($emailInPost && !empty($fields['email_address']) && !filter_var($fields['email_address'], FILTER_VALIDATE_EMAIL)) {
                     echo json_encode(['success' => false, 'message' => 'Invalid email address format.']);
                     break;
+                }
+
+                // New employees must provide an email because account creation is automatic.
+                if (!$id && (!$emailInPost || empty($fields['email_address']))) {
+                  echo json_encode(['success' => false, 'message' => 'Email address is required when adding an employee.']);
+                  break;
                 }
 
                 // Input length validation
@@ -225,6 +244,13 @@ if ($action) {
                         echo json_encode(['success' => false, 'message' => ucfirst(str_replace('_', ' ', $field)) . ' is too long (max ' . $maxLen . ' characters).']);
                         break 2;
                     }
+                }
+
+                // Do not overwrite employee-managed personal contact details when admin form omits them.
+                if ($id) {
+                  if (!$contactInPost) unset($fields['contact_number']);
+                  if (!$emailInPost)   unset($fields['email_address']);
+                  if (!$addressInPost) unset($fields['home_address']);
                 }
 
                 // Validate and decode leave_selection
@@ -250,7 +276,7 @@ if ($action) {
                     $stmt->execute([...array_values($fields), $id]);
 
                     // P2-9 — Keep user_accounts.email in sync with employees.email_address
-                    if (!empty($fields['email_address'])) {
+                    if ($emailInPost && !empty($fields['email_address'])) {
                         $pdo->prepare("
                             UPDATE user_accounts ua
                             JOIN employees e ON e.user_id = ua.user_id
@@ -303,6 +329,22 @@ if ($action) {
                     
                     echo json_encode(['success' => true, 'message' => 'Employee updated successfully.', 'id' => $id]);
                 } else {
+                    // Prevent duplicate emails across employee records and user accounts.
+                    $dupEmp = $pdo->prepare("SELECT COUNT(*) FROM employees WHERE email_address = ?");
+                    $dupEmp->execute([$fields['email_address']]);
+                    if ((int)$dupEmp->fetchColumn() > 0) {
+                      echo json_encode(['success' => false, 'message' => 'Email is already used by another employee.']);
+                      break;
+                    }
+                    $dupUa = $pdo->prepare("SELECT COUNT(*) FROM user_accounts WHERE email = ?");
+                    $dupUa->execute([$fields['email_address']]);
+                    if ((int)$dupUa->fetchColumn() > 0) {
+                      echo json_encode(['success' => false, 'message' => 'Email is already used by an existing user account.']);
+                      break;
+                    }
+
+                    $pdo->beginTransaction();
+
                     $cols   = implode(', ', array_keys($fields));
                     $marks  = implode(', ', array_fill(0, count($fields), '?'));
                     $stmt   = $pdo->prepare("INSERT INTO employees ($cols) VALUES ($marks)");
@@ -337,7 +379,24 @@ if ($action) {
                         }
                     }
 
-                    echo json_encode(['success' => true, 'message' => 'Employee added successfully.', 'id' => $newId]);
+                    // Auto-create employee user account.
+                    $defaultPassword = $fields['employee_code'];
+                    $passHash = password_hash($defaultPassword, PASSWORD_BCRYPT);
+                    $uaIns = $pdo->prepare("INSERT INTO user_accounts (email, password_hash, role, is_active, created_at, updated_at) VALUES (?, ?, 'employee', 1, NOW(), NOW())");
+                    $uaIns->execute([$fields['email_address'], $passHash]);
+                    $newUserId = (int)$pdo->lastInsertId();
+
+                    // Link employee to the new user account.
+                    $pdo->prepare("UPDATE employees SET user_id = ? WHERE employee_id = ?")->execute([$newUserId, $newId]);
+                    $pdo->prepare("UPDATE user_accounts SET must_change_password = 1 WHERE user_id = ?")->execute([$newUserId]);
+
+                    $pdo->commit();
+
+                    echo json_encode([
+                      'success' => true,
+                      'message' => 'Employee added successfully. User account was created with default password equal to employee code.',
+                      'id' => $newId
+                    ]);
                 }
                 break;
 
@@ -399,10 +458,15 @@ if ($action) {
                 echo json_encode(['success' => false, 'message' => 'Unknown action.']);
         }
     } catch (PDOException $e) {
+      if (isset($pdo) && $pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
         error_log('[HRMS] employees.php error: ' . $e->getMessage());
         // Return a specific message for common constraint violations
         if (strpos($e->getMessage(), 'employee_code') !== false && strpos($e->getMessage(), '1062') !== false) {
             echo json_encode(['success' => false, 'message' => 'Employee code already exists. Please use a different code.']);
+      } elseif (strpos($e->getMessage(), 'email') !== false && strpos($e->getMessage(), '1062') !== false) {
+        echo json_encode(['success' => false, 'message' => 'Email is already in use.']);
         } else {
             echo json_encode(['success' => false, 'message' => 'A database error occurred.']);
         }
@@ -681,17 +745,9 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
               <option>Single</option><option>Married</option><option>Widowed</option><option>Separated</option>
             </select>
           </div>
-          <div class="form-group">
-            <label>Contact Number</label>
-            <input type="text" id="fContact" placeholder="09XX-XXX-XXXX"/>
-          </div>
-          <div class="form-group">
-            <label>Email Address</label>
-            <input type="email" id="fEmail" placeholder="email@example.com"/>
-          </div>
           <div class="form-group form-full">
-            <label>Home Address</label>
-            <input type="text" id="fAddress" placeholder="Barangay, Municipality, Province"/>
+            <label>Email Address <span class="req">*</span></label>
+            <input type="email" id="fEmail" placeholder="email@example.com"/>
           </div>
         </div>
 
@@ -730,7 +786,12 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           </div>
           <div class="form-group">
             <label>Salary Grade</label>
-            <input type="text" id="fSalaryGrade" placeholder="e.g. SG-10"/>
+            <select id="fSalaryGrade">
+              <option value="">Select grade</option>
+              <?php for ($sg = 1; $sg <= 33; $sg++): ?>
+                <option value="<?= $sg ?>"><?= $sg ?></option>
+              <?php endfor; ?>
+            </select>
           </div>
           <div class="form-group">
             <label>GSIS / SSS No.</label>
@@ -1181,7 +1242,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
   }
 
   function clearForm() {
-    ['fId','fFirstName','fLastName','fMiddleName','fContact','fEmail','fAddress',
+    ['fId','fFirstName','fLastName','fMiddleName','fEmail',
      'fEmpCode','fPosition','fSalaryGrade','fGsis','fDob','fDateHired'].forEach(id => {
       const el = document.getElementById(id);
       if (el) { el.value = ''; el.classList.remove('err'); }
@@ -1234,16 +1295,16 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     document.getElementById('fGender').value      = e.gender        || '';
     document.getElementById('fDob').value         = e.date_of_birth || '';
     document.getElementById('fCivil').value       = e.civil_status  || '';
-    document.getElementById('fContact').value     = e.contact_number  || '';
-    document.getElementById('fEmail').value       = e.email_address   || '';   // FIXED: was e.personal_email
-    document.getElementById('fAddress').value     = e.home_address    || '';   // FIXED: was e.address
+    document.getElementById('fEmail').value       = e.email_address || '';
     document.getElementById('fEmpCode').value     = e.employee_code  || '';
     document.getElementById('fDept').value        = e.department     || '';
     document.getElementById('fPosition').value    = e.position_title || '';
     document.getElementById('fEmpType').value     = e.employment_type   || '';
     document.getElementById('fStatus').value      = e.employment_status || 'Active';
     document.getElementById('fDateHired').value   = e.date_hired    || '';
-    document.getElementById('fSalaryGrade').value = e.salary_grade  || '';
+    const sgRaw = String(e.salary_grade || '').trim();
+    const sgNum = sgRaw.startsWith('SG-') ? sgRaw.substring(3) : sgRaw;
+    document.getElementById('fSalaryGrade').value = (/^\d+$/.test(sgNum) ? sgNum : '');
     document.getElementById('fGsis').value        = e.gsis_number   || '';
     document.getElementById('fIsMayor').checked   = !!parseInt(e.is_mayor || 0);
 
@@ -1268,6 +1329,15 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     });
     if (!valid) { showToast('⚠️ Please fill in all required fields.','info'); return; }
 
+    const isAddMode = !document.getElementById('fId').value;
+    const emailVal = document.getElementById('fEmail').value.trim();
+    if (isAddMode && !emailVal) {
+      showToast('⚠️ Email address is required when adding an employee.','info');
+      document.getElementById('fEmail').classList.add('err');
+      return;
+    }
+    document.getElementById('fEmail').classList.remove('err');
+
     const btn = document.getElementById('saveBtn');
     btn.disabled = true;
     btn.textContent = '⏳ Saving…';
@@ -1281,16 +1351,14 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     body.append('gender',       document.getElementById('fGender').value);
     body.append('dob',          document.getElementById('fDob').value);
     body.append('civil',        document.getElementById('fCivil').value);
-    body.append('contact',      document.getElementById('fContact').value.trim());
     body.append('email',        document.getElementById('fEmail').value.trim());
-    body.append('address',      document.getElementById('fAddress').value.trim());
     body.append('emp_code',     document.getElementById('fEmpCode').value.trim());
     body.append('dept',         document.getElementById('fDept').value);
     body.append('position',     document.getElementById('fPosition').value.trim());
     body.append('emp_type',     document.getElementById('fEmpType').value);
     body.append('status',       document.getElementById('fStatus').value);
     body.append('date_hired',   document.getElementById('fDateHired').value);
-    body.append('salary_grade', document.getElementById('fSalaryGrade').value.trim());
+    body.append('salary_grade', document.getElementById('fSalaryGrade').value);
     body.append('gsis',         document.getElementById('fGsis').value.trim());
     body.append('is_mayor',     document.getElementById('fIsMayor').checked ? '1' : '0');
 
