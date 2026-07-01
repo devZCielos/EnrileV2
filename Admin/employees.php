@@ -405,15 +405,63 @@ if ($action) {
                 $id = (int)($_POST['id'] ?? 0);
                 if (!$id) { echo json_encode(['success' => false, 'message' => 'Invalid ID.']); break; }
 
-                // Remove all related records before deleting the employee
-                $pdo->prepare("DELETE FROM leave_balances  WHERE employee_id = ?")->execute([$id]);
-                $pdo->prepare("DELETE FROM leave_requests  WHERE employee_id = ?")->execute([$id]);
-                $pdo->prepare("DELETE FROM contracts       WHERE employee_id = ?")->execute([$id]);
-                // Nullify service_records (may have FK) rather than hard-delete
-                $pdo->prepare("DELETE FROM service_records WHERE employee_id = ?")->execute([$id]);
-                // Disassociate user account before deleting employee
+              $pdo->beginTransaction();
+
+              // Helper: safely check whether a table column exists in current deployment.
+              $colExists = function($table, $column) use ($pdo) {
+                $q = $pdo->prepare("\n                        SELECT COUNT(*)\n                        FROM information_schema.COLUMNS\n                        WHERE TABLE_SCHEMA = DATABASE()\n                          AND TABLE_NAME = ?\n                          AND COLUMN_NAME = ?\n                    ");
+                $q->execute([$table, $column]);
+                return ((int)$q->fetchColumn() > 0);
+              };
+
+              // Clear department-head references first for environments where FK is RESTRICT.
+              if ($colExists('departments', 'head_employee_id')) {
+                $pdo->prepare("UPDATE departments SET head_employee_id = NULL WHERE head_employee_id = ?")->execute([$id]);
+              }
+
+              // Clear all user-account links that may point to this employee.
+              if ($colExists('user_accounts', 'employee_id')) {
+                $pdo->prepare("UPDATE user_accounts SET employee_id = NULL WHERE employee_id = ?")->execute([$id]);
                 $pdo->prepare("UPDATE user_accounts ua JOIN employees e ON e.user_id = ua.user_id SET ua.employee_id = NULL WHERE e.employee_id = ?")->execute([$id]);
-                $pdo->prepare("DELETE FROM employees       WHERE employee_id = ?")->execute([$id]);
+              }
+
+              // Remove common related records explicitly.
+              $pdo->prepare("DELETE FROM leave_balances  WHERE employee_id = ?")->execute([$id]);
+              $pdo->prepare("DELETE FROM leave_requests  WHERE employee_id = ?")->execute([$id]);
+              $pdo->prepare("DELETE FROM contracts       WHERE employee_id = ?")->execute([$id]);
+              $pdo->prepare("DELETE FROM service_records WHERE employee_id = ?")->execute([$id]);
+
+              // Defensive cleanup: resolve ALL FK references to employees.employee_id in current schema.
+              // If metadata access is blocked, we still continue with explicit deletes above.
+              try {
+                $fkStmt = $pdo->prepare("\n                        SELECT k.TABLE_NAME, k.COLUMN_NAME, c.IS_NULLABLE\n                        FROM information_schema.KEY_COLUMN_USAGE k\n                        JOIN information_schema.COLUMNS c\n                          ON c.TABLE_SCHEMA = k.TABLE_SCHEMA\n                         AND c.TABLE_NAME = k.TABLE_NAME\n                         AND c.COLUMN_NAME = k.COLUMN_NAME\n                        WHERE k.TABLE_SCHEMA = DATABASE()\n                          AND k.REFERENCED_TABLE_NAME = 'employees'\n                          AND k.REFERENCED_COLUMN_NAME = 'employee_id'\n                    ");
+                $fkStmt->execute();
+                $fkRows = $fkStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+                foreach ($fkRows as $fk) {
+                  $tbl = $fk['TABLE_NAME'] ?? '';
+                  $col = $fk['COLUMN_NAME'] ?? '';
+                  $nullable = strtoupper((string)($fk['IS_NULLABLE'] ?? 'NO')) === 'YES';
+
+                  if (!preg_match('/^[A-Za-z0-9_]+$/', $tbl) || !preg_match('/^[A-Za-z0-9_]+$/', $col)) {
+                    continue;
+                  }
+                  if ($tbl === 'employees') {
+                    continue;
+                  }
+
+                  if ($nullable) {
+                    $pdo->prepare("UPDATE `{$tbl}` SET `{$col}` = NULL WHERE `{$col}` = ?")->execute([$id]);
+                  }
+                  $pdo->prepare("DELETE FROM `{$tbl}` WHERE `{$col}` = ?")->execute([$id]);
+                }
+              } catch (PDOException $metaErr) {
+                error_log('[HRMS] employees.php delete metadata scan skipped: ' . $metaErr->getMessage());
+              }
+
+              $pdo->prepare("DELETE FROM employees WHERE employee_id = ?")->execute([$id]);
+
+              $pdo->commit();
 
                 echo json_encode(['success' => true, 'message' => 'Employee record deleted.']);
                 break;
@@ -467,6 +515,10 @@ if ($action) {
             echo json_encode(['success' => false, 'message' => 'Employee code already exists. Please use a different code.']);
       } elseif (strpos($e->getMessage(), 'email') !== false && strpos($e->getMessage(), '1062') !== false) {
         echo json_encode(['success' => false, 'message' => 'Email is already in use.']);
+        } elseif ($action === 'delete') {
+            echo json_encode(['success' => false, 'message' => 'Delete failed: ' . $e->getMessage()]);
+        } elseif (strpos($e->getMessage(), 'foreign key constraint fails') !== false) {
+          echo json_encode(['success' => false, 'message' => 'Delete blocked by related records. Please remove employee references first, then try again.']);
         } else {
             echo json_encode(['success' => false, 'message' => 'A database error occurred.']);
         }

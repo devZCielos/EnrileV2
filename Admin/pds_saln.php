@@ -1172,6 +1172,12 @@ function buildSALNPrintHTML(d, emp, openPrint) {
   const padR = (arr,min,fn) => { const n=Math.max(min,(arr||[]).length); let h=''; for(let i=0;i<n;i++) h+=fn((arr||[])[i]||{}); return h; };
   const cb   = checked => (checked===true||checked==='1'||checked===1||checked==='Yes') ? '☑' : '☐';
 
+  const nVal = x => {
+    const n = parseFloat(String(x === undefined || x === null ? '' : x).replace(/[^0-9.-]/g, ''));
+    return isNaN(n) ? 0 : n;
+  };
+  const hasRows = rows => Array.isArray(rows) && rows.some(row => Object.values(row || {}).some(value => String(value ?? '').trim() !== ''));
+  const hasAnnexData = (rows, extra = []) => hasRows(rows) || extra.some(value => String(value ?? '').trim() !== '');
   const dec = sj(d.declarant_info)      || {};
   const sp  = sj(d.spouse_info)         || {};
   const ch  = sj(d.children_info)       || [];
@@ -1180,6 +1186,24 @@ function buildSALNPrintHTML(d, emp, openPrint) {
   const lb  = sj(d.liabilities)         || [];
   const biz = sj(d.biz_interests)       || [];
   const rel = sj(d.relatives_govt)      || [];
+  const as1Rp = sj(d.as1_real_properties)     || [];
+  const as1Pp = sj(d.as1_personal_properties) || [];
+  const as1Lb = sj(d.as1_liabilities)         || [];
+  const as1Biz= sj(d.as1_biz_interests)       || [];
+  const as2Nm = sj(d.as2_name_info)           || {};
+  const as2Rp = sj(d.as2_real_properties)     || [];
+  const as2Pp = sj(d.as2_personal_properties) || [];
+  const as2Lb = sj(d.as2_liabilities)         || [];
+  const as2Biz= sj(d.as2_biz_interests)       || [];
+
+  const derivedRealSubtotal = rp.reduce((sum, p) => sum + (nVal(p.market_value) || nVal(p.assessed_value)), 0);
+  const derivedPersonalSubtotal = pp.reduce((sum, p) => sum + nVal(p.acq_cost), 0);
+  const derivedTotalLiabilities = lb.reduce((sum, l) => sum + nVal(l.balance), 0);
+  const realSubtotal = (d.real_subtotal !== '' && d.real_subtotal !== null && d.real_subtotal !== undefined) ? nVal(d.real_subtotal) : derivedRealSubtotal;
+  const personalSubtotal = (d.personal_subtotal !== '' && d.personal_subtotal !== null && d.personal_subtotal !== undefined) ? nVal(d.personal_subtotal) : derivedPersonalSubtotal;
+  const totalAssets = (d.total_assets !== '' && d.total_assets !== null && d.total_assets !== undefined) ? nVal(d.total_assets) : (realSubtotal + personalSubtotal);
+  const totalLiabilities = (d.total_liabilities !== '' && d.total_liabilities !== null && d.total_liabilities !== undefined) ? nVal(d.total_liabilities) : derivedTotalLiabilities;
+  const netWorth = (d.net_worth !== '' && d.net_worth !== null && d.net_worth !== undefined) ? nVal(d.net_worth) : (totalAssets - totalLiabilities);
 
   const isAssumption = d.filing_type==='Assumption';
   const isAnnual     = d.filing_type==='Annual';
@@ -1189,371 +1213,551 @@ function buildSALNPrintHTML(d, emp, openPrint) {
   const isNA         = !isJoint && !isSeparate;
 
   const C  = (txt,s) => `<td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:6.5pt;vertical-align:middle;${s||''}">${v(txt)}&nbsp;</td>`;
-  const H  = (txt,s) => `<td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:5.5pt;font-weight:700;background:#e0e0e0;vertical-align:middle;${s||''}">${txt}</td>`;
-  const ul = (val,w) => `<span style="display:inline-block;min-width:${w||'70pt'};border-bottom:0.5pt solid #000;font-size:7pt;font-weight:700;padding-bottom:0.5pt;">${v(val)}&nbsp;</span>`;
+  const H  = (txt,s) => `<td style="border:0.5pt solid #000;padding:2pt 3pt;font-size:6pt;font-weight:700;text-align:center;vertical-align:middle;${s||''}">${txt}</td>`;
 
-  // Real property rows — min 4
-  const realRows = padR(rp, 4, p => `<tr style="height:13pt;">
-    ${C(p.description,'width:17%;')}${C(p.kind,'width:12%;')}${C(p.location,'width:14%;')}
-    ${C(fmtM(p.assessed_value),'width:9%;text-align:right;')}${C(fmtM(p.market_value),'width:9%;text-align:right;')}
-    ${C(p.acq_year,'width:7%;text-align:center;')}${C(p.acq_mode,'width:9%;')}${C(fmtM(p.acq_cost),'width:9%;text-align:right;')}
+  const realRows = padR(rp, 4, p => `<tr style="height:18pt;">
+    ${C(p.description,'width:18%;font-size:6.5pt;')}${C(p.kind,'width:12%;')}${C(p.location,'width:16%;')}
+    ${C(fmtM(p.assessed_value),'width:10%;text-align:right;')}${C(fmtM(p.market_value),'width:10%;text-align:right;')}
+    ${C(p.acq_year,'width:8%;text-align:center;')}${C(p.acq_mode,'width:10%;')}${C(fmtM(p.acq_cost),'width:10%;text-align:right;')}
+  </tr>`);
+  const persRows = padR(pp, 6, p => `<tr style="height:16pt;">
+    ${C(p.description,'width:65%;')}${C(p.acq_year,'width:17%;text-align:center;')}${C(fmtM(p.acq_cost),'width:18%;text-align:right;')}
+  </tr>`);
+  const liabRows = padR(lb, 5, l => `<tr style="height:14pt;">
+    ${C(l.nature,'width:34%;')}${C(l.creditor,'width:41%;')}${C(fmtM(l.balance),'width:25%;text-align:right;')}
+  </tr>`);
+  const bizRows = padR(d.no_biz?[]:biz, 3, b => `<tr style="height:14pt;">
+    ${C(b.entity_name,'width:27%;')}${C(b.biz_address,'width:26%;')}${C(b.nature,'width:28%;')}${C(fmtD(b.date_acquired),'width:19%;text-align:center;')}
+  </tr>`);
+  const relRows = padR(d.no_rel?[]:rel, 5, r => `<tr style="height:14pt;">
+    ${C(r.name,'width:24%;')}${C(r.relationship,'width:16%;')}${C(r.position,'width:24%;')}${C(r.agency_address,'width:36%;')}
+  </tr>`);
+  const childRows = padR(ch, 3, c => `<tr style="height:16pt;">
+    <td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:7pt;width:76%;">${v(c.name)}&nbsp;</td>
+    <td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:7pt;text-align:center;width:24%;">${v(c.age)}&nbsp;</td>
   </tr>`);
 
-  // Personal property rows — min 6
-  const persRows = padR(pp, 6, p => `<tr style="height:12pt;">
-    ${C(p.description,'width:60%;')}${C(p.acq_year,'width:18%;text-align:center;')}${C(fmtM(p.acq_cost),'width:22%;text-align:right;')}
-  </tr>`);
-
-  // Liability rows — min 5
-  const liabRows = padR(lb, 5, l => `<tr style="height:12pt;">
-    ${C(l.nature,'width:35%;')}${C(l.creditor,'width:40%;')}${C(fmtM(l.balance),'width:25%;text-align:right;')}
-  </tr>`);
-
-  // Business interest rows — min 3
-  const bizRows = padR(d.no_biz?[]:biz, 3, b => `<tr style="height:12pt;">
-    ${C(b.entity_name,'width:28%;')}${C(b.biz_address,'width:25%;')}${C(b.nature,'width:28%;')}${C(fmtD(b.date_acquired),'width:19%;text-align:center;')}
-  </tr>`);
-
-  // Relatives rows — min 5
-  const relRows = padR(d.no_rel?[]:rel, 5, r => `<tr style="height:12pt;">
-    ${C(r.name,'width:25%;')}${C(r.relationship,'width:15%;')}${C(r.position,'width:25%;')}${C(r.agency_address,'width:35%;')}
-  </tr>`);
-
-  // Children rows — min 3
-  const childRows = padR(ch, 3, c => `<tr style="height:13pt;">
-    <td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:7pt;width:75%;">${v(c.name)}&nbsp;</td>
-    <td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:7pt;text-align:center;width:25%;">${v(c.age)}&nbsp;</td>
-  </tr>`);
-
-  const css = `
+  const sharedCss = `
     *{box-sizing:border-box;margin:0;padding:0;}
     body{font-family:'Arial Narrow',Arial,sans-serif;font-size:7pt;color:#000;background:#fff;}
-    @page{size:8.5in 13in;margin:5mm 6mm;}
-    @media print{body{margin:0;}}
+    @page{size:8.5in 13in;margin:12mm 14mm 10mm 14mm;}
+    @media print{body{margin:0;} .no-print{display:none;}}
     table{border-collapse:collapse;width:100%;}
-    .page-title{text-align:center;font-size:9.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.04em;}
-    .page-sub{text-align:center;font-size:6.5pt;}
-    .hdr{background:#e0e0e0;font-size:5.5pt;font-weight:700;text-align:center;padding:1.5pt 2pt;border:0.5pt solid #000;vertical-align:middle;}
-    .lbl{font-size:5pt;font-weight:700;text-transform:uppercase;color:#444;}
-    .val{font-size:7pt;font-weight:700;border-bottom:0.4pt solid #555;min-height:9pt;display:block;}
-    .yn{display:inline-block;border:0.5pt solid #000;width:7pt;height:7pt;text-align:center;font-size:6pt;line-height:7pt;margin-right:1pt;}
-    .underline{border-bottom:0.5pt solid #000;display:inline-block;min-width:50pt;}
+    .section-title{font-size:8pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;letter-spacing:.03em;}
+    .page-footer{text-align:center;font-size:7.5pt;font-style:italic;margin-top:6pt;}
+    .ref{text-align:right;font-size:6pt;margin-bottom:4pt;line-height:1.6;}
+    .main-title{text-align:center;font-size:10pt;font-weight:700;text-transform:uppercase;letter-spacing:.04em;}
+    .as-of-line{text-align:center;font-size:7pt;margin-top:2pt;}
+    .italic-note{text-align:center;font-size:6pt;font-style:italic;margin:3pt 0 6pt;line-height:1.5;}
+    .double-rule{border-top:2pt double #000;border-bottom:0.5pt solid #000;height:3pt;margin-bottom:6pt;}
+    .assets-title{font-size:8pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;margin-bottom:2pt;}
+    .section-num{font-size:7pt;font-weight:700;margin-bottom:2pt;}
+    .section-sub{font-size:7pt;font-weight:700;margin:4pt 0 2pt;}
+    .col-hd{border:0.5pt solid #000;padding:2pt 3pt;font-size:6pt;font-weight:700;text-align:center;vertical-align:middle;background:#c8c8c8;}
+    .data-row td{border:0.5pt solid #000;padding:1.5pt 3pt;font-size:6.5pt;vertical-align:middle;}
+    .subtotal-row td,.total-row td{border:none;padding:2pt 0;font-size:7pt;font-weight:700;text-align:right;}
+    .footer-area{display:flex;justify-content:space-between;align-items:flex-end;margin-top:12pt;}
+    .page-num{font-size:7.5pt;font-style:italic;}
+    .sig-line{font-size:7pt;font-style:italic;border-top:0.5pt solid #000;padding-top:2pt;min-width:140pt;text-align:center;}
+    .name-row td{border-bottom:0.5pt solid #000;padding:1.5pt 2pt;height:14pt;font-size:7pt;}
+    .name-lbl{font-size:5.5pt;padding-top:1pt;text-align:center;}
   `;
+
+  const buildAnnexSection = (title, refText, noteHtml, nameHtml, position, agency, real, pers, liab, bizItems, realSubtotalValue, personalSubtotalValue, totalAssetsValue, totalLiabilitiesValue) => {
+    const annexRealRows = real.map(r => `<tr class="data-row">
+      <td style="width:15%;">${v(r.description)}&nbsp;</td>
+      <td style="width:12%;">${v(r.kind)}&nbsp;</td>
+      <td style="width:14%;">${v(r.location)}&nbsp;</td>
+      <td style="width:9%;text-align:right;">${fmtM(r.assessed_value)}&nbsp;</td>
+      <td style="width:10%;text-align:right;">${fmtM(r.market_value)}&nbsp;</td>
+      <td style="width:8%;text-align:center;">${v(r.acq_year)}&nbsp;</td>
+      <td style="width:9%;">${v(r.acq_mode)}&nbsp;</td>
+      <td style="width:9%;text-align:right;">${fmtM(r.acq_cost)}&nbsp;</td>
+    </tr>`).join('');
+    const annexPersRows = pers.map(r => `<tr class="data-row">
+      <td style="width:62%;">${v(r.description)}&nbsp;</td>
+      <td style="width:18%;text-align:center;">${v(r.acq_year)}&nbsp;</td>
+      <td style="width:20%;text-align:right;">${fmtM(r.acq_cost)}&nbsp;</td>
+    </tr>`).join('');
+    const annexLiabRows = liab.map(r => `<tr class="data-row">
+      <td style="width:30%;">${v(r.nature)}&nbsp;</td>
+      <td style="width:43%;">${v(r.creditor)}&nbsp;</td>
+      <td style="width:27%;text-align:right;">${fmtM(r.balance)}&nbsp;</td>
+    </tr>`).join('');
+    const annexBizRows = bizItems.map(r => `<tr class="data-row">
+      <td style="width:27%;">${v(r.entity_name)}&nbsp;</td>
+      <td style="width:23%;">${v(r.biz_address)}&nbsp;</td>
+      <td style="width:29%;">${v(r.nature)}&nbsp;</td>
+      <td style="width:21%;text-align:center;">${fmtD(r.date_acquired)}&nbsp;</td>
+    </tr>`).join('');
+
+    return `
+<div style="page-break-before:always;"></div>
+<div class="ref">${refText}</div>
+<div class="main-title">${title}</div>
+<div class="as-of-line">As of <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:160pt;">&nbsp;</span></div>
+<div class="italic-note">${noteHtml}</div>
+<table style="margin-bottom:6pt;" class="name-block">
+  <tr>
+    <td style="border:none;width:7%;padding:2pt 0;font-size:7pt;font-weight:700;vertical-align:bottom;">NAME:</td>
+    <td style="border:none;width:43%;padding:0;vertical-align:bottom;">${nameHtml}</td>
+    <td style="border:none;width:8%;padding:2pt 4pt;font-size:7pt;font-weight:700;vertical-align:bottom;">POSITION:</td>
+    <td style="border:none;border-bottom:0.5pt solid #000;width:42%;vertical-align:bottom;">${v(position)}&nbsp;</td>
+  </tr>
+  <tr>
+    <td style="border:none;" colspan="2"></td>
+    <td style="border:none;padding:2pt 4pt;font-size:7pt;font-weight:700;vertical-align:bottom;">AGENCY/OFFICE:</td>
+    <td style="border:none;border-bottom:0.5pt solid #000;vertical-align:bottom;">${v(agency)}&nbsp;</td>
+  </tr>
+</table>
+<div class="double-rule"></div>
+<div class="assets-title">Assets, Liabilities and Net Worth</div>
+<div class="section-num">1.&nbsp;&nbsp;ASSETS</div>
+<div class="section-sub">a.&nbsp;&nbsp;Real Properties</div>
+<table style="margin-bottom:4pt;">
+  <thead>
+    <tr>
+      <th class="col-hd" style="width:15%;">DESCRIPTION<br><span style="font-weight:400;font-size:5pt;">(e.g. lot, house and<br>lot, condominium<br>and improvements)</span></th>
+      <th class="col-hd" style="width:12%;">KIND<br><span style="font-weight:400;font-size:5pt;">(e.g. residential,<br>commercial, industrial,<br>agricultural and mixed<br>use)</span></th>
+      <th class="col-hd" style="width:14%;">EXACT<br>LOCATION</th>
+      <th class="col-hd" style="width:9%;">ASSESSED<br>VALUE</th>
+      <th class="col-hd" style="width:10%;">CURRENT FAIR<br>MARKET VALUE<br><span style="font-weight:400;font-size:5pt;">(As found in the Tax Declaration of<br>Real Property)</span></th>
+      <td colspan="2" style="padding:0;width:17%;background:#c8c8c8;vertical-align:top;border:0.5pt solid #000;">
+        <div style="text-align:center;font-size:6pt;font-weight:700;padding:2pt;border-bottom:0.5pt solid #000;">ACQUISITION</div>
+        <table style="width:100%;border-collapse:collapse;"><tr>
+          <td style="border-right:0.5pt solid #000;padding:2pt 1pt;font-size:5.5pt;font-weight:700;text-align:center;width:50%;background:#c8c8c8;">YEAR</td>
+          <td style="padding:2pt 1pt;font-size:5.5pt;font-weight:700;text-align:center;width:50%;background:#c8c8c8;">MODE</td>
+        </tr></table>
+      </td>
+      <th class="col-hd" style="width:9%;">ACQUISITION<br>COST</th>
+    </tr>
+  </thead>
+  <tbody>${annexRealRows}</tbody>
+</table>
+<table style="margin-bottom:8pt;"><tr class="subtotal-row"><td colspan="8">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">${fmtM(realSubtotalValue)}&nbsp;</span></td></tr></table>
+<div class="section-sub">b.&nbsp;&nbsp;Personal Properties</div>
+<table style="margin-bottom:0;">
+  <thead>
+    <tr>
+      <th class="col-hd" style="width:62%;">DESCRIPTION</th>
+      <th class="col-hd" style="width:18%;">ACQUISITION YEAR</th>
+      <th class="col-hd" style="width:20%;">ACQUISITION<br>COST/ AMOUNT</th>
+    </tr>
+  </thead>
+  <tbody>${annexPersRows}</tbody>
+</table>
+<table style="margin-bottom:8pt;">
+  <tr class="subtotal-row"><td colspan="3">Subtotal: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">${fmtM(personalSubtotalValue)}&nbsp;</span></td></tr>
+  <tr class="total-row"><td colspan="3">Total Assets: <span style="display:inline-block;border-bottom:2pt solid #000;min-width:100pt;">${fmtM(totalAssetsValue)}&nbsp;</span></td></tr>
+</table>
+<div class="section-num">2.&nbsp;&nbsp;LIABILITIES</div>
+<table style="margin-bottom:0;">
+  <thead>
+    <tr>
+      <th class="col-hd" style="width:30%;">NATURE</th>
+      <th class="col-hd" style="width:43%;">NAME OF CREDITORS</th>
+      <th class="col-hd" style="width:27%;">OUTSTANDING BALANCE</th>
+    </tr>
+  </thead>
+  <tbody>${annexLiabRows}</tbody>
+</table>
+<table style="margin-bottom:4pt;"><tr class="total-row"><td colspan="3">Total Liabilities: <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:100pt;">${fmtM(totalLiabilitiesValue)}&nbsp;</span></td></tr></table>
+<div class="double-rule"></div>
+<div style="font-size:8pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;margin-bottom:4pt;">Business Interests and Financial Connections</div>
+<table style="margin-bottom:16pt;">
+  <thead>
+    <tr>
+      <th class="col-hd" style="width:27%;">NAME OF ENTITY/BUSINESS<br>ENTERPRISE</th>
+      <th class="col-hd" style="width:23%;">BUSINESS ADDRESS</th>
+      <th class="col-hd" style="width:29%;">NATURE OF BUSINESS<br>INTEREST &amp;/OR FINANCIAL<br>CONNECTION</th>
+      <th class="col-hd" style="width:21%;">DATE OF ACQUISITION OF<br>INTEREST OR CONNECTION</th>
+    </tr>
+  </thead>
+  <tbody>${annexBizRows}</tbody>
+</table>
+<div class="footer-area">
+  <div class="page-num"><em>Page ___ of ___</em></div>
+  <div class="sig-line">Signature/Initial of Declarant</div>
+</div>`;
+  };
+
+  const buildNameTable = (lastName, firstName, middleInitial) => `
+    <table style="width:100%;border-collapse:collapse;">
+      <tr class="name-row">
+        <td style="width:40%;">${v(lastName)}&nbsp;</td>
+        <td style="border-left:none;width:40%;">${v(firstName)}&nbsp;</td>
+        <td style="border-left:none;width:20%;">${v(middleInitial)}&nbsp;</td>
+      </tr>
+      <tr>
+        <td class="name-lbl" style="border:none;">(Family Name)</td>
+        <td class="name-lbl" style="border:none;">(First Name)</td>
+        <td class="name-lbl" style="border:none;">(M.I.)</td>
+      </tr>
+    </table>`;
+
+  const annexBRealSubtotal = (d.as1_real_subtotal !== '' && d.as1_real_subtotal !== null && d.as1_real_subtotal !== undefined)
+    ? nVal(d.as1_real_subtotal)
+    : as1Rp.reduce((sum, p) => sum + (nVal(p.market_value) || nVal(p.assessed_value)), 0);
+  const annexBPersonalSubtotal = (d.as1_personal_subtotal !== '' && d.as1_personal_subtotal !== null && d.as1_personal_subtotal !== undefined)
+    ? nVal(d.as1_personal_subtotal)
+    : as1Pp.reduce((sum, p) => sum + nVal(p.acq_cost), 0);
+  const annexBTotalAssets = (d.as1_total_assets !== '' && d.as1_total_assets !== null && d.as1_total_assets !== undefined)
+    ? nVal(d.as1_total_assets)
+    : annexBRealSubtotal + annexBPersonalSubtotal;
+  const annexBTotalLiabilities = (d.as1_total_liabilities !== '' && d.as1_total_liabilities !== null && d.as1_total_liabilities !== undefined)
+    ? nVal(d.as1_total_liabilities)
+    : as1Lb.reduce((sum, l) => sum + nVal(l.balance), 0);
+
+  const annexCRealSubtotal = (d.as2_real_subtotal !== '' && d.as2_real_subtotal !== null && d.as2_real_subtotal !== undefined)
+    ? nVal(d.as2_real_subtotal)
+    : as2Rp.reduce((sum, p) => sum + (nVal(p.market_value) || nVal(p.assessed_value)), 0);
+  const annexCPersonalSubtotal = (d.as2_personal_subtotal !== '' && d.as2_personal_subtotal !== null && d.as2_personal_subtotal !== undefined)
+    ? nVal(d.as2_personal_subtotal)
+    : as2Pp.reduce((sum, p) => sum + nVal(p.acq_cost), 0);
+  const annexCTotalAssets = (d.as2_total_assets !== '' && d.as2_total_assets !== null && d.as2_total_assets !== undefined)
+    ? nVal(d.as2_total_assets)
+    : annexCRealSubtotal + annexCPersonalSubtotal;
+  const annexCTotalLiabilities = (d.as2_total_liabilities !== '' && d.as2_total_liabilities !== null && d.as2_total_liabilities !== undefined)
+    ? nVal(d.as2_total_liabilities)
+    : as2Lb.reduce((sum, l) => sum + nVal(l.balance), 0);
+
+  const includeAnnexB = hasAnnexData(as1Rp, [d.as1_real_subtotal, d.as1_personal_subtotal, d.as1_total_assets, d.as1_total_liabilities])
+    || hasAnnexData(as1Pp) || hasAnnexData(as1Lb) || hasAnnexData(as1Biz);
+  const includeAnnexC = hasAnnexData(as2Rp, [d.as2_real_subtotal, d.as2_personal_subtotal, d.as2_total_assets, d.as2_total_liabilities, as2Nm.full_name, as2Nm.position, as2Nm.agency])
+    || hasAnnexData(as2Pp) || hasAnnexData(as2Lb) || hasAnnexData(as2Biz);
+
+  let annexSections = '';
+  if (includeAnnexB) {
+    annexSections += buildAnnexSection(
+      'Sworn Statement of Assets, Liabilities and Net Worth',
+      'SALN Form AS-1 (Declarant)<br>Per CSC Resolution No. 2500632<br>Promulgated on 25 June 2025',
+      '(Additional sheet/s for the declarant)',
+      buildNameTable(dec.lastname, dec.firstname, dec.mi),
+      dec.position,
+      dec.agency,
+      as1Rp,
+      as1Pp,
+      as1Lb,
+      as1Biz,
+      annexBRealSubtotal,
+      annexBPersonalSubtotal,
+      annexBTotalAssets,
+      annexBTotalLiabilities
+    );
+  }
+  if (includeAnnexC) {
+    const annexCName = {
+      last: as2Nm.lastname || sp.lastname || '',
+      first: as2Nm.firstname || sp.firstname || '',
+      mi: as2Nm.mi || sp.mi || ''
+    };
+    if (!annexCName.last && !annexCName.first && !annexCName.mi && as2Nm.full_name) {
+      annexCName.last = as2Nm.full_name;
+    }
+    annexSections += buildAnnexSection(
+      'Statement of Assets, Liabilities and Net Worth',
+      '2025 SALN Form AS-2 (Spouse &amp; Children)<br>Per CSC Resolution No. 2500632<br>Promulgated on 25 June 2025',
+      '(Additional sheet/s for the exclusive properties of the declarant\'s spouse and unmarried children<br>below eighteen (18) years of age living in declarant\'s household)',
+      buildNameTable(annexCName.last, annexCName.first, annexCName.mi),
+      as2Nm.position || sp.position,
+      as2Nm.agency || sp.agency,
+      as2Rp,
+      as2Pp,
+      as2Lb,
+      as2Biz,
+      annexCRealSubtotal,
+      annexCPersonalSubtotal,
+      annexCTotalAssets,
+      annexCTotalLiabilities
+    );
+  }
 
   const html = `<!DOCTYPE html>
 <html><head>
   <meta charset="UTF-8"/>
   <title>SALN ${v(d.saln_year)} — ${v(dec.lastname)}, ${v(dec.firstname)}</title>
-  <style>${css}</style>
+  <style>${sharedCss}</style>
 </head><body>
 
-<!-- ══ HEADER ══ -->
-<div style="text-align:center;margin-bottom:3pt;">
-  <div style="font-size:6.5pt;color:#555;">2025 SALN Form &nbsp;·&nbsp; Per CSC Resolution No. 2500632 &nbsp;·&nbsp; Promulgated 25 June 2025</div>
-  <div class="page-title" style="margin-top:1pt;">Sworn Statement of Assets, Liabilities, and Net Worth</div>
-  <div class="page-sub">(As required by R.A. No. 6713)</div>
+<div class="ref">
+  2025 SALN Form<br>Per CSC Resolution No. 2500632<br>Promulgated on 25 June 2025
 </div>
 
-<!-- ══ COMPLIANCE FOR ══ -->
-<table style="margin-bottom:2pt;">
+<div style="text-align:center;margin-bottom:6pt;">
+  <div style="font-size:10pt;font-weight:700;text-transform:uppercase;letter-spacing:.04em;">Sworn Statement of Assets, Liabilities, and Net Worth</div>
+  <div style="font-size:7pt;">(As required by R.A. No. 6713)</div>
+</div>
+
+<table style="margin-bottom:4pt;">
   <tr>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;width:18%;font-weight:700;">COMPLIANCE FOR:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 5pt;font-size:6.5pt;">
-      <span class="yn">${cb(isAssumption)}</span> Assumption of office as of ${isAssumption?ul(fmtD(d.as_of_date),'80pt'):'________________________________'}
-      &nbsp;&nbsp;&nbsp;
-      <span class="yn">${cb(isAnnual)}</span> Annual filing as of December 31, ${isAnnual?`<strong>${v(d.saln_year)}</strong>`:'_________'}
-      &nbsp;&nbsp;&nbsp;
-      <span class="yn">${cb(isExit)}</span> Exit as of ${isExit?ul(fmtD(d.as_of_date),'80pt'):'________________________________'}
+    <td colspan="3" style="border:none;padding:0 0 2pt 0;font-size:7.5pt;font-weight:700;text-align:center;text-decoration:underline;">COMPLIANCE FOR:</td>
+  </tr>
+  <tr>
+    <td style="border:none;padding:1pt 6pt;font-size:7pt;width:34%;">
+      <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(isAssumption)}</span>
+      &nbsp;<em>Assumption of office as of</em> ___________
+    </td>
+    <td style="border:none;padding:1pt 6pt;font-size:7pt;width:33%;text-align:center;">
+      <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(isAnnual)}</span>
+      &nbsp;<em>Annual filing as of December 31,</em> ${isAnnual?`<strong>${v(d.saln_year)}</strong>`:'______'}
+    </td>
+    <td style="border:none;padding:1pt 6pt;font-size:7pt;width:33%;text-align:right;">
+      <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(isExit)}</span>
+      &nbsp;<em>Exit as of</em> ___________
     </td>
   </tr>
 </table>
 
-<!-- ══ JOINT / SEPARATE FILING ══ -->
-<table style="margin-bottom:2pt;">
-  <tr>
-    <td style="border:0.5pt solid #000;padding:2pt 5pt;font-size:6pt;">
-      SPOUSES WHO ARE BOTH PUBLIC OFFICIALS/EMPLOYEES MAY FILE THE SALN JOINTLY OR SEPARATELY. THE DECLARANT SHALL CHECK THE APPROPRIATE BOX:
-      &nbsp;&nbsp; <span class="yn">${cb(isJoint)}</span> <strong>Joint Filing</strong>
-      &nbsp;&nbsp; <span class="yn">${cb(isSeparate)}</span> <strong>Separate Filing</strong>
-      &nbsp;&nbsp; <span class="yn">${cb(isNA)}</span> <strong>Not Applicable</strong>
-    </td>
-  </tr>
-  <tr>
-    <td style="border:0.5pt solid #000;border-top:none;padding:2pt 5pt;font-size:6pt;">
-      IF WITH MULTIPLE MARRIAGES, INDICATE NAME(S) OF SPOUSES, OTHERWISE CHECK "NOT APPLICABLE":
-      &nbsp;&nbsp; ${d.multi_spouse_na?`<span class="yn">☑</span> Not Applicable`:ul(v(d.multi_spouse),'200pt')}
-    </td>
-  </tr>
-</table>
+<div style="border-top:2pt double #000;border-bottom:0.5pt solid #000;height:3pt;margin-bottom:4pt;"></div>
 
-<!-- ══ DECLARANT / SPOUSE ══ -->
-<table style="margin-bottom:2pt;">
+<table style="margin-bottom:4pt;">
   <tr>
-    <td style="border:0.5pt solid #000;width:50%;padding:0;vertical-align:top;">
-      <table style="width:100%;border-collapse:collapse;">
-        <tr><td colspan="2" style="border-bottom:0.5pt solid #000;padding:1.5pt 3pt;font-size:6pt;font-weight:700;background:#f0f0f0;">DECLARANT:</td></tr>
+    <td style="border:0.5pt solid #000;width:55%;padding:4pt 5pt;vertical-align:top;">
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:4pt;">DECLARANT:</div>
+      <table style="border-collapse:collapse;width:100%;margin-bottom:4pt;">
         <tr>
-          <td style="border-bottom:0.5pt solid #000;padding:1.5pt 3pt;width:35%;">
-            <div class="lbl">(Family Name)</div><div class="val">${v(dec.lastname)}</div>
-          </td>
-          <td style="border-bottom:0.5pt solid #000;border-left:0.5pt solid #000;padding:1.5pt 3pt;width:35%;">
-            <div class="lbl">(First Name)</div><div class="val">${v(dec.firstname)}</div>
-          </td>
-          <td style="border-bottom:0.5pt solid #000;border-left:0.5pt solid #000;padding:1.5pt 3pt;width:10%;">
-            <div class="lbl">(M.I.)</div><div class="val">${v(dec.mi)}</div>
-          </td>
-          <td style="border-bottom:0.5pt solid #000;border-left:0.5pt solid #000;padding:1.5pt 3pt;">
-            <div class="lbl">Position</div><div class="val" style="font-size:6.5pt;">${v(dec.position)}</div>
-          </td>
+          <td style="border-bottom:0.5pt solid #000;padding-bottom:1pt;width:40%;font-size:7pt;">${v(dec.lastname)}&nbsp;</td>
+          <td style="border-bottom:0.5pt solid #000;padding-bottom:1pt;padding-left:6pt;width:40%;font-size:7pt;">${v(dec.firstname)}&nbsp;</td>
+          <td style="border-bottom:0.5pt solid #000;padding-bottom:1pt;padding-left:4pt;width:20%;font-size:7pt;">${v(dec.mi)}&nbsp;</td>
         </tr>
         <tr>
-          <td colspan="2" style="padding:1.5pt 3pt;">
-            <div class="lbl">Agency/Office</div><div style="font-size:6.5pt;font-weight:600;min-height:9pt;">${v(dec.agency)}</div>
-          </td>
-          <td colspan="2" style="border-left:0.5pt solid #000;padding:1.5pt 3pt;">
-            <div class="lbl">Office Address</div><div style="font-size:6.5pt;font-weight:600;min-height:9pt;">${v(dec.office_addr)}</div>
-          </td>
+          <td style="font-size:5.5pt;padding-top:1pt;text-align:center;">(Family Name)</td>
+          <td style="font-size:5.5pt;padding-top:1pt;text-align:center;padding-left:6pt;">(First Name)</td>
+          <td style="font-size:5.5pt;padding-top:1pt;text-align:center;padding-left:4pt;">(M.I.)</td>
         </tr>
       </table>
     </td>
-    <td style="border:0.5pt solid #000;border-left:none;width:50%;padding:0;vertical-align:top;">
-      <table style="width:100%;border-collapse:collapse;">
-        <tr><td colspan="2" style="border-bottom:0.5pt solid #000;padding:1.5pt 3pt;font-size:6pt;font-weight:700;background:#f0f0f0;">SPOUSE:</td></tr>
+    <td style="border:0.5pt solid #000;border-left:none;width:45%;padding:4pt 5pt;vertical-align:top;">
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:2pt;">POSITION:</div>
+      <div style="border-bottom:0.5pt solid #000;min-height:10pt;font-size:7pt;margin-bottom:3pt;">${v(dec.position)}&nbsp;</div>
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:2pt;">AGENCY/OFFICE:</div>
+      <div style="border-bottom:0.5pt solid #000;min-height:10pt;font-size:7pt;margin-bottom:3pt;">${v(dec.agency)}&nbsp;</div>
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:2pt;">OFFICE ADDRESS:</div>
+      <div style="border-bottom:0.5pt solid #000;min-height:10pt;font-size:7pt;">${v(dec.office_addr)}&nbsp;</div>
+    </td>
+  </tr>
+  <tr>
+    <td style="border:0.5pt solid #000;border-top:none;width:55%;padding:4pt 5pt;vertical-align:top;">
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:4pt;">SPOUSE:</div>
+      <table style="border-collapse:collapse;width:100%;margin-bottom:4pt;">
         <tr>
-          <td style="border-bottom:0.5pt solid #000;padding:1.5pt 3pt;width:35%;">
-            <div class="lbl">(Family Name)</div><div class="val">${v(sp.lastname)}</div>
-          </td>
-          <td style="border-bottom:0.5pt solid #000;border-left:0.5pt solid #000;padding:1.5pt 3pt;width:35%;">
-            <div class="lbl">(First Name)</div><div class="val">${v(sp.firstname)}</div>
-          </td>
-          <td style="border-bottom:0.5pt solid #000;border-left:0.5pt solid #000;padding:1.5pt 3pt;width:10%;">
-            <div class="lbl">(M.I.)</div><div class="val">${v(sp.mi)}</div>
-          </td>
-          <td style="border-bottom:0.5pt solid #000;border-left:0.5pt solid #000;padding:1.5pt 3pt;">
-            <div class="lbl">Position</div><div class="val" style="font-size:6.5pt;">${v(sp.position)}</div>
-          </td>
+          <td style="border-bottom:0.5pt solid #000;padding-bottom:1pt;width:40%;font-size:7pt;">${v(sp.lastname)}&nbsp;</td>
+          <td style="border-bottom:0.5pt solid #000;padding-bottom:1pt;padding-left:6pt;width:40%;font-size:7pt;">${v(sp.firstname)}&nbsp;</td>
+          <td style="border-bottom:0.5pt solid #000;padding-bottom:1pt;padding-left:4pt;width:20%;font-size:7pt;">${v(sp.mi)}&nbsp;</td>
         </tr>
         <tr>
-          <td colspan="2" style="padding:1.5pt 3pt;">
-            <div class="lbl">Agency/Office</div><div style="font-size:6.5pt;font-weight:600;min-height:9pt;">${v(sp.agency)}</div>
-          </td>
-          <td colspan="2" style="border-left:0.5pt solid #000;padding:1.5pt 3pt;">
-            <div class="lbl">Office Address</div><div style="font-size:6.5pt;font-weight:600;min-height:9pt;">${v(sp.office_addr)}</div>
-          </td>
+          <td style="font-size:5.5pt;padding-top:1pt;text-align:center;">(Family Name)</td>
+          <td style="font-size:5.5pt;padding-top:1pt;text-align:center;padding-left:6pt;">(First Name)</td>
+          <td style="font-size:5.5pt;padding-top:1pt;text-align:center;padding-left:4pt;">(M.I.)</td>
         </tr>
       </table>
+    </td>
+    <td style="border:0.5pt solid #000;border-left:none;border-top:none;width:45%;padding:4pt 5pt;vertical-align:top;">
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:2pt;">POSITION:</div>
+      <div style="border-bottom:0.5pt solid #000;min-height:10pt;font-size:7pt;margin-bottom:3pt;">${v(sp.position)}&nbsp;</div>
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:2pt;">AGENCY/OFFICE:<sup style="font-size:5pt;">1</sup></div>
+      <div style="border-bottom:0.5pt solid #000;min-height:10pt;font-size:7pt;margin-bottom:3pt;">${v(sp.agency)}&nbsp;</div>
+      <div style="font-size:6.5pt;font-weight:700;margin-bottom:2pt;">OFFICE ADDRESS:</div>
+      <div style="border-bottom:0.5pt solid #000;min-height:10pt;font-size:7pt;">${v(sp.office_addr)}&nbsp;</div>
     </td>
   </tr>
 </table>
 
-<!-- ══ CHILDREN ══ -->
-<table style="margin-bottom:2pt;">
+<div style="font-size:6.5pt;font-weight:700;margin-bottom:3pt;line-height:1.6;">
+  SPOUSES, WHO ARE BOTH PUBLIC OFFICIALS OR EMPLOYEES, MAY FILE THE SALN JOINTLY OR SEPARATELY.<br>
+  THE DECLARANT SHALL CHECK THE APPROPRIATE BOX<br>
+  <span style="font-weight:400;font-style:italic;">
+    &nbsp;&nbsp;&nbsp;
+    <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(isJoint)}</span>
+    &nbsp;Joint Filing
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(isSeparate)}</span>
+    &nbsp;Separate Filing
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(isNA)}</span>
+    &nbsp;Not Applicable
+  </span>
+</div>
+
+<div style="font-size:6.5pt;font-weight:700;margin-bottom:6pt;line-height:1.6;">
+  IF WITH MULTIPLE MARRIAGES, INDICATE NAME(S) OF SPOUSES, OTHERWISE CHECK THE "NOT APPLICABLE" BOX.<br>
+  <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:220pt;font-size:7pt;font-weight:400;">${d.multi_spouse_na?'':v(d.multi_spouse)}&nbsp;</span>
+  &nbsp;&nbsp;&nbsp;
+  <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(d.multi_spouse_na)}</span>
+  &nbsp;<em style="font-weight:400;">Not Applicable</em>
+</div>
+
+<div style="border-top:2pt double #000;border-bottom:0.5pt solid #000;height:3pt;margin-bottom:6pt;"></div>
+
+<table style="margin-bottom:6pt;">
   <tr>
-    <th colspan="2" style="border:0.5pt solid #000;padding:2pt 5pt;font-size:6.5pt;font-weight:700;text-align:left;background:#f0f0f0;">
-      UNMARRIED CHILDREN BELOW EIGHTEEN (18) YEARS OF AGE LIVING IN DECLARANT'S HOUSEHOLD
-    </th>
+    <td colspan="2" style="border:0.5pt solid #000;padding:2pt 5pt;font-size:7pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;">
+      Unmarried Children Below Eighteen (18) Years of Age Living in Declarant's Household
+    </td>
   </tr>
   <tr>
-    ${H('NAME OF CHILD','width:75%;text-align:left;')}
-    ${H('AGE','width:25%;text-align:center;')}
+    ${H('NAME OF CHILD','width:76%;text-align:center;')}
+    ${H('AGE','width:24%;text-align:center;')}
   </tr>
   ${childRows}
 </table>
 
-<!-- ══ ASSETS HEADER ══ -->
-<table style="margin-bottom:0;">
-  <tr>
-    <td style="border:0.5pt solid #000;padding:2pt 5pt;font-size:7pt;font-weight:700;text-transform:uppercase;">
-      Assets, Liabilities and Net Worth
-      <span style="font-size:6pt;font-weight:400;">(Including those of the spouse and unmarried children below 18 years of age living in declarant's household)</span>
-    </td>
-  </tr>
-</table>
+<div style="border-top:2pt double #000;border-bottom:0.5pt solid #000;height:3pt;margin-bottom:6pt;"></div>
 
-<!-- ══ REAL PROPERTIES ══ -->
+<div style="font-size:8pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;margin-bottom:2pt;">Assets, Liabilities and Net Worth<sup style="font-size:5.5pt;">ii</sup></div>
+<div style="font-size:6pt;text-align:center;font-style:italic;margin-bottom:4pt;">(Including those of the spouse and unmarried children below eighteen (18) years of age living in declarant's household)<sup style="font-size:5pt;">iii</sup></div>
+
+<div style="font-size:7pt;font-weight:700;margin-bottom:2pt;">1.&nbsp;&nbsp;ASSETS</div>
+<div style="font-size:7pt;font-weight:700;margin-bottom:2pt;">&nbsp;&nbsp;&nbsp;&nbsp;a.&nbsp;&nbsp;Real Properties</div>
 <table style="margin-bottom:0;">
   <tr>
-    <td colspan="8" style="border:0.5pt solid #000;border-top:none;padding:1.5pt 4pt;font-size:6.5pt;font-weight:700;">
-      1. &nbsp; ASSETS &nbsp;&nbsp; a. &nbsp; Real Properties
-    </td>
-  </tr>
-  <tr>
-    ${H('DESCRIPTION<br><span style="font-weight:400;font-size:5pt;">(e.g. lot, house and lot, condominium)</span>','width:17%;')}
-    ${H('KIND<br><span style="font-weight:400;font-size:5pt;">(residential, commercial, agricultural)</span>','width:12%;')}
-    ${H('EXACT LOCATION<br><span style="font-weight:400;font-size:5pt;">(per Tax Declaration)</span>','width:14%;')}
-    ${H('ASSESSED VALUE<br><span style="font-weight:400;font-size:5pt;">(per Tax Dec.)</span>','width:9%;text-align:center;')}
-    ${H('CURRENT FAIR MARKET VALUE','width:9%;text-align:center;')}
-    <td style="border:0.5pt solid #000;padding:0;width:19%;background:#e0e0e0;vertical-align:top;">
-      <div style="text-align:center;font-size:5.5pt;font-weight:700;padding:1.5pt 2pt;border-bottom:0.5pt solid #000;">ACQUISITION</div>
+    ${H('DESCRIPTION<br><span style="font-weight:400;font-size:5pt;">(e.g. lot, house and<br>lot, condominium,<br>and improvements)</span>','width:18%;')}
+    ${H('KIND<br><span style="font-weight:400;font-size:5pt;">(e.g. residential,<br>commercial, industrial,<br>agricultural and mixed<br>use)</span>','width:12%;')}
+    ${H('EXACT<br>LOCATION','width:16%;')}
+    ${H('ASSESSED<br>VALUE','width:10%;')}
+    ${H('CURRENT FAIR<br>MARKET VALUE<br><span style="font-weight:400;font-size:5pt;">(As found in the Tax Declaration of<br>Real Property, if available)</span>','width:10%;')}
+    <td colspan="3" style="border:0.5pt solid #000;padding:0;width:28%;vertical-align:top;">
+      <div style="text-align:center;font-size:6pt;font-weight:700;padding:2pt;border-bottom:0.5pt solid #000;">ACQUISITION</div>
       <table style="width:100%;border-collapse:collapse;"><tr>
-        <td style="border-right:0.5pt solid #000;padding:1pt;font-size:5.5pt;font-weight:700;text-align:center;width:33%;">YEAR</td>
-        <td style="border-right:0.5pt solid #000;padding:1pt;font-size:5.5pt;font-weight:700;text-align:center;width:34%;">MODE</td>
-        <td style="padding:1pt;font-size:5.5pt;font-weight:700;text-align:center;width:33%;">COST</td>
+        <td style="border-right:0.5pt solid #000;padding:2pt 1pt;font-size:5.5pt;font-weight:700;text-align:center;width:33%;">YEAR</td>
+        <td style="border-right:0.5pt solid #000;padding:2pt 1pt;font-size:5.5pt;font-weight:700;text-align:center;width:33%;">MODE</td>
+        <td style="padding:2pt 1pt;font-size:5.5pt;font-weight:700;text-align:center;width:34%;">ACQUISITION<br>COST</td>
       </tr></table>
     </td>
   </tr>
   ${realRows}
-  <tr style="background:#f5f5f5;">
-    <td colspan="5" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:right;">Subtotal:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;">${fmtM(d.real_subtotal)}&nbsp;</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:right;">Subtotal:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;">${fmtM(d.real_subtotal)}&nbsp;</td>
+  <tr>
+    <td colspan="7" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:right;">Subtotal:</td>
+    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;border-bottom:2pt solid #000;">${fmtM(realSubtotal)}&nbsp;</td>
   </tr>
 </table>
 
-<!-- ══ PERSONAL PROPERTIES ══ -->
+<div style="font-size:7pt;font-weight:700;margin-top:4pt;margin-bottom:2pt;">&nbsp;&nbsp;&nbsp;&nbsp;b.&nbsp;&nbsp;Personal Properties</div>
 <table style="margin-bottom:0;">
   <tr>
-    <td colspan="3" style="border:0.5pt solid #000;border-top:none;padding:1.5pt 4pt;font-size:6.5pt;font-weight:700;">
-      b. &nbsp; Personal Properties
-    </td>
-  </tr>
-  <tr>
-    ${H('DESCRIPTION','width:60%;')}
-    ${H('ACQUISITION YEAR','width:18%;text-align:center;')}
-    ${H('ACQUISITION COST/AMOUNT','width:22%;text-align:center;')}
+    ${H('DESCRIPTION','width:65%;')}
+    ${H('ACQUISITION YEAR','width:17%;')}
+    ${H('ACQUISITION<br>COST/ AMOUNT','width:18%;')}
   </tr>
   ${persRows}
-  <tr style="background:#f5f5f5;">
+  <tr>
     <td colspan="2" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:right;">Subtotal:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;">${fmtM(d.personal_subtotal)}&nbsp;</td>
+    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;border-bottom:2pt solid #000;">${fmtM(personalSubtotal)}&nbsp;</td>
   </tr>
-  <tr style="background:#dde8f0;">
-    <td colspan="2" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;text-transform:uppercase;">Total Assets:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;">${fmtM(d.total_assets)}&nbsp;</td>
+  <tr>
+    <td colspan="2" style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;text-transform:uppercase;">Total Assets:</td>
+    <td style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;border-bottom:2pt solid #000;">${fmtM(totalAssets)}&nbsp;</td>
   </tr>
 </table>
 
-<!-- ══ LIABILITIES ══ -->
+<div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:8pt;">
+  <div style="font-size:7.5pt;font-style:italic;">Page 1 of ___</div>
+  <div style="font-size:7pt;font-style:italic;border-top:0.5pt solid #000;padding-top:2pt;min-width:120pt;text-align:center;">Signature/Initial of Declarant</div>
+</div>
+
+<div style="page-break-after:always;"></div>
+
+<div style="font-size:7pt;font-weight:700;margin-bottom:2pt;">2.&nbsp;&nbsp;LIABILITIES</div>
 <table style="margin-bottom:0;">
   <tr>
-    <td colspan="3" style="border:0.5pt solid #000;border-top:none;padding:1.5pt 4pt;font-size:6.5pt;font-weight:700;text-transform:uppercase;">
-      Liabilities
-    </td>
-  </tr>
-  <tr>
-    ${H('NATURE','width:35%;')}
-    ${H('NAME OF CREDITORS','width:40%;')}
-    ${H('OUTSTANDING BALANCE','width:25%;text-align:center;')}
+    ${H('NATURE','width:34%;')}
+    ${H('NAME OF CREDITORS','width:41%;')}
+    ${H('OUTSTANDING BALANCE','width:25%;')}
   </tr>
   ${liabRows}
-  <tr style="background:#f5f5f5;">
-    <td colspan="2" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:right;text-transform:uppercase;">Total Liabilities:</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;">${fmtM(d.total_liabilities)}&nbsp;</td>
+  <tr>
+    <td colspan="2" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-align:right;text-transform:uppercase;">Total Liabilities:</td>
+    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;border-bottom:2pt solid #000;">${fmtM(totalLiabilities)}&nbsp;</td>
   </tr>
-  <tr style="background:#dde8f0;">
-    <td colspan="2" style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7pt;font-weight:700;text-transform:uppercase;">Net Worth (Total Assets less Total Liabilities) =</td>
-    <td style="border:0.5pt solid #000;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;">${fmtM(d.net_worth)}&nbsp;</td>
+  <tr>
+    <td colspan="2" style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7pt;font-weight:700;text-transform:uppercase;">Net Worth: Total Assets less Total Liabilities =</td>
+    <td style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:7.5pt;font-weight:800;text-align:right;border-bottom:2.5pt double #000;">${fmtM(netWorth)}&nbsp;</td>
   </tr>
 </table>
 
-<!-- ══ BUSINESS INTERESTS ══ -->
-<table style="margin-bottom:0;margin-top:3pt;">
+<div style="margin-top:10pt;margin-bottom:2pt;">
+  <div class="section-title">Business Interests and Financial Connections</div>
+  <div style="font-size:6pt;text-align:center;font-style:italic;">(of Declarant / Declarant's spouse/ Unmarried Children Below Eighteen (18) years of Age Living in Declarant's Household)</div>
+</div>
+<div style="font-size:7pt;margin-bottom:3pt;">
+  <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(d.no_biz)}</span>
+  &nbsp;<em>I/ We do not have any business interest or financial connection.</em>
+</div>
+<table style="margin-bottom:10pt;">
   <tr>
-    <td colspan="4" style="border:0.5pt solid #000;padding:1.5pt 4pt;font-size:6.5pt;font-weight:700;text-transform:uppercase;">
-      Business Interests and Financial Connections
-      <span style="font-weight:400;font-size:5.5pt;">(of Declarant / Declarant's Spouse / Unmarried Children Below 18 in Declarant's Household)</span>
-    </td>
+    ${H('NAME OF ENTITY/BUSINESS<br>ENTERPRISE','width:27%;')}
+    ${H('BUSINESS ADDRESS','width:26%;')}
+    ${H('NATURE OF BUSINESS<br>INTEREST &amp;/OR FINANCIAL<br>CONNECTION','width:28%;')}
+    ${H('DATE OF ACQUISITION OF<br>INTEREST OR CONNECTION','width:19%;')}
   </tr>
-  ${d.no_biz
-    ? `<tr><td colspan="4" style="border:0.5pt solid #000;border-top:none;padding:3pt 5pt;font-size:6.5pt;"><span class="yn">☑</span> I/We do not have any business interest or financial connection.</td></tr>`
-    : `<tr><td colspan="4" style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:6pt;"><span class="yn">☐</span> I/We do not have any business interest or financial connection.</td></tr>
-       <tr>${H('NAME OF ENTITY/BUSINESS ENTERPRISE','width:28%;')}${H('BUSINESS ADDRESS','width:25%;')}${H('NATURE OF BUSINESS INTEREST / FINANCIAL CONNECTION','width:28%;')}${H('DATE ACQUIRED','width:19%;text-align:center;')}</tr>
-       ${bizRows}`}
+  ${bizRows}
 </table>
 
-<!-- ══ RELATIVES IN GOVT ══ -->
-<table style="margin-bottom:3pt;margin-top:3pt;">
+<div style="margin-bottom:2pt;">
+  <div class="section-title">Relatives in the Government Service</div>
+  <div style="font-size:6pt;text-align:center;font-style:italic;">(Within the Fourth Degree of Consanguinity or Affinity. Include also Bilas, Balae and Inso<sup>iv</sup>)</div>
+</div>
+<div style="font-size:7pt;margin-bottom:3pt;">
+  <span style="display:inline-block;border:0.5pt solid #000;width:8pt;height:8pt;text-align:center;line-height:7.5pt;font-size:7pt;vertical-align:middle;">${cb(d.no_rel)}</span>
+  &nbsp;<em>I/ We do not know of any relative/ s in the government service</em>
+</div>
+<table style="margin-bottom:10pt;">
   <tr>
-    <td colspan="4" style="border:0.5pt solid #000;padding:1.5pt 4pt;font-size:6.5pt;font-weight:700;text-transform:uppercase;">
-      Relatives in the Government Service
-      <span style="font-weight:400;font-size:5.5pt;">(Within the Fourth Degree of Consanguinity or Affinity. Include also Bilas, Balae and Inso.)</span>
-    </td>
+    ${H('NAME OF RELATIVE','width:24%;')}
+    ${H('RELATIONSHIP','width:16%;')}
+    ${H('POSITION','width:24%;')}
+    ${H('NAME OF AGENCY/OFFICE AND ADDRESS','width:36%;')}
   </tr>
-  ${d.no_rel
-    ? `<tr><td colspan="4" style="border:0.5pt solid #000;border-top:none;padding:3pt 5pt;font-size:6.5pt;"><span class="yn">☑</span> I/We do not know of any relative/s in the government service.</td></tr>`
-    : `<tr><td colspan="4" style="border:0.5pt solid #000;border-top:none;padding:2pt 4pt;font-size:6pt;"><span class="yn">☐</span> I/We do not know of any relative/s in the government service.</td></tr>
-       <tr>${H('NAME OF RELATIVE','width:25%;')}${H('RELATIONSHIP','width:15%;')}${H('POSITION','width:25%;')}${H('AGENCY/OFFICE AND ADDRESS','width:35%;')}</tr>
-       ${relRows}`}
+  ${relRows}
 </table>
 
-<!-- ══ DECLARATION ══ -->
-<table style="margin-bottom:3pt;">
-  <tr>
-    <td style="border:0.5pt solid #000;padding:3pt 5pt;font-size:6pt;line-height:1.6;">
-      I hereby certify that these are true and correct statements of my assets, liabilities, net worth, business interests and financial connections, including those of my spouse and unmarried children below eighteen (18) years of age living in my household, and that to the best of my knowledge, the above-enumerated are names of my relatives in the government within the fourth civil degree of consanguinity or affinity.
-    </td>
-  </tr>
-  <tr>
-    <td style="border:0.5pt solid #000;border-top:none;padding:3pt 5pt;font-size:6pt;line-height:1.6;">
-      I hereby authorize the Ombudsman or his/her duly authorized representative to obtain and secure from all appropriate government agencies, including the Bureau of Internal Revenue, such documents that may show my assets, liabilities, net worth, business interests and financial connections, to include those of my spouse and unmarried children below 18 years of age living with me in my household.
-    </td>
-  </tr>
-</table>
+<div style="font-size:7pt;line-height:1.8;text-align:justify;margin-bottom:8pt;padding:0 4pt;">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;I hereby certify that these&nbsp; are true and correct statements&nbsp; of my assets,&nbsp; liabilities, net worth, business interests&nbsp; and financial connections, including those&nbsp; of my spouse and unmarried children below eighteen (18)&nbsp; years of age living in my household,&nbsp; and that to the best of my knowledge, the above-enumerated are names&nbsp; of my relatives&nbsp; in the government&nbsp; within the fourth civil degree of consanguinity or affinity.
+</div>
+<div style="font-size:7pt;line-height:1.8;text-align:justify;margin-bottom:14pt;padding:0 4pt;">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;I hereby authorize the Ombudsman&nbsp; or his/her duly authorized representative to obtain and secure from all appropriate government agencies, including the Bureau of Internal Revenue such documents that may show my assets, liabilities, net worth, business interests and financial connections, to include those of my spouse and unmarried children below 18 years of age living with me&nbsp; in my household covering previous years to include the year&nbsp; I first&nbsp; assumed office in government.
+</div>
 
-<!-- ══ SIGNATURE / GOV ID AREA ══ -->
-<table style="margin-bottom:3pt;">
+<div style="font-size:7pt;margin-bottom:18pt;">
+  Date:&nbsp;&nbsp;&nbsp;&nbsp;<span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:150pt;">&nbsp;</span>
+</div>
+
+<table style="margin-bottom:8pt;">
   <tr>
-    <td style="border:0.5pt solid #000;width:50%;padding:0;vertical-align:top;">
-      <table style="width:100%;border-collapse:collapse;">
-        <tr><td colspan="2" style="height:32pt;padding:2pt 4pt;font-size:6pt;color:#666;vertical-align:bottom;">(wet signature/e-signature/digital certificate)</td></tr>
-        <tr><td colspan="2" style="border-top:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:center;">Signature of Declarant</td></tr>
-        <tr>
-          <td style="border-top:0.5pt solid #000;padding:2pt 4pt;font-size:6pt;">
-            <div style="font-size:5.5pt;color:#666;">Government Issued ID:</div>
-            <div style="font-size:7pt;font-weight:700;border-bottom:0.4pt solid #999;min-height:11pt;">${v(d.gov_id)}&nbsp;</div>
-          </td>
-          <td style="border-top:0.5pt solid #000;border-left:0.5pt solid #000;padding:2pt 4pt;font-size:6pt;">
-            <div style="font-size:5.5pt;color:#666;">ID No.:</div>
-            <div style="font-size:7pt;font-weight:700;border-bottom:0.4pt solid #999;min-height:11pt;">${v(d.gov_id_no)}&nbsp;</div>
-          </td>
-        </tr>
-        <tr>
-          <td colspan="2" style="border-top:0.5pt solid #000;padding:2pt 4pt;font-size:6pt;">
-            <div style="font-size:5.5pt;color:#666;">Date Issued:</div>
-            <div style="font-size:7pt;font-weight:700;border-bottom:0.4pt solid #999;min-height:11pt;">${v(d.gov_id_issued)?fmtD(d.gov_id_issued):''}&nbsp;</div>
-          </td>
-        </tr>
-      </table>
+    <td style="border:none;width:50%;padding:0 8pt 0 0;vertical-align:bottom;">
+      <div style="border-top:0.5pt solid #000;padding-top:3pt;font-size:7pt;font-style:italic;text-align:center;">Signature of Declarant</div>
+      <div style="margin-top:6pt;font-size:7pt;">Government Issued ID:&nbsp; <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:120pt;">&nbsp;</span></div>
+      <div style="margin-top:4pt;font-size:7pt;">ID No.:&nbsp; <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:140pt;">${v(d.gov_id_no)}&nbsp;</span></div>
+      <div style="margin-top:4pt;font-size:7pt;">Date Issued:&nbsp; <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:130pt;">${v(d.gov_id_issued)?fmtD(d.gov_id_issued):''}&nbsp;</span></div>
     </td>
-    <td style="border:0.5pt solid #000;border-left:none;width:50%;padding:0;vertical-align:top;">
-      <table style="width:100%;border-collapse:collapse;">
-        <tr><td colspan="2" style="height:32pt;padding:2pt 4pt;font-size:6pt;color:#666;vertical-align:bottom;">(wet signature/e-signature/digital certificate)</td></tr>
-        <tr><td colspan="2" style="border-top:0.5pt solid #000;padding:2pt 4pt;font-size:6.5pt;font-weight:700;text-align:center;">Signature of Declarant</td></tr>
-        <tr>
-          <td style="border-top:0.5pt solid #000;padding:2pt 4pt;font-size:6pt;">
-            <div style="font-size:5.5pt;color:#666;">Government Issued ID:</div>
-            <div style="font-size:7pt;font-weight:700;border-bottom:0.4pt solid #999;min-height:11pt;">${v(d.gov_id)}&nbsp;</div>
-          </td>
-          <td style="border-top:0.5pt solid #000;border-left:0.5pt solid #000;padding:2pt 4pt;font-size:6pt;">
-            <div style="font-size:5.5pt;color:#666;">ID No.:</div>
-            <div style="font-size:7pt;font-weight:700;border-bottom:0.4pt solid #999;min-height:11pt;">${v(d.gov_id_no)}&nbsp;</div>
-          </td>
-        </tr>
-        <tr>
-          <td colspan="2" style="border-top:0.5pt solid #000;padding:2pt 4pt;font-size:6pt;">
-            <div style="font-size:5.5pt;color:#666;">Date Issued:</div>
-            <div style="font-size:7pt;font-weight:700;border-bottom:0.4pt solid #999;min-height:11pt;">${v(d.gov_id_issued)?fmtD(d.gov_id_issued):''}&nbsp;</div>
-          </td>
-        </tr>
-      </table>
+    <td style="border:none;width:50%;padding:0 0 0 8pt;vertical-align:bottom;">
+      <div style="border-top:0.5pt solid #000;padding-top:3pt;font-size:7pt;font-style:italic;text-align:center;">Signature of Declarant</div>
+      <div style="margin-top:6pt;font-size:7pt;">Government Issued ID:&nbsp; <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:120pt;">&nbsp;</span></div>
+      <div style="margin-top:4pt;font-size:7pt;">ID No.:&nbsp; <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:140pt;">&nbsp;</span></div>
+      <div style="margin-top:4pt;font-size:7pt;">Date Issued:&nbsp; <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:130pt;">&nbsp;</span></div>
     </td>
   </tr>
 </table>
 
-<!-- ══ OATH ══ -->
-<table>
-  <tr>
-    <td style="border:0.5pt solid #000;padding:3pt 5pt;font-size:6pt;line-height:1.8;">
-      SUBSCRIBED AND SWORN to before me this <span class="underline">&nbsp;</span> day of <span class="underline">&nbsp;</span>,
-      affiant exhibiting to me the above-stated government-issued identification card.
-      <br/><br/>
-      <div style="margin-top:4pt;border-top:0.5pt solid #000;width:40%;padding-top:2pt;font-size:6pt;text-align:center;">(wet signature/e-signature/digital certificate except for notary public)</div>
-      <div style="border-top:0.5pt solid #000;width:40%;padding-top:2pt;font-size:6.5pt;font-weight:700;text-align:center;margin-top:2pt;">Person Administering Oath</div>
-    </td>
-  </tr>
-</table>
+<div style="font-size:7pt;line-height:1.8;margin-bottom:18pt;text-align:justify;">
+  &nbsp;&nbsp;&nbsp;<strong>SUBSCRIBED AND SWORN</strong> to before me this <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:22pt;text-align:center;">&nbsp;</span> day of <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:40pt;">&nbsp;</span>, affiant exhibiting to me the above-stated government-issued identification card.
+</div>
 
+<div style="margin-top:4pt;width:44%;text-align:center;margin-left:auto;margin-right:auto;">
+  <div style="border-top:0.5pt solid #000;padding-top:3pt;font-size:7pt;font-style:italic;">(Person Administering Oath)</div>
+</div>
+
+<div style="margin-top:18pt;border-top:0.5pt solid #000;padding-top:4pt;">
+  <div style="font-size:5.5pt;line-height:1.7;">
+    <sup>1</sup> Position, Agency, and Address shall only be declared if the spouse is a public official or employee.<br>
+    <sup>ii</sup> Additional sheets may be used by the declarant, if necessary.<br>
+    <sup>iii</sup> Capital or paraphernal assets, and liabilities of the declarant's spouse, and properties of children below 18 years of age and living in the declarant's household shall be disclosed using the additional sheets provided.<br>
+    <sup>iv</sup> <em>Balae</em> refers to the parent of one's son or daughter-in-law; <em>Bilas</em> refers to a brother-in-law's wife or sister-in-law's husband; <em>Inso</em> refers to the appellation for the wife of an elder brother or male cousin.
+  </div>
+</div>
+
+<div style="text-align:center;margin-top:8pt;font-size:7.5pt;font-style:italic;">Page 2 of ___</div>
+${annexSections}
 </body></html>`;
 
   if (openPrint) {

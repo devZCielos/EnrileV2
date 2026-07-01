@@ -3748,8 +3748,8 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
         </div>
       </div>
       <div style="margin-top:20px;padding-bottom:30px;display:flex;gap:8px;justify-content:flex-end;">
+        <button class="save-form-btn" onclick="viewMySR()" id="btnViewSR" style="background:linear-gradient(135deg,#16a34a,#15803d);display:none;">👁️ View SR Form</button>
         <button class="save-form-btn" onclick="requestServiceRecord()" id="btnRequestSR" style="background:linear-gradient(135deg,#2563eb,#1e40af);">📨 Request Service Record</button>
-        <button class="save-form-btn" onclick="printMySR()" id="btnPrintSR" style="background:linear-gradient(135deg,#22c55e,#15803d);display:inline-flex;align-items:center;gap:8px;">🖨️ Print Service Record</button>
       </div>
     </div>
   </div>
@@ -3894,6 +3894,27 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     </div>
   </div>
 
+  <!-- Service Record viewer modal (employee view-only) -->
+  <div id="srViewModal" onclick="if(event.target===this) closeSRViewModal();" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.62);z-index:810;align-items:center;justify-content:center;backdrop-filter:blur(3px);padding:16px;">
+    <div style="background:#fff;border-radius:14px;box-shadow:0 16px 42px rgba(2,6,23,.35);width:min(1180px,96vw);height:min(92vh,900px);display:flex;flex-direction:column;overflow:hidden;">
+      <div style="background:#f8fafc;border-bottom:1px solid #e2e8f0;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+          <div id="srViewInitials" style="width:34px;height:34px;border-radius:50%;background:#0ea5e9;color:#fff;font-size:.82rem;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;">SR</div>
+          <div style="min-width:0;">
+            <div id="srViewName" style="font-size:.92rem;font-weight:800;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Service Record</div>
+            <div id="srViewMeta" style="font-size:.74rem;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Official SR Form Preview</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button type="button" onclick="closeSRViewModal()" style="padding:7px 12px;border:1px solid #cbd5e1;background:#fff;border-radius:8px;color:#334155;font-size:.80rem;font-weight:700;cursor:pointer;">Close</button>
+        </div>
+      </div>
+      <div style="flex:1;background:#e2e8f0;padding:8px;overflow:auto;">
+        <iframe id="srViewFrame" title="Service Record Form" style="width:100%;height:100%;min-height:520px;border:none;border-radius:10px;background:#fff;box-shadow:0 10px 24px rgba(15,23,42,.16);"></iframe>
+      </div>
+    </div>
+  </div>
+
 <!-- ══ Shared Print Utilities (Official CS Form 212) ══ -->
 <script src="../config/print-utilities.js?v=<?= time(); ?>"></script>
 <?php
@@ -3901,12 +3922,43 @@ $_epMayorRow   = null;
 try { $_epMayorRow = $pdo->query("SELECT first_name, last_name, position_title FROM employees WHERE is_mayor=1 AND employment_status='Active' LIMIT 1")->fetch(PDO::FETCH_ASSOC); } catch (Exception $_e) {}
 $_epMayorName  = $_epMayorRow ? strtoupper(trim($_epMayorRow['first_name'].' '.$_epMayorRow['last_name'])) : 'MIGUEL B. DECENA, JR.';
 $_epMayorTitle = $_epMayorRow ? ($_epMayorRow['position_title'] ?: 'Municipal Mayor') : 'Municipal Mayor';
+
+$_epHrRow = null;
+try {
+  $_epHrRow = $pdo->query("SELECT
+      COALESCE(NULLIF(TRIM(CONCAT(COALESCE(h.first_name,''), ' ', COALESCE(h.last_name,''))), ''), NULLIF(TRIM(d.head_name), '')) AS head_name,
+      COALESCE(NULLIF(TRIM(h.position_title), ''), 'HRMO III') AS head_title
+    FROM departments d
+    LEFT JOIN employees h
+      ON h.employee_id = d.head_employee_id
+     AND h.employment_status = 'Active'
+    WHERE d.is_active = 1
+      AND LOWER(d.name) REGEXP 'human.?resource|hr.?office|hrmo'
+    ORDER BY d.department_id ASC
+    LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+} catch (Exception $_e) {}
+if (empty($_epHrRow['head_name'])) {
+  try {
+    $_epHrRow = $pdo->query("SELECT
+        CONCAT(first_name, ' ', last_name) AS head_name,
+        COALESCE(NULLIF(TRIM(position_title), ''), 'HRMO III') AS head_title
+      FROM employees
+      WHERE employment_status = 'Active'
+        AND LOWER(position_title) REGEXP 'hr.?head|human.?resource|hrmo|hrm'
+      ORDER BY employee_id ASC
+      LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+  } catch (Exception $_e) {}
+}
+$_epHrHeadName  = (!empty($_epHrRow['head_name']))  ? strtoupper(trim($_epHrRow['head_name']))  : 'EMIROSE P. MADRIAGA';
+$_epHrHeadTitle = (!empty($_epHrRow['head_title'])) ? trim($_epHrRow['head_title']) : 'HRMO III';
 ?>
 <script>
 var SR_MAYOR_NAME  = <?= json_encode($_epMayorName) ?>;
 var SR_MAYOR_TITLE = <?= json_encode($_epMayorTitle) ?>;
+var SR_HR_HEAD_NAME  = <?= json_encode($_epHrHeadName) ?>;
+var SR_HR_HEAD_TITLE = <?= json_encode($_epHrHeadTitle) ?>;
 </script>
-<script src="../config/service_record_print_template.js?v=1"></script>
+<script src="../config/service_record_print_template.js?v=<?= @filemtime(__DIR__ . '/../config/service_record_print_template.js') ?: time(); ?>"></script>
 
 <script>
 // Toggle annex links based on active page
@@ -4413,7 +4465,7 @@ function renderSRPage(r) {
   const req     = r.latest_request;
   const cont    = document.getElementById('srContent');
   const banner  = document.getElementById('srRequestBanner');
-  const printBtn= document.getElementById('btnPrintSR');
+  const viewBtn = document.getElementById('btnViewSR');
 
   // Show request status banner
   if (req) {
@@ -4430,8 +4482,7 @@ function renderSRPage(r) {
     banner.style.display = 'none';
   }
 
-  // Show print button only if there are records
-  printBtn.style.display = records.length ? 'inline-flex' : 'none';
+  if (viewBtn) viewBtn.style.display = records.length ? 'inline-flex' : 'none';
 
   if (!records.length) {
     cont.innerHTML = `
@@ -4529,139 +4580,87 @@ async function submitSRRequest() {
   finally { btn.disabled = false; btn.textContent = '📨 Submit Request'; }
 }
 
-async function printMySR() {
-  if (!_srData) return;
-  const emp     = _srData.employee || {};
-  const records = _srData.records  || [];
-  if (window.SRPrintTemplate && typeof window.SRPrintTemplate.print === 'function') {
-    window.SRPrintTemplate.print(emp, records);
-  } else {
-    buildAndPrintMySR(emp, records);
-  }
-}
-
-function buildAndPrintMySR(emp, records) {
-  const ROWS_PER_PAGE = 15;
-  const totalPages = Math.max(1, Math.ceil(records.length / ROWS_PER_PAGE));
-
-  const fmtD = d => { if(!d) return ''; try { return new Date(d+'T00:00:00').toLocaleDateString('en-PH',{year:'numeric',month:'short',day:'numeric'}); } catch(e){ return d; } };
-  const escD = s => s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') : '';
-  const cellD = v => v ? v : '&nbsp;';
-
-  let pages = '';
-  for (let p = 0; p < totalPages; p++) {
-    const pageRecs = records.slice(p*ROWS_PER_PAGE, (p+1)*ROWS_PER_PAGE);
-    const rows = pageRecs.map(sr => `
-      <tr>
-        <td>${cellD(fmtD(sr.date_from))}</td><td>${cellD(fmtD(sr.date_to))}</td>
-        <td>${cellD(escD(sr.designation))}</td>
-        <td style="text-align:center;">${cellD(escD(sr.status))}</td>
-        <td style="text-align:right;">${cellD(sr.salary ? parseFloat(sr.salary).toLocaleString('en-PH',{minimumFractionDigits:2}) : '')}</td>
-        <td>${cellD(escD(sr.branch))}</td><td>${cellD(escD(sr.station))}</td>
-        <td style="text-align:center;">${cellD(escD(sr.lvbs_wo_pay))}</td>
-        <td style="text-align:center;">${cellD(fmtD(sr.separation_date))}</td>
-        <td>${cellD(escD(sr.separation_cause))}</td>
-      </tr>`).join('');
-    let blanks = '';
-    for (let i = pageRecs.length; i < ROWS_PER_PAGE; i++) blanks += '<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>';
-
-    pages += `<div class="sr-page">
-      <table class="hdr-tbl"><tr>
-        <td class="logo-cell"><img src="../images/Enrile.png" class="logo-img" onerror="this.style.display='none'"/></td>
-        <td class="hdr-main">
-          <div class="hdr-republic">Republic of the Philippines</div>
-          <div class="hdr-province">Province of Cagayan</div>
-          <div class="hdr-muni">Municipality of Enrile</div>
-          <div class="hdr-brand">ONE ENRILE</div>
-          <div class="hdr-office">Office of the Municipal Mayor</div>
-        </td>
-      </tr></table>
-      <div class="meta-row"><em>GSIS BP No: ${emp.gsis_number||''}</em><span style="margin-left:20pt;"><em>Tax Identification No. ${emp.tin_number||''}</em></span></div>
-      <div class="sr-title">S E R V I C E &nbsp;&nbsp; R E C O R D</div>
-      <table class="name-tbl"><tr>
-        <td class="name-label"><strong>NAME:</strong></td>
-        <td class="name-cell name-underline">${escD(emp.last_name)}</td>
-        <td class="name-cell name-underline">${escD(emp.first_name)}</td>
-        <td class="name-cell name-underline mi-cell">${emp.middle_name ? emp.middle_name[0]+'.' : ''}</td>
-        <td class="married-note">(If married, give maiden name)</td>
-      </tr><tr>
-        <td></td><td class="name-sub">(Surname)</td><td class="name-sub">(First Name)</td><td class="name-sub">(M.I)</td><td></td>
-      </tr></table>
-      <div class="dob-row">DATE OF BIRTH: <span class="dob-val">${fmtD(emp.date_of_birth)}</span></div>
-      <div class="cert-text">THIS IS TO CERTIFY that the above-named employee actually rendered services in the Office as shown in the column below. Each line is supported by appointment papers actually issued by this office and approved by authorities concerned.</div>
-      <table class="sr-tbl">
-        <thead>
-          <tr>
-            <th colspan="2" class="grp-hd">SERVICE</th>
-            <th colspan="3" class="grp-hd">RECORD OF APPOINTMENT</th>
-            <th colspan="2" class="grp-hd">OFFICE/ENTITY</th>
-            <th class="grp-hd" rowspan="2">LVBS<br>W/O PAY</th>
-            <th colspan="2" class="grp-hd">SEPARATION</th>
-          </tr>
-          <tr>
-            <th class="col-hd">From</th><th class="col-hd">To</th>
-            <th class="col-hd">Designation</th><th class="col-hd">Status</th>
-            <th class="col-hd">Salary per Annum</th>
-            <th class="col-hd">Branch</th><th class="col-hd">Station/Place</th>
-            <th class="col-hd">Date</th><th class="col-hd">Cause</th>
-          </tr>
-        </thead>
-        <tbody>${rows}${blanks}</tbody>
-      </table>
-      <div class="footer-cert">Issued in compliance with Executive Order No. 54 dated August 10, 1954 and in accordance with Circular No. 58, dated August 10, 1954 of the system.</div>
-      <table class="sig-tbl"><tr>
-        <td class="sig-left"><div class="sig-prep">Prepared by:</div><div class="sig-name">EMIROSE P. MADRIAGA</div><div class="sig-pos">HRMO III</div></td>
-        <td class="sig-right"><div class="sig-prep">Conforme:</div><div class="sig-name">${(window.SR_MAYOR_NAME||'MIGUEL B. DECENA, JR.')}</div><div class="sig-pos">${(window.SR_MAYOR_TITLE||'Municipal Mayor')}</div></td>
-      </tr></table>
-      <div class="page-num">Page ${p+1} of ${totalPages}</div>
-    </div>`;
+function viewMySR() {
+  if (!_srData) {
+    showToast('ℹ️ Please wait until your service record is loaded.', 'info');
+    return;
   }
 
-  const css = `
-    *{box-sizing:border-box;margin:0;padding:0;}
-    body{font-family:'Century Gothic','Calibri',sans-serif;font-size:9pt;color:#000;background:#fff;}
-    @page{size:legal portrait;margin:12mm 14mm;}
-    @media print{.sr-page{page-break-after:always;}.sr-page:last-child{page-break-after:avoid;}}
-    .hdr-tbl{width:100%;border-collapse:collapse;margin-bottom:3pt;}
-    .logo-cell{width:60pt;text-align:center;vertical-align:middle;padding-right:8pt;}
-    .logo-img{width:50pt;height:50pt;object-fit:contain;}
-    .hdr-main{text-align:center;vertical-align:middle;}
-    .hdr-republic{font-family:Tahoma,sans-serif;font-weight:700;font-size:10pt;}
-    .hdr-province{font-family:Tahoma,sans-serif;font-weight:700;font-size:9.5pt;}
-    .hdr-muni{font-family:Tahoma,sans-serif;font-weight:700;font-size:10pt;}
-    .hdr-brand{font-family:Arial,sans-serif;font-weight:900;font-size:18pt;letter-spacing:2pt;margin:2pt 0;}
-    .hdr-office{font-family:Georgia,serif;font-weight:700;font-size:14pt;}
-    .meta-row{margin:4pt 0;font-size:8pt;font-style:italic;}
-    .sr-title{font-family:'Bookman Old Style','Georgia',serif;font-weight:700;font-size:14pt;text-align:center;margin:6pt 0 5pt;letter-spacing:2pt;}
-    .name-tbl{width:100%;border-collapse:collapse;margin-bottom:4pt;}
-    .name-label{font-family:'Century Gothic',sans-serif;font-weight:700;font-size:11pt;width:55pt;padding-right:4pt;white-space:nowrap;}
-    .name-cell{font-family:'Century Gothic',sans-serif;font-size:11pt;padding:0 6pt;text-align:center;}
-    .name-underline{border-bottom:1pt solid #000;min-width:80pt;}
-    .mi-cell{max-width:40pt;}
-    .name-sub{font-family:Calibri,sans-serif;font-size:10pt;text-align:center;color:#333;padding-top:1pt;}
-    .married-note{font-family:'Century Gothic',sans-serif;font-size:10pt;padding-left:6pt;color:#333;white-space:nowrap;}
-    .dob-row{font-family:'Century Gothic',sans-serif;font-size:10pt;margin-bottom:3pt;}
-    .dob-val{border-bottom:1pt solid #000;min-width:80pt;display:inline-block;padding:0 8pt;}
-    .cert-text{font-family:'Century Gothic',sans-serif;font-weight:700;font-size:9.5pt;text-align:justify;margin-bottom:5pt;line-height:1.4;}
-    .sr-tbl{width:100%;border-collapse:collapse;table-layout:fixed;empty-cells:show;font-size:8pt;}
-    .grp-hd{background:#d0d0d0;border:1pt solid #000;padding:3pt 4pt;text-align:center;font-family:'Century Gothic',sans-serif;font-weight:700;font-size:8.5pt;}
-    .col-hd{background:#e8e8e8;border:1pt solid #000;padding:3pt 4pt;text-align:center;font-family:'Century Gothic',sans-serif;font-weight:700;font-size:8pt;}
-    .sr-tbl td{border:1pt solid #000;padding:3pt 4pt;font-family:'Century Gothic',sans-serif;font-size:8pt;height:15pt;vertical-align:middle;}
-    .footer-cert{font-family:Calibri,sans-serif;font-weight:700;font-size:8.5pt;margin:8pt 0 6pt;line-height:1.4;}
-    .sig-tbl{width:100%;border-collapse:collapse;margin-top:4pt;}
-    .sig-left{width:55%;vertical-align:top;padding-right:10pt;}
-    .sig-right{vertical-align:top;padding-left:10pt;}
-    .sig-prep{font-family:'Century Gothic',sans-serif;font-size:10pt;margin-bottom:24pt;}
-    .sig-name{font-family:'Century Gothic',sans-serif;font-weight:700;font-size:11pt;border-top:1pt solid #000;padding-top:3pt;}
-    .sig-pos{font-family:'Century Gothic',sans-serif;font-size:11pt;}
-    .page-num{font-family:'Century Gothic',sans-serif;font-size:10pt;text-align:right;margin-top:6pt;}
-    .sr-page{margin-bottom:10pt;}`;
+  const emp = _srData.employee || {};
+  const records = _srData.records || [];
+  if (!records.length) {
+    showToast('ℹ️ No service record entries available yet.', 'info');
+    return;
+  }
 
-  const w = window.open('','_blank','width=900,height=1100');
-  w.document.write(`<!DOCTYPE html><html><head><title>Service Record</title><style>${css}</style></head><body>${pages}</body></html>`);
+  if (window.SRPrintTemplate && typeof window.SRPrintTemplate.renderHTML === 'function') {
+    const modal = document.getElementById('srViewModal');
+    const frame = document.getElementById('srViewFrame');
+    const fullName = [emp.first_name || '', emp.middle_name || '', emp.last_name || ''].join(' ').replace(/\s+/g, ' ').trim() || 'Employee';
+    const initials = ((emp.first_name || '').charAt(0) + (emp.last_name || '').charAt(0)).toUpperCase() || 'SR';
+    const meta = [emp.position_title || '', emp.department_name || ''].filter(Boolean).join(' · ') || 'Official SR Form Preview';
+
+    const nameEl = document.getElementById('srViewName');
+    const metaEl = document.getElementById('srViewMeta');
+    const iniEl  = document.getElementById('srViewInitials');
+    if (nameEl) nameEl.textContent = fullName;
+    if (metaEl) metaEl.textContent = meta;
+    if (iniEl) iniEl.textContent = initials;
+
+    frame.srcdoc = window.SRPrintTemplate.renderHTML(emp, records);
+    modal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    return;
+  }
+
+  // Fallback preview if shared SR template is unavailable.
+  const esc = v => String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const f = d => d ? new Date(d + (String(d).length === 10 ? 'T00:00:00' : '')).toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'numeric'}) : '—';
+  const rows = records.map((sr, i) => `
+    <tr style="background:${i % 2 === 0 ? '#f9fafb' : '#fff'};">
+      <td>${f(sr.date_from)}</td>
+      <td>${sr.date_to ? f(sr.date_to) : 'Present'}</td>
+      <td>${esc(sr.designation || '—')}</td>
+      <td>${esc(sr.status || '—')}</td>
+      <td>${sr.salary ? '₱' + parseFloat(sr.salary).toLocaleString('en-PH',{minimumFractionDigits:2}) : '—'}</td>
+      <td>${esc(sr.branch || '—')}</td>
+      <td>${esc(sr.station || '—')}</td>
+      <td>${esc(sr.lvbs_wo_pay || '—')}</td>
+      <td>${f(sr.separation_date)}</td>
+      <td>${esc(sr.separation_cause || '—')}</td>
+    </tr>`).join('');
+
+  const w = window.open('', '_blank', 'width=1200,height=900');
+  w.document.write(`<!DOCTYPE html><html><head><title>Service Record Form Preview</title>
+    <style>
+      body{font-family:Arial,sans-serif;margin:18px;color:#0f172a;}
+      .head{margin-bottom:10px}
+      .head h2{margin:0 0 4px;font-size:22px}
+      .head p{margin:0;font-size:13px;color:#475569}
+      table{width:100%;border-collapse:collapse;font-size:12px}
+      th,td{border:1px solid #cbd5e1;padding:6px 7px;vertical-align:top}
+      thead th{background:#f1f5f9;text-align:left}
+    </style>
+  </head><body>
+    <div class="head">
+      <h2>Service Record Form Preview</h2>
+      <p>${esc((emp.last_name || '') + ', ' + (emp.first_name || '') + ' ' + (emp.middle_name || ''))}</p>
+    </div>
+    <table>
+      <thead><tr><th>From</th><th>To</th><th>Designation</th><th>Status</th><th>Salary/Annum</th><th>Branch</th><th>Station/Place</th><th>LVBS W/O Pay</th><th>Separation Date</th><th>Cause</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </body></html>`);
   w.document.close();
   w.focus();
-  setTimeout(() => w.print(), 600);
+}
+
+function closeSRViewModal() {
+  const modal = document.getElementById('srViewModal');
+  const frame = document.getElementById('srViewFrame');
+  if (modal) modal.style.display = 'none';
+  if (frame) frame.srcdoc = '';
+  document.body.style.overflow = '';
 }
 
 

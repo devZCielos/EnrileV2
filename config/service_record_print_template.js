@@ -26,7 +26,8 @@
     return value ? value : '&nbsp;';
   }
 
-  function buildSRPageHTML(emp, records, pageNum, totalPages, sliceStart, sliceEnd) {
+  function buildSRPageHTML(emp, records, pageNum, totalPages, sliceStart, sliceEnd, signatory) {
+    const sig = signatory || {};
     const surname = emp.last_name || '';
     const firstName = emp.first_name || '';
     const mi = emp.middle_name ? emp.middle_name[0] + '.' : '';
@@ -142,13 +143,13 @@
       <tr>
         <td class="sig-left">
           <div class="sig-prep">Prepared by:</div>
-          <div class="sig-name">EMIROSE P. MADRIAGA</div>
-          <div class="sig-pos">HRMO III</div>
+          <div class="sig-name">${(sig.hrHeadName||window.SR_HR_HEAD_NAME||'EMIROSE P. MADRIAGA')}</div>
+          <div class="sig-pos">${(sig.hrHeadTitle||window.SR_HR_HEAD_TITLE||'HRMO III')}</div>
         </td>
         <td class="sig-right">
           <div class="sig-prep">Conforme:</div>
-          <div class="sig-name">${(window.SR_MAYOR_NAME||'MIGUEL B. DECENA, JR.')}</div>
-          <div class="sig-pos">${(window.SR_MAYOR_TITLE||'Municipal Mayor')}</div>
+          <div class="sig-name">${(sig.mayorName||window.SR_MAYOR_NAME||'MIGUEL B. DECENA, JR.')}</div>
+          <div class="sig-pos">${(sig.mayorTitle||window.SR_MAYOR_TITLE||'Municipal Mayor')}</div>
         </td>
       </tr>
     </table>
@@ -165,13 +166,13 @@
   </div>`;
   }
 
-  function print(emp, records) {
+  function buildSRDocumentHTML(emp, records, signatory) {
     const ROWS_PER_PAGE = 26;
     const totalPages = Math.max(1, Math.ceil((records || []).length / ROWS_PER_PAGE));
 
     let pages = '';
     for (let p = 0; p < totalPages; p++) {
-      pages += buildSRPageHTML(emp || {}, records || [], p + 1, totalPages, p * ROWS_PER_PAGE, (p + 1) * ROWS_PER_PAGE);
+      pages += buildSRPageHTML(emp || {}, records || [], p + 1, totalPages, p * ROWS_PER_PAGE, (p + 1) * ROWS_PER_PAGE, signatory || {});
     }
 
     const css = `
@@ -242,17 +243,36 @@
     .btm-motto { flex:1; text-align:center; font-family:'Century Gothic',sans-serif; font-weight:700; font-size:14pt; font-style:italic; padding:0 10pt; color:#166534; white-space:nowrap; }
     `;
 
-    const w = window.open('', '_blank', 'width=900,height=1100');
-    w.document.write(`<!DOCTYPE html><html><head>
+    return `<!DOCTYPE html><html><head>
       <title>Service Record — ${emp.last_name || ''}, ${emp.first_name || ''}</title>
       <style>${css}</style>
-    </head><body>${pages}</body></html>`);
-    w.document.close();
-    w.focus();
-    setTimeout(function () {
-      w.print();
-    }, 600);
+    </head><body>${pages}</body></html>`;
   }
 
-  window.SRPrintTemplate = { print: print };
+  function openSRForm(emp, records, signatory, shouldPrint) {
+    const html = buildSRDocumentHTML(emp, records, signatory);
+    const w = window.open('', '_blank', 'width=900,height=1100');
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    if (shouldPrint) {
+      setTimeout(function () {
+        w.print();
+      }, 600);
+    }
+  }
+
+  function print(emp, records, signatory) {
+    openSRForm(emp, records, signatory, true);
+  }
+
+  function view(emp, records, signatory) {
+    openSRForm(emp, records, signatory, false);
+  }
+
+  function renderHTML(emp, records, signatory) {
+    return buildSRDocumentHTML(emp, records, signatory);
+  }
+
+  window.SRPrintTemplate = { print: print, view: view, renderHTML: renderHTML };
 })();

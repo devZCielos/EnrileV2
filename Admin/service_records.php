@@ -4,6 +4,9 @@
 //  File: Admin/service_records.php
 // ============================================================
 session_start();
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+header('Expires: 0');
 // ── Session timeout — 8 hours ─────────────────────────────────
 $_sessionLifetime = 8 * 60 * 60;
 if (isset($_SESSION['login_time']) && (time() - strtotime($_SESSION['login_time']) > $_sessionLifetime)) {
@@ -164,6 +167,63 @@ if ($action) {
             case 'departments':
                 $rows = $pdo->query("SELECT department_id,name FROM departments ORDER BY name")->fetchAll();
                 echo json_encode(['success'=>true,'data'=>$rows]);
+                break;
+
+            // ── Live signatories for printing ────────────────────────────────
+            case 'get_signatories':
+                $_mayorRow = null;
+                try { $_mayorRow = $pdo->query("SELECT first_name, last_name, position_title FROM employees WHERE is_mayor=1 AND employment_status='Active' LIMIT 1")->fetch(PDO::FETCH_ASSOC); } catch (Exception $_e) {}
+                if (empty($_mayorRow)) {
+                    try {
+                        $_mayorRow = $pdo->query("SELECT first_name, last_name, position_title
+                          FROM employees
+                          WHERE employment_status = 'Active'
+                            AND LOWER(position_title) REGEXP '(^|[^a-z])mayor([^a-z]|$)'
+                          ORDER BY employee_id ASC
+                          LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+                    } catch (Exception $_e) {}
+                }
+                $_mayorName  = $_mayorRow ? strtoupper(trim($_mayorRow['first_name'].' '.$_mayorRow['last_name'])) : 'MIGUEL B. DECENA, JR.';
+                $_mayorTitle = $_mayorRow ? ($_mayorRow['position_title'] ?: 'Municipal Mayor') : 'Municipal Mayor';
+
+                $_hrRow = null;
+                try {
+                    $_hrRow = $pdo->query("SELECT
+                        COALESCE(NULLIF(TRIM(CONCAT(COALESCE(h.first_name,''), ' ', COALESCE(h.last_name,''))), ''), NULLIF(TRIM(d.head_name), '')) AS head_name,
+                        COALESCE(NULLIF(TRIM(h.position_title), ''), 'HRMO III') AS head_title
+                      FROM departments d
+                      LEFT JOIN employees h
+                        ON h.employee_id = d.head_employee_id
+                       AND h.employment_status = 'Active'
+                      WHERE d.is_active = 1
+                        AND LOWER(d.name) REGEXP 'human.?resource|hr.?office|hrmo'
+                      ORDER BY d.department_id ASC
+                      LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+                } catch (Exception $_e) {}
+                if (empty($_hrRow['head_name'])) {
+                    try {
+                        $_hrRow = $pdo->query("SELECT
+                            CONCAT(first_name, ' ', last_name) AS head_name,
+                            COALESCE(NULLIF(TRIM(position_title), ''), 'HRMO III') AS head_title
+                          FROM employees
+                          WHERE employment_status = 'Active'
+                            AND LOWER(position_title) REGEXP 'hr.?head|human.?resource|hrmo|hrm'
+                          ORDER BY employee_id ASC
+                          LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+                    } catch (Exception $_e) {}
+                }
+                $_hrName  = (!empty($_hrRow['head_name']))  ? strtoupper(trim($_hrRow['head_name']))  : 'EMIROSE P. MADRIAGA';
+                $_hrTitle = (!empty($_hrRow['head_title'])) ? trim($_hrRow['head_title']) : 'HRMO III';
+
+                echo json_encode([
+                    'success' => true,
+                    'data' => [
+                        'mayorName' => $_mayorName,
+                        'mayorTitle' => $_mayorTitle,
+                        'hrHeadName' => $_hrName,
+                        'hrHeadTitle' => $_hrTitle,
+                    ]
+                ]);
                 break;
 
             // ── Pending leave badge ──────────────────────────────────────────
@@ -597,14 +657,61 @@ $roleLabel  = $roleLabels[$_SESSION['user_role']] ?? 'Admin';
 <?php
 $_srMayorRow   = null;
 try { $_srMayorRow = $pdo->query("SELECT first_name, last_name, position_title FROM employees WHERE is_mayor=1 AND employment_status='Active' LIMIT 1")->fetch(PDO::FETCH_ASSOC); } catch (Exception $_e) {}
+if (empty($_srMayorRow)) {
+  try {
+    $_srMayorRow = $pdo->query("SELECT first_name, last_name, position_title
+      FROM employees
+      WHERE employment_status = 'Active'
+        AND LOWER(position_title) REGEXP '(^|[^a-z])mayor([^a-z]|$)'
+      ORDER BY employee_id ASC
+      LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+  } catch (Exception $_e) {}
+}
 $_srMayorName  = $_srMayorRow ? strtoupper(trim($_srMayorRow['first_name'].' '.$_srMayorRow['last_name'])) : 'MIGUEL B. DECENA, JR.';
 $_srMayorTitle = $_srMayorRow ? ($_srMayorRow['position_title'] ?: 'Municipal Mayor') : 'Municipal Mayor';
+
+$_srHrRow = null;
+try {
+  $_srHrRow = $pdo->query("SELECT
+      COALESCE(NULLIF(TRIM(CONCAT(COALESCE(h.first_name,''), ' ', COALESCE(h.last_name,''))), ''), NULLIF(TRIM(d.head_name), '')) AS head_name,
+      COALESCE(NULLIF(TRIM(h.position_title), ''), 'HRMO III') AS head_title
+    FROM departments d
+    LEFT JOIN employees h
+      ON h.employee_id = d.head_employee_id
+     AND h.employment_status = 'Active'
+    WHERE d.is_active = 1
+      AND LOWER(d.name) REGEXP 'human.?resource|hr.?office|hrmo'
+    ORDER BY d.department_id ASC
+    LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+} catch (Exception $_e) {}
+if (empty($_srHrRow['head_name'])) {
+  try {
+    $_srHrRow = $pdo->query("SELECT
+        CONCAT(first_name, ' ', last_name) AS head_name,
+        COALESCE(NULLIF(TRIM(position_title), ''), 'HRMO III') AS head_title
+      FROM employees
+      WHERE employment_status = 'Active'
+        AND LOWER(position_title) REGEXP 'hr.?head|human.?resource|hrmo|hrm'
+      ORDER BY employee_id ASC
+      LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+  } catch (Exception $_e) {}
+}
+$_srHrHeadName  = (!empty($_srHrRow['head_name']))  ? strtoupper(trim($_srHrRow['head_name']))  : 'EMIROSE P. MADRIAGA';
+$_srHrHeadTitle = (!empty($_srHrRow['head_title'])) ? trim($_srHrRow['head_title']) : 'HRMO III';
 ?>
 <script>
 var SR_MAYOR_NAME  = <?= json_encode($_srMayorName) ?>;
 var SR_MAYOR_TITLE = <?= json_encode($_srMayorTitle) ?>;
+var SR_HR_HEAD_NAME  = <?= json_encode($_srHrHeadName) ?>;
+var SR_HR_HEAD_TITLE = <?= json_encode($_srHrHeadTitle) ?>;
+const SR_SIGNATORY = Object.freeze({
+  mayorName: <?= json_encode($_srMayorName) ?>,
+  mayorTitle: <?= json_encode($_srMayorTitle) ?>,
+  hrHeadName: <?= json_encode($_srHrHeadName) ?>,
+  hrHeadTitle: <?= json_encode($_srHrHeadTitle) ?>
+});
 </script>
-<script src="../config/service_record_print_template.js?v=1"></script>
+<script src="../config/service_record_print_template.js?v=<?= @filemtime(__DIR__ . '/../config/service_record_print_template.js') ?: time(); ?>"></script>
 
 <script>
 const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
@@ -967,19 +1074,20 @@ async function confirmDelete() {
 // ── Print ──────────────────────────────────────────────────────────────────
 async function printServiceRecord() {
   if (!currentEmpId) return;
-  const r = await fetch(`${API}?action=get_records&employee_id=${currentEmpId}`).then(r=>r.json());
+  const [r, s] = await Promise.all([
+    fetch(`${API}?action=get_records&employee_id=${currentEmpId}`).then(r=>r.json()).catch(()=>({success:false})),
+    fetch(`${API}?action=get_signatories`).then(r=>r.json()).catch(()=>({success:false}))
+  ]);
   if (!r.success) { showToast('Failed to load records.','error'); return; }
 
   const emp     = r.employee || {};
   const records = r.records  || [];
-  if (window.SRPrintTemplate && typeof window.SRPrintTemplate.print === 'function') {
-    window.SRPrintTemplate.print(emp, records);
-  } else {
-    buildAndPrintSR(emp, records);
-  }
+  const liveSig = (s && s.success && s.data) ? s.data : SR_SIGNATORY;
+  buildAndPrintSR(emp, records, liveSig);
 }
 
-function buildSRPageHTML(emp, records, pageNum, totalPages, sliceStart, sliceEnd) {
+function buildSRPageHTML(emp, records, pageNum, totalPages, sliceStart, sliceEnd, signatory) {
+  const sig = signatory || SR_SIGNATORY;
   const fullName  = `${emp.last_name||''}, ${emp.first_name||''} ${emp.middle_name ? emp.middle_name[0]+'.' : ''}`.trim();
   const surname   = emp.last_name   || '';
   const firstName = emp.first_name  || '';
@@ -1099,13 +1207,13 @@ function buildSRPageHTML(emp, records, pageNum, totalPages, sliceStart, sliceEnd
       <tr>
         <td class="sig-left">
           <div class="sig-prep">Prepared by:</div>
-          <div class="sig-name">EMIROSE P. MADRIAGA</div>
-          <div class="sig-pos">HRMO III</div>
+          <div class="sig-name">${(sig.hrHeadName||'EMIROSE P. MADRIAGA')}</div>
+          <div class="sig-pos">${(sig.hrHeadTitle||'HRMO III')}</div>
         </td>
         <td class="sig-right">
           <div class="sig-prep">Conforme:</div>
-          <div class="sig-name">${(window.SR_MAYOR_NAME||'MIGUEL B. DECENA, JR.')}</div>
-          <div class="sig-pos">${(window.SR_MAYOR_TITLE||'Municipal Mayor')}</div>
+          <div class="sig-name">${(sig.mayorName||'MIGUEL B. DECENA, JR.')}</div>
+          <div class="sig-pos">${(sig.mayorTitle||'Municipal Mayor')}</div>
         </td>
       </tr>
     </table>
@@ -1134,13 +1242,14 @@ function cellValue(value) {
   return value ? value : '&nbsp;';
 }
 
-function buildAndPrintSR(emp, records) {
+function buildAndPrintSR(emp, records, signatory) {
+  const sig = signatory || SR_SIGNATORY;
   const ROWS_PER_PAGE = 26;
   const totalPages = Math.max(1, Math.ceil(records.length / ROWS_PER_PAGE));
 
   let pages = '';
   for (let p = 0; p < totalPages; p++) {
-    pages += buildSRPageHTML(emp, records, p+1, totalPages, p*ROWS_PER_PAGE, (p+1)*ROWS_PER_PAGE);
+    pages += buildSRPageHTML(emp, records, p+1, totalPages, p*ROWS_PER_PAGE, (p+1)*ROWS_PER_PAGE, sig);
   }
 
   const css = `
