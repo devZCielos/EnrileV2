@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // ============================================================
 //  LGU ENRILE HRMS — Leave Types Management
 //  File: Admin/leave_types.php
@@ -456,7 +456,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     <div class="nav-label">Documents</div>
     <a class="nav-item" href="documents.php"><div class="nav-icon">📄</div>HR Documents</a>
     <a class="nav-item" href="pds_saln.php"><div class="nav-icon">🪪</div>PDS & SALN</a>
-    <a class="nav-item" href="service_records.php"><div class="nav-icon">📜</div>Service Records</a>
+    <a class="nav-item" href="service_records.php"><div class="nav-icon">📜</div>Service Records</a>    <a class="nav-item" href="coe_requests.php"><div class="nav-icon">📄</div>COE Requests</a>
+
     <a class="nav-item" href="contracts.php"><div class="nav-icon">📝</div>Contracts</a>
     <div class="nav-label">System</div>
     <a class="nav-item" href="reports.php"><div class="nav-icon">📊</div>Reports</a>

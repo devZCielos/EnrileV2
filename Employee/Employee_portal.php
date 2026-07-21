@@ -67,6 +67,30 @@ require_once __DIR__ . '/../config/db.php';
 
 // Tables `pds_records` and `saln_records` are defined in lgu_enrile_hrms.sql — no runtime CREATE needed.
 
+// COE table bootstrap for environments where migration 009 has not been applied yet.
+function ensureCoeRequestsTable(PDO $pdo): void {
+    static $checked = false;
+    if ($checked) return;
+    $pdo->exec("CREATE TABLE IF NOT EXISTS coe_requests (
+      coe_request_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      employee_id    INT UNSIGNED NOT NULL,
+      purpose        TEXT NOT NULL,
+      status         ENUM('Pending','Approved','Denied','Cancelled') NOT NULL DEFAULT 'Pending',
+      admin_remarks  TEXT NULL,
+      reviewed_by    INT UNSIGNED NULL,
+      reviewed_at    TIMESTAMP NULL,
+      is_deleted     TINYINT(1) NOT NULL DEFAULT 0,
+      filed_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT fk_coe_req_emp FOREIGN KEY (employee_id) REFERENCES employees(employee_id) ON DELETE CASCADE,
+      CONSTRAINT fk_coe_req_reviewer FOREIGN KEY (reviewed_by) REFERENCES user_accounts(user_id) ON DELETE SET NULL,
+      INDEX idx_coe_status (status),
+      INDEX idx_coe_employee_filed (employee_id, filed_at),
+      INDEX idx_coe_deleted_status (is_deleted, status)
+    ) ENGINE=InnoDB");
+    $checked = true;
+}
+
 // Upload directory
 if (!defined('UPLOAD_DIR')) define('UPLOAD_DIR', __DIR__ . '/../uploads/documents/');
 if (!defined('UPLOAD_URL')) define('UPLOAD_URL', '../uploads/documents/');
@@ -99,6 +123,10 @@ if ($action) {
     $userId = (int)$_SESSION['user_id'];
 
     try {
+      if (in_array($action, ['coe_requests', 'submit_coe_request', 'edit_coe_request', 'cancel_coe_request'], true)) {
+        ensureCoeRequestsTable($pdo);
+      }
+
         // Resolve employee_id from direct link first.
         $empRow = $pdo->prepare("SELECT employee_id FROM employees WHERE user_id = ?");
         $empRow->execute([$userId]);
@@ -427,7 +455,7 @@ if ($action) {
                 if (!$employeeId) {
                     echo json_encode(['success'=>false,'message'=>'Employee record not found.']); break;
                 }
-                $allowed = ['first_name','last_name','middle_name','gender',
+                $allowed = ['first_name','last_name','middle_name','suffix_name','gender',
                             'date_of_birth','civil_status','home_address',
                             'contact_number','email_address'];
                 $sets = []; $vals = [];
@@ -524,6 +552,83 @@ if ($action) {
 
                 ob_clean();
                 echo json_encode(['success' => true, 'data' => $rows, 'counts' => $statusCounts, 'total' => $prTotal, 'page' => $prPage, 'per_page' => $prPerPage]);
+                break;
+
+              // ── COE REQUESTS ────────────────────────────────
+              case 'coe_requests':
+                if (!$employeeId) {
+                  echo json_encode(['success' => false, 'message' => 'No employee record linked to your account. Please contact HR to link your account.']); break;
+                }
+
+                $status = $_GET['status'] ?? 'all';
+                $where  = 'employee_id = ? AND is_deleted = 0';
+                $params = [$employeeId];
+                if ($status !== 'all') {
+                  $where .= ' AND status = ?';
+                  $params[] = ucfirst(strtolower($status));
+                }
+
+                $stmt = $pdo->prepare("SELECT * FROM coe_requests WHERE $where ORDER BY filed_at DESC, coe_request_id DESC");
+                $stmt->execute($params);
+                $rows = $stmt->fetchAll();
+
+                $countsStmt = $pdo->prepare("SELECT status, COUNT(*) AS cnt FROM coe_requests WHERE employee_id = ? AND is_deleted = 0 GROUP BY status");
+                $countsStmt->execute([$employeeId]);
+                $statusCounts = ['Pending'=>0,'Approved'=>0,'Denied'=>0,'Cancelled'=>0];
+                foreach ($countsStmt->fetchAll() as $sc) {
+                  if (isset($statusCounts[$sc['status']])) {
+                    $statusCounts[$sc['status']] = (int)$sc['cnt'];
+                  }
+                }
+
+                echo json_encode(['success'=>true,'data'=>$rows,'counts'=>$statusCounts]);
+                break;
+
+              case 'submit_coe_request':
+                if (!$employeeId) {
+                  echo json_encode(['success' => false, 'message' => 'Employee record not found.']); break;
+                }
+                $purpose = trim($_POST['purpose'] ?? '');
+                if ($purpose === '') {
+                  echo json_encode(['success'=>false,'message'=>'Purpose is required.']); break;
+                }
+                $pdo->prepare("INSERT INTO coe_requests (employee_id, purpose, status, filed_at, updated_at) VALUES (?, ?, 'Pending', NOW(), NOW())")
+                  ->execute([$employeeId, $purpose]);
+                echo json_encode(['success'=>true,'message'=>'Certificate of Employment request submitted.']);
+                break;
+
+              case 'edit_coe_request':
+                if (!$employeeId) {
+                  echo json_encode(['success' => false, 'message' => 'Employee record not found.']); break;
+                }
+                $coeId = (int)($_POST['coe_request_id'] ?? 0);
+                $purpose = trim($_POST['purpose'] ?? '');
+                if (!$coeId || $purpose === '') {
+                  echo json_encode(['success'=>false,'message'=>'Missing request details.']); break;
+                }
+                $chk = $pdo->prepare("SELECT coe_request_id FROM coe_requests WHERE coe_request_id = ? AND employee_id = ? AND status = 'Pending' AND is_deleted = 0");
+                $chk->execute([$coeId, $employeeId]);
+                if (!$chk->fetch()) {
+                  echo json_encode(['success'=>false,'message'=>'Only pending requests can be edited.']); break;
+                }
+                $pdo->prepare("UPDATE coe_requests SET purpose = ?, updated_at = NOW() WHERE coe_request_id = ?")
+                  ->execute([$purpose, $coeId]);
+                echo json_encode(['success'=>true,'message'=>'COE request updated.']);
+                break;
+
+              case 'cancel_coe_request':
+                if (!$employeeId) {
+                  echo json_encode(['success' => false, 'message' => 'Employee record not found.']); break;
+                }
+                $coeId = (int)($_POST['coe_request_id'] ?? 0);
+                $chk = $pdo->prepare("SELECT coe_request_id FROM coe_requests WHERE coe_request_id = ? AND employee_id = ? AND status = 'Pending' AND is_deleted = 0");
+                $chk->execute([$coeId, $employeeId]);
+                if (!$chk->fetch()) {
+                  echo json_encode(['success'=>false,'message'=>'Only pending requests can be cancelled.']); break;
+                }
+                $pdo->prepare("UPDATE coe_requests SET status = 'Cancelled', updated_at = NOW() WHERE coe_request_id = ?")
+                  ->execute([$coeId]);
+                echo json_encode(['success'=>true,'message'=>'COE request cancelled.']);
                 break;
 
             // ── SUBMIT LEAVE ──────────────────────────────────
@@ -2273,6 +2378,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     <button class="sb-item sb-sub annex-link" onclick="goPage('annex_b',this)"><div class="sb-icon">🅱️</div>Annex B</button>
     <button class="sb-item sb-sub annex-link" onclick="goPage('annex_c',this)"><div class="sb-icon">🇨</div>Annex C</button>
     <button class="sb-item sb-sub" onclick="goPage('service_record',this)"><div class="sb-icon">📜</div>Service Record</button>
+    <button class="sb-item sb-sub" onclick="goPage('coe',this)"><div class="sb-icon">📄</div>Certificate of Employment</button>
   </nav>
     
     <!-- Main content area only; sidebar card removed -->
@@ -3753,8 +3859,58 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
       </div>
     </div>
   </div>
+
+  <!-- ══ CERTIFICATE OF EMPLOYMENT ══ -->
+  <div class="page" id="page-coe">
+    <div style="max-width: 980px; margin: 10px auto 0 auto;">
+      <div class="card" style="padding:0; overflow:hidden;">
+        <div style="background:linear-gradient(135deg,#0f766e,#0d9488);padding:18px 22px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+          <div>
+            <div style="font-size:1.02rem;font-weight:800;color:#fff;font-family:'Playfair Display',serif;">📄 Certificate of Employment Request</div>
+            <div style="font-size:.76rem;color:rgba(255,255,255,.75);margin-top:2px;">Submit and track your COE request. Printing is handled by HR/Admin.</div>
+          </div>
+          <button onclick="openCoeModal()" style="padding:9px 14px;border:none;border-radius:9px;background:#fff;color:#0f766e;font-family:'Nunito',sans-serif;font-size:.80rem;font-weight:800;cursor:pointer;">+ New COE Request</button>
+        </div>
+
+        <div style="padding:16px 18px;">
+          <div class="req-tabs" style="margin-bottom:12px;">
+            <button class="req-tab active" onclick="filterCoeReqs('all',this)">All <span class="tc" id="coe-tc-all">0</span></button>
+            <button class="req-tab" onclick="filterCoeReqs('pending',this)">⏳ Pending <span class="tc" id="coe-tc-pending">0</span></button>
+            <button class="req-tab" onclick="filterCoeReqs('approved',this)">✅ Approved <span class="tc" id="coe-tc-approved">0</span></button>
+            <button class="req-tab" onclick="filterCoeReqs('denied',this)">✗ Denied <span class="tc" id="coe-tc-denied">0</span></button>
+            <button class="req-tab" onclick="filterCoeReqs('cancelled',this)">— Cancelled <span class="tc" id="coe-tc-cancelled">0</span></button>
+          </div>
+
+          <div id="coeList" class="req-list"></div>
+          <div class="empty-msg" id="coeEmpty" style="display:none;"><div class="ei">📄</div><p>No COE requests found.</p></div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 <!-- .main -->
+
+<!-- COE REQUEST MODAL -->
+<div class="modal-overlay" id="modalCoeRequest">
+  <div class="modal" style="max-width:520px;">
+    <div class="modal-head">
+      <div><h3 id="coeModalTitle">📄 New COE Request</h3><p>Tell HR/Admin why you need your COE</p></div>
+      <button class="modal-x" onclick="closeModal('modalCoeRequest')">✕</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="coeEditId" value="" />
+      <div class="fg" style="margin-bottom:8px;">
+        <label>Purpose <span style="color:var(--danger);">*</span></label>
+        <textarea id="coePurpose" placeholder="e.g. For employment application, visa requirements, loan processing" style="width:100%;min-height:110px;padding:10px 12px;border:1.5px solid var(--g200);border-radius:9px;font-family:'Nunito',sans-serif;font-size:.84rem;outline:none;resize:vertical;"></textarea>
+      </div>
+      <p style="font-size:.72rem;color:var(--g500);line-height:1.45;">Note: Employees can file, edit pending, and cancel pending COE requests. Printing of approved COE is available to HR/Admin only.</p>
+    </div>
+    <div class="modal-foot">
+      <button class="m-btn m-btn-cancel" onclick="closeModal('modalCoeRequest')">Cancel</button>
+      <button class="m-btn m-btn-primary" id="btnSaveCoe" onclick="submitCoeRequest()">📨 Submit Request</button>
+    </div>
+  </div>
+</div>
 
   <!-- Request modal -->
   <div id="srReqModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:800;align-items:center;justify-content:center;backdrop-filter:blur(3px);">
@@ -4029,6 +4185,7 @@ const DOC_COLORS = {'Appointment':{bg:'#dbeafe',c:'#1e40af'},'Contract':{bg:'#dc
 let profileData = null, balanceData = [], leaveTypes = [];
 let selTypeId = null, selTypeName = '', selTypeBal = 0;
 let curReqTab = 'all';
+let curCoeTab = 'all';
 let docFile = null, docDeleteTarget = null;
 let docDebounce = null;
 
@@ -4068,6 +4225,7 @@ const PAGE_META = {
   dashboard:['Dashboard',          'Welcome back!'],
   profile:  ['My Profile',         'Personal & employment information'],
   requests: ['My Leave Requests',  'Track all your leave applications'],
+  coe:      ['Certificate of Employment', 'Submit and monitor your COE requests'],
   file:     ['File Leave Request', 'Submit a new leave application'],
   balances: ["Leave Balances",     "Your available credits for CY <?= date('Y') ?>"],
   documents:['My Documents',       'View and manage your HR files'],
@@ -4178,6 +4336,7 @@ function goPage(name, btn) {
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('mobOverlay').classList.remove('show');
   if (name === 'requests')  loadRequests();
+  if (name === 'coe')       loadCoeRequests();
   if (name === 'balances')  renderBalancesPage();
   if (name === 'documents') loadDocuments();
   if (name === 'pds')       loadPDS();
@@ -4897,7 +5056,7 @@ async function loadProfile() {
     var e = json.data;
     profileData = e;
     window._profileData = e;
-    var fullName = (e.first_name || '') + ' ' + (e.last_name || '');
+    var fullName = ((e.first_name || '') + ' ' + (e.last_name || '') + (e.suffix_name ? (' ' + e.suffix_name) : '')).trim();
     var initials = fullName.trim().split(' ').map(function(w){return w[0]||'';}).join('').substring(0,2).toUpperCase() || '??';
     var hr = new Date().getHours();
     var greet = hr < 12 ? 'Good morning' : hr < 17 ? 'Good afternoon' : 'Good evening';
@@ -4950,6 +5109,7 @@ async function loadProfile() {
       {label:'First Name',   key:'first_name',     val:e.first_name,     type:'text'},
       {label:'Last Name',    key:'last_name',       val:e.last_name,      type:'text'},
       {label:'Middle Name',  key:'middle_name',     val:e.middle_name,    type:'text'},
+      {label:'Suffix Name',  key:'suffix_name',     val:e.suffix_name,    type:'text'},
       {label:'Gender',       key:'gender',          val:e.gender,         type:'select', opts:['Male','Female','Other']},
       {label:'Date of Birth',key:'date_of_birth',   val:e.date_of_birth,  type:'date'},
       {label:'Civil Status', key:'civil_status',    val:e.civil_status,   type:'select', opts:['Single','Married','Widowed','Separated','Divorced']},
@@ -5071,7 +5231,7 @@ async function uploadProfilePhoto(input) {
       showToast('❌ ' + (j.message || 'Upload failed.'), 'error');
       // Revert avatar to initials with correct bg gradients
       var ep = window._profileData || {};
-      var fn2 = ((ep.first_name||'') + ' ' + (ep.last_name||'')).trim();
+      var fn2 = ((ep.first_name||'') + ' ' + (ep.last_name||'') + (ep.suffix_name ? (' ' + ep.suffix_name) : '')).trim();
       var ini2 = fn2.split(' ').map(function(w){return w[0]||'';}).join('').substring(0,2).toUpperCase() || '??';
       phAvEl.innerHTML = ''; phAvEl.textContent = ini2; phAvEl.style.background = 'rgba(255,255,255,.20)';
       var heroAvEl2r   = document.getElementById('heroAv');
@@ -5111,7 +5271,7 @@ async function saveProfileChanges() {
       var e = window._profileData || {};
       fields.forEach(function(f) { e[f.key] = f.val; });
       window._profileData = e;
-      var fullName = ((e.first_name||'') + ' ' + (e.last_name||'')).trim();
+      var fullName = ((e.first_name||'') + ' ' + (e.last_name||'') + (e.suffix_name ? (' ' + e.suffix_name) : '')).trim();
       document.getElementById('phName').textContent = fullName;
       document.getElementById('sbName').textContent = fullName;
       var hr = new Date().getHours();
@@ -5415,6 +5575,151 @@ async function cancelReq(id) {
   const json=await res.json();
   if(json.success){showToast('Leave request cancelled.','info');loadRequests();loadRecentRequests();}
   else showToast('❌ '+json.message,'error');
+}
+
+// ════════════════════════════════════════════════════════
+//  COE REQUESTS PAGE
+// ════════════════════════════════════════════════════════
+function filterCoeReqs(tab, btn) {
+  curCoeTab = tab;
+  document.querySelectorAll('#page-coe .req-tab').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  loadCoeRequests();
+}
+
+function openCoeModal(id = null, purpose = '') {
+  const isEdit = id !== null && id !== undefined;
+  document.getElementById('coeEditId').value = isEdit ? String(id) : '';
+  document.getElementById('coePurpose').value = purpose || '';
+  document.getElementById('coeModalTitle').textContent = isEdit ? '✏️ Edit COE Request' : '📄 New COE Request';
+  document.getElementById('btnSaveCoe').textContent = isEdit ? '💾 Save Changes' : '📨 Submit Request';
+  openModal('modalCoeRequest');
+}
+
+async function submitCoeRequest() {
+  const coeId = (document.getElementById('coeEditId').value || '').trim();
+  const purpose = (document.getElementById('coePurpose').value || '').trim();
+  if (!purpose) {
+    showToast('❌ Purpose is required.', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('btnSaveCoe');
+  const oldText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = coeId ? '⏳ Saving…' : '⏳ Submitting…';
+  try {
+    const body = new FormData();
+    body.append('action', coeId ? 'edit_coe_request' : 'submit_coe_request');
+    body.append('purpose', purpose);
+    body.append('csrf_token', CSRF_TOKEN);
+    if (coeId) body.append('coe_request_id', coeId);
+
+    const res = await fetch('Employee_portal.php', { method: 'POST', body });
+    const json = await res.json();
+    if (!json.success) {
+      showToast('❌ ' + (json.message || 'Unable to save request.'), 'error');
+      return;
+    }
+    showToast(coeId ? 'COE request updated.' : 'COE request submitted.', 'success');
+    closeModal('modalCoeRequest');
+    loadCoeRequests();
+  } catch (e) {
+    showToast('❌ Failed to save COE request.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = oldText;
+  }
+}
+
+async function cancelCoeRequest(id) {
+  if (!confirm('Cancel this COE request?')) return;
+  try {
+    const body = new FormData();
+    body.append('action', 'cancel_coe_request');
+    body.append('coe_request_id', String(id));
+    body.append('csrf_token', CSRF_TOKEN);
+    const res = await fetch('Employee_portal.php', { method: 'POST', body });
+    const json = await res.json();
+    if (!json.success) {
+      showToast('❌ ' + (json.message || 'Unable to cancel request.'), 'error');
+      return;
+    }
+    showToast('COE request cancelled.', 'info');
+    loadCoeRequests();
+  } catch (e) {
+    showToast('❌ Failed to cancel COE request.', 'error');
+  }
+}
+
+async function loadCoeRequests() {
+  const list = document.getElementById('coeList');
+  const empty = document.getElementById('coeEmpty');
+  if (!list || !empty) return;
+
+  list.innerHTML = '<div class="card" style="padding:18px;color:var(--g400);font-size:.82rem;">Loading COE requests…</div>';
+  empty.style.display = 'none';
+
+  try {
+    const res = await fetch(`Employee_portal.php?action=coe_requests&status=${encodeURIComponent(curCoeTab)}`);
+    const json = await res.json();
+    if (!json.success) {
+      list.innerHTML = '';
+      empty.style.display = 'block';
+      empty.innerHTML = '<div class="ei">⚠️</div><p>' + (json.message || 'Could not load COE requests.') + '</p>';
+      return;
+    }
+
+    const counts = json.counts || {};
+    const total = (counts.Pending || 0) + (counts.Approved || 0) + (counts.Denied || 0) + (counts.Cancelled || 0);
+    document.getElementById('coe-tc-all').textContent = total;
+    document.getElementById('coe-tc-pending').textContent = counts.Pending || 0;
+    document.getElementById('coe-tc-approved').textContent = counts.Approved || 0;
+    document.getElementById('coe-tc-denied').textContent = counts.Denied || 0;
+    document.getElementById('coe-tc-cancelled').textContent = counts.Cancelled || 0;
+
+    const esc = v => String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+    const rows = json.data || [];
+    if (!rows.length) {
+      list.innerHTML = '';
+      empty.style.display = 'block';
+      return;
+    }
+
+    list.innerHTML = rows.map(r => {
+      const isPending = r.status === 'Pending';
+      const actionHtml = isPending
+        ? `<div style="display:flex;gap:8px;flex-wrap:wrap;">
+             <button class="cancel-btn" onclick="openCoeModal(${r.coe_request_id}, ${JSON.stringify(r.purpose || '')})">Edit</button>
+             <button class="cancel-btn" onclick="cancelCoeRequest(${r.coe_request_id})">Cancel</button>
+           </div>`
+        : '<span style="font-size:.70rem;color:var(--g400);font-weight:700;">No actions</span>';
+
+      const remarkHtml = r.admin_remarks
+        ? `<div class="req-remark ${r.status === 'Denied' ? 'denied' : (r.status === 'Approved' ? 'approved' : 'pending')}">💬 HR NOTE: ${esc(r.admin_remarks)}</div>`
+        : '';
+
+      return `<div class="req-card">
+        <div class="req-stripe" style="background:#0f766e;"></div>
+        <div class="req-body">
+          <div class="req-top">
+            <div class="req-title"><span class="badge" style="background:#0f766e22;color:#0f766e;">Certificate of Employment</span></div>
+            <span class="badge ${ST_CLS[r.status] || 'b-pending'}">${ST_ICO[r.status] || ''} ${esc(r.status)}</span>
+          </div>
+          <div class="req-reason">Purpose: ${esc(r.purpose)}</div>
+          ${remarkHtml}
+          <div class="req-footer">
+            <span class="req-filed">Filed: ${fmt(r.filed_at)}</span>
+            ${actionHtml}
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '';
+    empty.style.display = 'block';
+    empty.innerHTML = '<div class="ei">❌</div><p>Could not load COE requests right now.</p>';
+  }
 }
 
 // ════════════════════════════════════════════════════════

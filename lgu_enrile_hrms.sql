@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS employees (
   employee_code     VARCHAR(20)   NOT NULL UNIQUE,      -- e.g. EMP-001
   first_name        VARCHAR(80)   NOT NULL,
   middle_name       VARCHAR(80)   NULL,
+  suffix_name       VARCHAR(30)   NULL,
   last_name         VARCHAR(80)   NOT NULL,
   gender            ENUM('Male','Female','Other') NOT NULL,
   date_of_birth     DATE          NULL,

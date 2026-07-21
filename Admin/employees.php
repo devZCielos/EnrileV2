@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // ============================================================
 //  LGU ENRILE HRMS — Employees Page
 //  File: Admin/employees.php
@@ -189,6 +189,7 @@ if ($action) {
                     'first_name'        => trim($_POST['first_name']  ?? ''),
                     'last_name'         => trim($_POST['last_name']   ?? ''),
                     'middle_name'       => trim($_POST['middle_name'] ?? ''),
+                  'suffix_name'       => trim($_POST['suffix_name'] ?? ''),
                     'gender'            => $_POST['gender']      ?? 'Male',        // NOT NULL — default to Male
                     'date_of_birth'     => $_POST['dob']         ?: null,
                     'civil_status'      => $_POST['civil']       ?? null,
@@ -234,7 +235,7 @@ if ($action) {
 
                 // Input length validation
                 $lengthLimits = [
-                    'first_name' => 100, 'last_name' => 100, 'middle_name' => 100,
+                  'first_name' => 100, 'last_name' => 100, 'middle_name' => 100, 'suffix_name' => 30,
                     'employee_code' => 50, 'position_title' => 150,
                     'contact_number' => 30, 'email_address' => 191,
                     'home_address' => 500, 'salary_grade' => 30, 'gsis_number' => 50,
@@ -613,7 +614,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
       <div class="nav-label">Documents</div>
       <a class="nav-item" href="documents.php"><div class="nav-icon">📄</div>HR Documents</a>
       <a class="nav-item" href="pds_saln.php"><div class="nav-icon">🪪</div>PDS & SALN</a>
-      <a class="nav-item" href="service_records.php"><div class="nav-icon">📜</div>Service Records</a>
+      <a class="nav-item" href="service_records.php"><div class="nav-icon">📜</div>Service Records</a>    <a class="nav-item" href="coe_requests.php"><div class="nav-icon">📄</div>COE Requests</a>
+
       <a class="nav-item" href="contracts.php"><div class="nav-icon">📝</div>Contracts</a>
       <div class="nav-label">System</div>
       <a class="nav-item" href="reports.php"><div class="nav-icon">📊</div>Reports</a>
@@ -778,6 +780,10 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           <div class="form-group">
             <label>Middle Name</label>
             <input type="text" id="fMiddleName" placeholder="e.g. Santos"/>
+          </div>
+          <div class="form-group">
+            <label>Suffix Name</label>
+            <input type="text" id="fSuffixName" placeholder="e.g. Jr., Sr., III"/>
           </div>
           <div class="form-group">
             <label>Sex</label>
@@ -1116,7 +1122,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
 
     document.getElementById('vAvatar').textContent        = ini(e.first_name, e.last_name);
     document.getElementById('vAvatar').style.background   = c;
-    document.getElementById('vName').textContent          = `${e.first_name} ${e.middle_name ? e.middle_name+' ' : ''}${e.last_name}`;
+    document.getElementById('vName').textContent          = `${e.first_name} ${e.middle_name ? e.middle_name+' ' : ''}${e.last_name}${e.suffix_name ? ' ' + e.suffix_name : ''}`;
     document.getElementById('vPos').textContent           = `${e.position_title} · ${e.department || '—'}`;
     document.getElementById('vTags').innerHTML            =
       `<span class="profile-tag">${e.employee_code}</span><span class="profile-tag">${e.employment_type}</span><span class="profile-tag">${e.employment_status}</span>`;
@@ -1294,7 +1300,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
   }
 
   function clearForm() {
-    ['fId','fFirstName','fLastName','fMiddleName','fEmail',
+    ['fId','fFirstName','fLastName','fMiddleName','fSuffixName','fEmail',
      'fEmpCode','fPosition','fSalaryGrade','fGsis','fDob','fDateHired'].forEach(id => {
       const el = document.getElementById(id);
       if (el) { el.value = ''; el.classList.remove('err'); }
@@ -1344,6 +1350,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     document.getElementById('fFirstName').value   = e.first_name    || '';
     document.getElementById('fLastName').value    = e.last_name     || '';
     document.getElementById('fMiddleName').value  = e.middle_name   || '';
+    document.getElementById('fSuffixName').value  = e.suffix_name   || '';
     document.getElementById('fGender').value      = e.gender        || '';
     document.getElementById('fDob').value         = e.date_of_birth || '';
     document.getElementById('fCivil').value       = e.civil_status  || '';
@@ -1400,6 +1407,7 @@ const CSRF_TOKEN = document.querySelector('meta[name=csrf-token]').content;
     body.append('first_name',   document.getElementById('fFirstName').value.trim());
     body.append('last_name',    document.getElementById('fLastName').value.trim());
     body.append('middle_name',  document.getElementById('fMiddleName').value.trim());
+    body.append('suffix_name',  document.getElementById('fSuffixName').value.trim());
     body.append('gender',       document.getElementById('fGender').value);
     body.append('dob',          document.getElementById('fDob').value);
     body.append('civil',        document.getElementById('fCivil').value);
