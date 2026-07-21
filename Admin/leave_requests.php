@@ -329,6 +329,77 @@ if ($action) {
                 echo json_encode(['success'=>true,'message'=>'Leave request denied.']);
                 break;
 
+            case 'cancel':
+                $role = $_SESSION['user_role'] ?? '';
+                if (!in_array($role, ['admin', 'hr_staff'], true)) {
+                    echo json_encode(['success'=>false,'message'=>'Only HR/Admin can cancel approved leave requests.']);
+                    break;
+                }
+
+                $id      = (int)($_POST['id'] ?? 0);
+                $reason  = trim($_POST['reason'] ?? '');
+                $adminId = $_SESSION['user_id'];
+
+                if (!$id) {
+                    echo json_encode(['success'=>false,'message'=>'Invalid request ID.']);
+                    break;
+                }
+                if ($reason === '') {
+                    echo json_encode(['success'=>false,'message'=>'Cancellation reason is required.']);
+                    break;
+                }
+
+                try {
+                    $pdo->beginTransaction();
+
+                    $reqStmt = $pdo->prepare("SELECT request_id, employee_id, leave_type_id, date_from, days_requested FROM leave_requests WHERE request_id = ? AND status = 'Approved' AND is_deleted = 0 FOR UPDATE");
+                    $reqStmt->execute([$id]);
+                    $r = $reqStmt->fetch();
+
+                    if (!$r) {
+                        $pdo->rollBack();
+                        echo json_encode(['success'=>false,'message'=>'Only approved leave requests can be cancelled.']);
+                        break;
+                    }
+
+                    $leaveYear = (int)date('Y', strtotime($r['date_from']));
+                    $balStmt = $pdo->prepare("SELECT used_days FROM leave_balances WHERE employee_id = ? AND leave_type_id = ? AND calendar_year = ? FOR UPDATE");
+                    $balStmt->execute([$r['employee_id'], $r['leave_type_id'], $leaveYear]);
+                    $usedDays = $balStmt->fetchColumn();
+
+                    if ($usedDays === false) {
+                        $pdo->rollBack();
+                        echo json_encode(['success'=>false,'message'=>'Leave balance record not found; cancellation aborted.']);
+                        break;
+                    }
+
+                    if ((float)$usedDays < (float)$r['days_requested']) {
+                        $pdo->rollBack();
+                        echo json_encode(['success'=>false,'message'=>'Cancellation blocked: restoring credits would result in negative used days.']);
+                        break;
+                    }
+
+                    $pdo->prepare("UPDATE leave_balances SET used_days = used_days - ? WHERE employee_id = ? AND leave_type_id = ? AND calendar_year = ?")
+                        ->execute([$r['days_requested'], $r['employee_id'], $r['leave_type_id'], $leaveYear]);
+
+                    $cancelRemark = 'Cancelled: ' . $reason;
+                    $pdo->prepare("UPDATE leave_requests SET status='Cancelled', admin_remarks=?, reviewed_by=?, reviewed_at=NOW(), updated_at=NOW() WHERE request_id=?")
+                        ->execute([$cancelRemark, $adminId, $id]);
+
+                    // Per current requirement, keep leave_notifications unchanged on cancellation.
+                    try {
+                        $pdo->prepare("INSERT INTO activity_logs (user_id, action, description) VALUES (?, 'CANCEL_LEAVE', ?)")
+                            ->execute([$adminId, "Cancelled leave request #$id and restored {$r['days_requested']} day(s). Reason: $reason"]);
+                    } catch (PDOException $ignored) {}
+
+                    $pdo->commit();
+                    echo json_encode(['success'=>true,'message'=>'Leave request cancelled and credits restored.']);
+                } catch (Throwable $txErr) {
+                    if ($pdo->inTransaction()) { $pdo->rollBack(); }
+                    throw $txErr;
+                }
+                break;
+
             case 'employees':
                 $emps = $pdo->query("
                     SELECT employee_id, CONCAT(first_name,' ',last_name) AS full_name
@@ -378,6 +449,7 @@ if ($action) {
 $adminName  = ucwords($_SESSION['user_name'] ?? 'Administrator');
 $roleLabels = ['admin'=>'Super Admin','hr_staff'=>'HR Staff','dept_head'=>'Department Head'];
 $roleLabel  = $roleLabels[$_SESSION['user_role']] ?? 'Admin';
+$canCancelApproved = in_array($_SESSION['user_role'] ?? '', ['admin', 'hr_staff'], true);
 // ── Mayor / Authorized Official (CS Form 6) ─────────────────────────────────────
 $_mayorRow   = null;
 try { $_mayorRow = $pdo->query("SELECT first_name, last_name, position_title FROM employees WHERE is_mayor=1 AND employment_status='Active' LIMIT 1")->fetch(PDO::FETCH_ASSOC); } catch (Exception $_e) {}
@@ -517,6 +589,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     .act-btn.approve:hover{background:#22c55e;color:white;}
     .act-btn.deny{background:#fee2e2;color:#991b1b;}
     .act-btn.deny:hover{background:#ef4444;color:white;}
+    .act-btn.cancel{background:#fff7ed;color:#9a3412;}
+    .act-btn.cancel:hover{background:#f97316;color:#fff;}
     .icon-btn{width:30px;height:30px;border-radius:7px;border:1.5px solid var(--gray-200);background:var(--white);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0.82rem;transition:all 0.2s;}
     .icon-btn.view:hover{border-color:var(--primary);background:#eff6ff;}
     .processed-label{font-size:0.72rem;color:var(--gray-400);font-weight:700;}
@@ -1170,8 +1244,29 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     </div>
   </div>
 
+  <!-- CANCEL CONFIRM -->
+  <div class="modal-overlay" id="modalCancel">
+    <div class="modal sm">
+      <div class="modal-header" style="background:linear-gradient(135deg,#f97316,#ea580c);">
+        <div><h3>⛔ Cancel Approved Leave</h3><p>Restore credits and mark request as cancelled</p></div>
+        <button class="modal-close" onclick="closeModal('modalCancel')">✕</button>
+      </div>
+      <div class="confirm-body">
+        <div class="confirm-icon">⛔</div>
+        <h4>Cancel this approved leave request?</h4>
+        <p id="cancelText"></p>
+        <textarea class="confirm-reason" id="cancelReason" aria-label="Cancellation reason" placeholder="Required reason (e.g., typhoon/emergency cancellation)…"></textarea>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-cancel" onclick="closeModal('modalCancel')">Keep Approved</button>
+        <button class="btn" id="cancelBtn" onclick="confirmCancel()" style="background:linear-gradient(135deg,#f97316,#ea580c);color:#fff;">⛔ Yes, Cancel Leave</button>
+      </div>
+    </div>
+  </div>
+
   <script>
 let CSRF_TOKEN = '';
+const CAN_CANCEL_APPROVED = <?php echo $canCancelApproved ? 'true' : 'false'; ?>;
 
 // Initialize CSRF token from meta tag with multiple fallbacks
 function initCSRFTokenAdmin() {
@@ -1215,7 +1310,7 @@ if (!CSRF_TOKEN) {
 
   const COLORS=['#2563eb','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4','#ec4899','#0ea5e9','#84cc16','#f97316'];
   let currentTab='all',currentPage=1,sortKey='',sortAsc=false;
-  let approveTarget=null,denyTarget=null,debounceTimer=null;
+  let approveTarget=null,denyTarget=null,cancelTarget=null,debounceTimer=null;
 
   const fmt   = d => d ? new Date(d.slice(0,10)+'T00:00:00').toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'numeric'}) : '—';
   const ini   = n => n.split(' ').slice(0,2).map(w=>w[0]).join('').toUpperCase();
@@ -1284,9 +1379,13 @@ function renderTable(rows){
     const av=ini(name);
     window['_r'+r.request_id] = r.reason||'';
     // Always show both View and Delete buttons
+    const cancelBtn = (CAN_CANCEL_APPROVED && r.status === 'Approved')
+      ? `<button class="act-btn cancel" style="margin-left:4px;" onclick="openCancel(${r.request_id})">Cancel Leave</button>`
+      : '';
     const actions = `<div class="row-actions">
       <button class="view-btn" onclick="viewRequest(${r.request_id})">View</button>
       <button class="act-btn deny" style="margin-left:4px;" onclick="confirmDelete(${r.request_id}, '${name.replace(/'/g, "&#39;")}')">Delete</button>
+      ${cancelBtn}
     </div>`;
     return `<tr>
       <td><div class="emp-cell"><div class="emp-avatar" style="background:${c};">${av}</div><div><div class="emp-name">${name}</div><div class="emp-dept">${r.department||'—'}</div></div></div></td>
@@ -1676,6 +1775,11 @@ async function doDeleteRequest() {
       setLine('cf-approved-nopay', '');
       setLine('cf-approved-others', '');
       fillDisapproveLines(r.admin_remarks || '');
+    } else if (statusNorm === 'cancelled') {
+      setLine('cf-approved-pay', '');
+      setLine('cf-approved-nopay', '');
+      setLine('cf-approved-others', '');
+      fillDisapproveLines(r.admin_remarks || 'Cancelled leave request.');
     } else {
       setLine('cf-approved-pay', '');
       setLine('cf-approved-nopay', '');
@@ -1685,13 +1789,17 @@ async function doDeleteRequest() {
 
     // Footer action buttons
     var closeBtnHtml = '<button class="btn btn-cancel" onclick="closeModal(\'modalView\')">Close</button>';
+    var cancelBtnHtml = '';
+    if (CAN_CANCEL_APPROVED && statusNorm === 'approved') {
+      cancelBtnHtml = '<button class="btn" style="background:linear-gradient(135deg,#f97316,#ea580c);color:#fff;" onclick="closeModal(\'modalView\');openCancel(' + id + ')">⛔ Cancel Leave</button>';
+    }
     // Show Approve/Deny if status starts with 'Pending' (case-insensitive)
     var showActions = (r.status || '').toLowerCase().startsWith('pending');
     document.getElementById('dFooter').innerHTML = showActions
       ? closeBtnHtml +
         '<button class="btn btn-danger" onclick="closeModal(\'modalView\');openDeny(' + id + ')">✗ Deny</button>' +
         '<button class="btn btn-success" onclick="closeModal(\'modalView\');openApprove(' + id + ')">✅ Approve</button>'
-      : closeBtnHtml;
+      : closeBtnHtml + cancelBtnHtml;
 
     openModal('modalView');
   }
@@ -1942,6 +2050,42 @@ async function doDeleteRequest() {
       else showToast('❌ '+json.message,'error');
     }catch(e){showToast('❌ Failed.','error');}
     finally{btn.disabled=false;btn.textContent='✗ Yes, Deny';}
+  }
+
+  async function openCancel(id){
+    if (!CAN_CANCEL_APPROVED) {
+      showToast('❌ Only HR/Admin can cancel approved leave requests.','error');
+      return;
+    }
+    const res=await fetch(`leave_requests.php?action=get&id=${id}`);
+    const json=await res.json();if(!json.success)return;
+    const r=json.data;
+    if ((r.status || '').toLowerCase() !== 'approved') {
+      showToast('⚠️ Only approved leave requests can be cancelled.','info');
+      return;
+    }
+    cancelTarget=id;
+    document.getElementById('cancelText').textContent=`Cancelling ${r.leave_type} Leave for ${r.first_name} ${r.last_name} (${fmt(r.date_from)} – ${fmt(r.date_to)}, ${r.days_requested} day${r.days_requested!=1?'s':''}). Credits will be restored.`;
+    document.getElementById('cancelReason').value='';
+    openModal('modalCancel');
+  }
+
+  async function confirmCancel(){
+    const reason = document.getElementById('cancelReason').value.trim();
+    if (!reason) {
+      showToast('⚠️ Cancellation reason is required.','info');
+      return;
+    }
+    const btn=document.getElementById('cancelBtn');btn.disabled=true;btn.textContent='⏳ Processing…';
+    const body=new FormData();body.append('action','cancel');body.append('id',cancelTarget);body.append('reason',reason);
+    try{
+      if (!CSRF_TOKEN) CSRF_TOKEN = initCSRFTokenAdmin();
+      const res=await fetch('leave_requests.php',{method:'POST',headers:{'X-CSRF-TOKEN':CSRF_TOKEN},body});
+      const json=await res.json();
+      if(json.success){showToast('✅ '+(json.message || 'Leave request cancelled.'),'success');closeModal('modalCancel');loadStats();loadRequests(currentPage);}
+      else showToast('❌ '+json.message,'error');
+    }catch(e){showToast('❌ Failed.','error');}
+    finally{btn.disabled=false;btn.textContent='⛔ Yes, Cancel Leave';}
   }
 
   function openModal(id){document.getElementById(id).classList.add('open');}

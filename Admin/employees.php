@@ -780,7 +780,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
             <input type="text" id="fMiddleName" placeholder="e.g. Santos"/>
           </div>
           <div class="form-group">
-            <label>Gender</label>
+            <label>Sex</label>
             <select id="fGender">
               <option value="">Select</option>
               <option>Male</option><option>Female</option>
