@@ -178,7 +178,7 @@ if ($action) {
 
                 // H-3: Validate audience value and require dept when 'Department'
                 $audience = $_POST['audience'] ?? 'All';
-                if (!in_array($audience, ['All', 'Permanent', 'Contractual', 'Casual', 'Job Order', 'Department'])) {
+                if (!in_array($audience, ['All', 'Permanent', 'Co-Terminus', 'Elective', 'Contractual', 'Casual', 'Job Order', 'Department'])) {
                     $audience = 'All';
                 }
                 if ($audience === 'Department' && empty($_POST['department_id'])) {
@@ -849,6 +849,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           <select id="fAudience" onchange="toggleDeptRow()">
             <option value="All">All Employees</option>
             <option value="Permanent">Permanent Only</option>
+            <option value="Co-Terminus">Co-Terminus Only</option>
+            <option value="Elective">Elective Only</option>
             <option value="Contractual">Contractual Only</option>
             <option value="Casual">Casual Only</option>
             <option value="Job Order">Job Order Only</option>

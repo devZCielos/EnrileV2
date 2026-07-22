@@ -84,6 +84,8 @@ function getEmploymentTypeColor($type) {
 function getEmploymentTypeBadge($type) {
     $map = [
         'Permanent' => 'badge-perm',
+        'Co-Terminus' => 'badge-perm',
+        'Elective' => 'badge-perm',
         'Contractual' => 'badge-cont',
         'Casual' => 'badge-cas',
         'Job Order' => 'badge-jo',
@@ -93,7 +95,8 @@ function getEmploymentTypeBadge($type) {
 
 // ── Check if feature is available for employment type ──
 function isLeaveFeatureAvailable($employmentType) {
-    return $employmentType === 'Permanent';
+    $normalized = preg_replace('/[^a-z]/', '', strtolower((string)$employmentType));
+    return in_array($normalized, ['permanent', 'coterminus', 'elective'], true);
 }
 
 // ── Get MIME extension ──

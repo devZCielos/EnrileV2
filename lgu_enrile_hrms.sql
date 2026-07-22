@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS employees (
   email_address     VARCHAR(180)  NULL,
   department_id     INT UNSIGNED  NULL,
   position_title    VARCHAR(120)  NOT NULL,
-  employment_type   ENUM('Permanent','Contractual','Casual','Job Order') NOT NULL DEFAULT 'Permanent',
+  employment_type   ENUM('Permanent','Co-Terminus','Elective','Contractual','Casual','Job Order') NOT NULL DEFAULT 'Permanent',
   employment_status ENUM('Active','On Leave','Inactive','Resigned','Retired') NOT NULL DEFAULT 'Active',
   salary_grade      VARCHAR(20)   NULL,                 -- e.g. SG-14
   gsis_number       VARCHAR(30)   NULL,

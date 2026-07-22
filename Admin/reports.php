@@ -26,6 +26,8 @@ if ($action) {
                         SUM(employment_status = 'Inactive')    AS inactive,
                         SUM(employment_status = 'On Leave')    AS on_leave,
                         SUM(employment_type   = 'Permanent')   AS permanent,
+                        SUM(employment_type   = 'Co-Terminus') AS co_terminus,
+                        SUM(employment_type   = 'Elective')    AS elective,
                         SUM(employment_type   = 'Contractual') AS contractual,
                         SUM(employment_type   = 'Casual')      AS casual,
                         SUM(employment_type   = 'Job Order')   AS job_order,
@@ -91,6 +93,8 @@ if ($action) {
                     SELECT
                         COUNT(*) AS total,
                         SUM(e.employment_type='Permanent')   AS permanent,
+                        SUM(e.employment_type='Co-Terminus') AS co_terminus,
+                        SUM(e.employment_type='Elective')    AS elective,
                         SUM(e.employment_type='Job Order')   AS job_order,
                         SUM(e.employment_type='Casual')      AS casual,
                         SUM(e.employment_type='Contractual') AS contractual,
@@ -250,6 +254,8 @@ if ($action) {
                     SELECT COALESCE(d.name,'Unassigned') AS department,
                         COUNT(*) AS total,
                         SUM(e.employment_type='Permanent')   AS permanent,
+                        SUM(e.employment_type='Co-Terminus') AS co_terminus,
+                        SUM(e.employment_type='Elective')    AS elective,
                         SUM(e.employment_type='Job Order')   AS job_order,
                         SUM(e.employment_type='Casual')      AS casual,
                         SUM(e.employment_type='Contractual') AS contractual,
@@ -1045,6 +1051,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
           <select class="filter-control" id="empType">
             <option value="">All Types</option>
             <option value="Permanent">Permanent</option>
+            <option value="Co-Terminus">Co-Terminus</option>
+            <option value="Elective">Elective</option>
             <option value="Job Order">Job Order</option>
             <option value="Casual">Casual</option>
             <option value="Contractual">COS / Contractual</option>
@@ -1075,6 +1083,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
         <div class="result-item"><span class="result-val" id="empSumTotal">0</span><span class="result-lbl">Total</span></div>
         <div style="width:1px;background:#bfdbfe;align-self:stretch;"></div>
         <div class="result-item"><span class="result-val" id="empSumPerm">0</span><span class="result-lbl">Permanent</span></div>
+        <div class="result-item"><span class="result-val" id="empSumCoterm">0</span><span class="result-lbl">Co-Terminus</span></div>
+        <div class="result-item"><span class="result-val" id="empSumElective">0</span><span class="result-lbl">Elective</span></div>
         <div class="result-item"><span class="result-val" id="empSumJO">0</span><span class="result-lbl">Job Order</span></div>
         <div class="result-item"><span class="result-val" id="empSumCasual">0</span><span class="result-lbl">Casual</span></div>
         <div class="result-item"><span class="result-val" id="empSumCOS">0</span><span class="result-lbl">COS</span></div>
@@ -1453,7 +1463,7 @@ async function loadOverview() {
     document.getElementById('ovDepts').textContent       = j.departments || 0;
     document.getElementById('ovEmpSub').textContent      = (e.male||0)+' male · '+(e.female||0)+' female';
     document.getElementById('ovActiveSub').textContent   = (e.on_leave||0)+' on leave · '+(e.inactive||0)+' inactive';
-    document.getElementById('ovJOSub').textContent       = 'COS: '+(e.contractual||0);
+    document.getElementById('ovJOSub').textContent       = 'Co-Terminus: '+(e.co_terminus||0)+' · Elective: '+(e.elective||0);
     document.getElementById('ovLeaveSub').textContent    = (l.pending||0)+' pending · '+(l.total||0)+' total';
     // Populate print-only overview summary table
     var pt = document.getElementById('ovPrintTbody');
@@ -1463,6 +1473,7 @@ async function loadOverview() {
         ['Active',           e.active||0,   'On Leave',            e.on_leave||0],
         ['Inactive',         e.inactive||0, 'Male',                e.male||0],
         ['Permanent',        e.permanent||0,'Female',              e.female||0],
+        ['Co-Terminus',      e.co_terminus||0,'Elective',          e.elective||0],
         ['Job Order',        e.job_order||0,'Leave Requests ('+new Date().getFullYear()+')', l.total||0],
         ['Casual',           e.casual||0,   'Approved Leaves',     l.approved||0],
         ['COS / Contractual',e.contractual||0,'Pending Leaves',    l.pending||0],
@@ -1596,6 +1607,8 @@ async function loadEmployeeRoster() {
     var s = j.summary;
     document.getElementById('empSumTotal').textContent   = s.total   || 0;
     document.getElementById('empSumPerm').textContent    = s.permanent || 0;
+    document.getElementById('empSumCoterm').textContent  = s.co_terminus || 0;
+    document.getElementById('empSumElective').textContent= s.elective || 0;
     document.getElementById('empSumJO').textContent      = s.job_order || 0;
     document.getElementById('empSumCasual').textContent  = s.casual   || 0;
     document.getElementById('empSumCOS').textContent     = s.contractual || 0;
@@ -1619,7 +1632,7 @@ async function loadEmployeeRoster() {
       return;
     }
 
-    var typeBadge = { 'Permanent':'badge-blue', 'Job Order':'badge-purple', 'Casual':'badge-amber', 'Contractual':'badge-teal' };
+    var typeBadge = { 'Permanent':'badge-blue', 'Co-Terminus':'badge-purple', 'Elective':'badge-teal', 'Job Order':'badge-purple', 'Casual':'badge-amber', 'Contractual':'badge-teal' };
     var statusBadge = { 'Active':'badge-green', 'Inactive':'badge-red', 'On Leave':'badge-amber', 'Resigned':'badge-gray', 'Retired':'badge-gray' };
 
     tbody.innerHTML = j.data.map(function(r, i) {
@@ -1723,7 +1736,7 @@ async function loadLeaveReport() {
     }
 
     var statusBadge = { 'Approved':'badge-green','Denied':'badge-red','Pending':'badge-amber','Cancelled':'badge-gray' };
-    var typeBadge   = { 'Permanent':'badge-blue','Job Order':'badge-purple','Casual':'badge-amber','Contractual':'badge-teal' };
+    var typeBadge   = { 'Permanent':'badge-blue','Co-Terminus':'badge-purple','Elective':'badge-teal','Job Order':'badge-purple','Casual':'badge-amber','Contractual':'badge-teal' };
 
     tbody.innerHTML = j.data.map(function(r, i) {
       var sb  = statusBadge[r.status] || 'badge-gray';

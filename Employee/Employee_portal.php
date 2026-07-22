@@ -19,6 +19,10 @@ $allowedMimes = [
   'image/gif'  => 'gif',
 ];
 $maxFileSize = 10 * 1024 * 1024; // 10 MB
+
+function hasPermanentLikeAccess($employmentType): bool {
+  return isLeaveFeatureAvailable($employmentType);
+}
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
 // ...existing code continues...
 // ============================================================
@@ -311,13 +315,13 @@ if ($action) {
 
             // ── LEAVE BALANCES ────────────────────────────────
             case 'balances':
-                // ── CHECK EMPLOYMENT TYPE: Only Permanent can view leave balances ──
+                // ── CHECK EMPLOYMENT TYPE: Permanent-like types can view leave balances ──
                 $empTypeCheck = $pdo->prepare("SELECT employment_type FROM employees WHERE employee_id = ?");
                 $empTypeCheck->execute([$employeeId]);
                 $empTypeRow = $empTypeCheck->fetch();
                 $empType = $empTypeRow['employment_type'] ?? 'Unknown';
-                if ($empType !== 'Permanent') {
-                    echo json_encode(['success' => false, 'message' => "Leave balances are only available to Permanent employees. You are employed as: {$empType}."]); break;
+                if (!hasPermanentLikeAccess($empType)) {
+                  echo json_encode(['success' => false, 'message' => "Leave balances are available to Permanent, Co-Terminus, and Elective employees only. You are employed as: {$empType}."]); break;
                 }
                 // ── AUTO-INITIALIZE LEAVE BALANCES FOR NEW CALENDAR YEAR ONLY ──
                 // Only auto-create for the new year if the employee already had balances last year,
@@ -493,13 +497,13 @@ if ($action) {
                     echo json_encode(['success' => false, 'message' => 'No employee record linked to your account. Please contact HR to link your account.']); break;
                 }
                 
-                // ── CHECK EMPLOYMENT TYPE: Only Permanent can view leave requests ──
+                // ── CHECK EMPLOYMENT TYPE: Permanent-like types can view leave requests ──
                 $empTypeCheck = $pdo->prepare("SELECT employment_type FROM employees WHERE employee_id = ?");
                 $empTypeCheck->execute([$employeeId]);
                 $empTypeRow = $empTypeCheck->fetch();
                 $empType = $empTypeRow['employment_type'] ?? 'Unknown';
-                if ($empType !== 'Permanent') {
-                    echo json_encode(['success' => false, 'message' => "Leave requests are only available to Permanent employees. You are employed as: {$empType}."]); break;
+                if (!hasPermanentLikeAccess($empType)) {
+                  echo json_encode(['success' => false, 'message' => "Leave requests are available to Permanent, Co-Terminus, and Elective employees only. You are employed as: {$empType}."]); break;
                 }
                 
                 $status = $_GET['status'] ?? 'all';
@@ -637,13 +641,13 @@ if ($action) {
                     echo json_encode(['success' => false, 'message' => 'Employee record not found.']); break;
                 }
                 
-                // ── CHECK EMPLOYMENT TYPE: Only Permanent can file leave ──
+                // ── CHECK EMPLOYMENT TYPE: Permanent-like types can file leave ──
                 $empTypeCheck = $pdo->prepare("SELECT employment_type FROM employees WHERE employee_id = ?");
                 $empTypeCheck->execute([$employeeId]);
                 $empTypeRow = $empTypeCheck->fetch();
                 $empType = $empTypeRow['employment_type'] ?? 'Unknown';
-                if ($empType !== 'Permanent') {
-                    echo json_encode(['success' => false, 'message' => "Only Permanent employees can file leave requests. Your employment type is: {$empType}. Please contact HR for more information."]); break;
+                if (!hasPermanentLikeAccess($empType)) {
+                  echo json_encode(['success' => false, 'message' => "Only Permanent, Co-Terminus, and Elective employees can file leave requests. Your employment type is: {$empType}. Please contact HR for more information."]); break;
                 }
                 
                 $leaveTypeId = (int)($_POST['leave_type_id'] ?? 0);
@@ -829,13 +833,13 @@ if ($action) {
 
             // ── LEAVE TYPES ───────────────────────────────────
             case 'leave_types':
-                // ── CHECK EMPLOYMENT TYPE: Only Permanent can access leave types ──
+                // ── CHECK EMPLOYMENT TYPE: Permanent-like types can access leave types ──
                 $empTypeCheck = $pdo->prepare("SELECT employment_type FROM employees WHERE employee_id = ?");
                 $empTypeCheck->execute([$employeeId]);
                 $empTypeRow = $empTypeCheck->fetch();
                 $empType = $empTypeRow['employment_type'] ?? 'Unknown';
-                if ($empType !== 'Permanent') {
-                    echo json_encode(['success' => false, 'message' => "Leave functionality is only available to Permanent employees. You are employed as: {$empType}.", 'data' => []]); break;
+                if (!hasPermanentLikeAccess($empType)) {
+                  echo json_encode(['success' => false, 'message' => "Leave functionality is available to Permanent, Co-Terminus, and Elective employees only. You are employed as: {$empType}.", 'data' => []]); break;
                 }
                 // Fetch employee's gender for filtering
                 $empInfo = $pdo->prepare("SELECT gender FROM employees WHERE employee_id = ?");
@@ -1160,8 +1164,8 @@ if ($action) {
                 $empTypeCheck = $pdo->prepare("SELECT employment_type FROM employees WHERE employee_id = ?");
                 $empTypeCheck->execute([$employeeId]);
                 $empType = $empTypeCheck->fetchColumn() ?: 'Unknown';
-                if ($empType !== 'Permanent') {
-                    echo json_encode(['success'=>false,'message'=>'SALN is only available to Permanent employees.']); break;
+                if (!hasPermanentLikeAccess($empType)) {
+                  echo json_encode(['success'=>false,'message'=>'SALN is only available to Permanent, Co-Terminus, and Elective employees.']); break;
                 }
                 $year = (int)($_GET['year'] ?? date('Y'));
                 $stmt = $pdo->prepare("SELECT * FROM saln_records WHERE employee_id = ? AND saln_year = ? LIMIT 1");
@@ -1177,8 +1181,8 @@ if ($action) {
                 $empTypeCheck = $pdo->prepare("SELECT employment_type FROM employees WHERE employee_id = ?");
                 $empTypeCheck->execute([$employeeId]);
                 $empType = $empTypeCheck->fetchColumn() ?: 'Unknown';
-                if ($empType !== 'Permanent') {
-                    echo json_encode(['success'=>false,'message'=>'SALN is only available to Permanent employees.']); break;
+                if (!hasPermanentLikeAccess($empType)) {
+                  echo json_encode(['success'=>false,'message'=>'SALN is only available to Permanent, Co-Terminus, and Elective employees.']); break;
                 }
                 if (!$employeeId) {
                     echo json_encode(['success'=>false,'message'=>"LINK_ERROR: Your user account (user_id=$userId) is not linked to any employee record. Go to Admin → Employees and set the User Account field for your employee profile."]);
@@ -2370,10 +2374,10 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     <div class="sb-label">Documents</div>
     <button class="sb-item" onclick="goPage('documents',this)"><div class="sb-icon">📁</div>All Documents</button>
     <button class="sb-item sb-sub" onclick="goPage('pds',this)"><div class="sb-icon">📋</div>PDS</button>
-    <?php if ($employmentType === 'Permanent'): ?>
+    <?php if (hasPermanentLikeAccess($employmentType)): ?>
     <button class="sb-item sb-sub" onclick="goPage('saln',this)"><div class="sb-icon">📊</div>SALN</button>
     <?php else: ?>
-    <button class="sb-item sb-sub" disabled title="SALN is only available to Permanent employees"><div class="sb-icon">📊</div>SALN</button>
+    <button class="sb-item sb-sub" disabled title="SALN is only available to Permanent, Co-Terminus, and Elective employees"><div class="sb-icon">📊</div>SALN</button>
     <?php endif; ?>
     <button class="sb-item sb-sub annex-link" onclick="goPage('annex_b',this)"><div class="sb-icon">🅱️</div>Annex B</button>
     <button class="sb-item sb-sub annex-link" onclick="goPage('annex_c',this)"><div class="sb-icon">🇨</div>Annex C</button>
@@ -4240,13 +4244,14 @@ const PAGE_META = {
 // ════════════════════════════════════════════════════════
 function restrictByEmploymentType() {
   const empType = (window._profileData && window._profileData.employment_type) ? window._profileData.employment_type : 'Permanent';
-  const isPermanent = (empType === 'Permanent');
+  const normalized = String(empType || '').toLowerCase().replace(/[^a-z]/g, '');
+  const hasPermanentLikeAccess = (normalized === 'permanent' || normalized === 'coterminus' || normalized === 'elective');
   
   // Store for use in other functions
   window._employmentType = empType;
   
-  if (!isPermanent) {
-    // Non-permanent employees cannot access leave-related features
+  if (!hasPermanentLikeAccess) {
+    // Non permanent-like employees cannot access leave-related features
     const sidebarItems = document.querySelectorAll('.sb-item');
     sidebarItems.forEach((item, idx) => {
       // Disable: My Leave Requests (index 2), File Leave Request (index 3), Leave Balances (index 4)
@@ -4257,7 +4262,7 @@ function restrictByEmploymentType() {
         item.onclick = function(e) {
           e.preventDefault();
           e.stopPropagation();
-          showToast(`📋 Leave features are only available to Permanent employees.`, 'info');
+          showToast(`📋 Leave features are only available to Permanent, Co-Terminus, and Elective employees.`, 'info');
           return false;
         };
       }
@@ -4273,7 +4278,7 @@ function restrictByEmploymentType() {
         qaButtons[i].onclick = function(e) {
           e.preventDefault();
           e.stopPropagation();
-          showToast(`📋 Leave features are only available to Permanent employees.`, 'info');
+          showToast(`📋 Leave features are only available to Permanent, Co-Terminus, and Elective employees.`, 'info');
           return false;
         };
       }
@@ -4309,7 +4314,7 @@ function showNonPermanentBanner(empType) {
         <div style="font-size:1.3rem;animation:pulse 2s infinite;">ℹ️</div>
         <div>
           <strong style="display:block;font-size:.90rem;font-weight:800;letter-spacing:.01em;">📌 Limited Access — ${empType} Employee</strong>
-          <span style="font-size:.75rem;opacity:.90;font-weight:600;">You can upload documents, fill PDS/SALN, and request service records. Leave features are available to Permanent employees only.</span>
+          <span style="font-size:.75rem;opacity:.90;font-weight:600;">You can upload documents, fill PDS/SALN, and request service records. Leave features are available to Permanent, Co-Terminus, and Elective employees only.</span>
         </div>
       </div>
     `;

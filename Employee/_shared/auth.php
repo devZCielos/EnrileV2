@@ -79,10 +79,8 @@ $employmentType = $empRowData['employment_type'] ?? 'Permanent';
 // ── Helper: Check employment type for leave-related features ──
 function checkEmploymentTypeForLeave() {
     global $employmentType;
-    if ($employmentType !== 'Permanent') {
-        return false;
-    }
-    return true;
+    $normalized = preg_replace('/[^a-z]/', '', strtolower((string)$employmentType));
+    return in_array($normalized, ['permanent', 'coterminus', 'elective'], true);
 }
 
 // ── Helper: Get employment type ──

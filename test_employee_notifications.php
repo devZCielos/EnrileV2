@@ -18,7 +18,7 @@ try {
         SELECT e.employee_id, e.first_name, e.last_name, u.user_id, u.email, u.role
         FROM employees e
         LEFT JOIN user_accounts u ON u.user_id = e.user_id
-        WHERE e.employment_type = 'Permanent' AND u.role = 'employee'
+        WHERE e.employment_type IN ('Permanent', 'Co-Terminus', 'Elective') AND u.role = 'employee'
         LIMIT 1
     ")->fetch(PDO::FETCH_ASSOC);
     
