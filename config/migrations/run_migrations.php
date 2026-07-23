@@ -33,7 +33,10 @@ foreach ($files as $file) {
     $statements = array_filter(array_map('trim', explode(';', $sql)));
     $fileOk = true;
     foreach ($statements as $stmt) {
-        if (empty($stmt) || strpos(ltrim($stmt), '--') === 0) continue;
+        // Remove full-line SQL comments so commented headers do not hide real statements.
+        $stmt = preg_replace('/^\s*--.*$/m', '', $stmt);
+        $stmt = trim((string)$stmt);
+        if ($stmt === '') continue;
         try {
             $pdo->exec($stmt);
         } catch (PDOException $e) {

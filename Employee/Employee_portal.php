@@ -23,6 +23,19 @@ $maxFileSize = 10 * 1024 * 1024; // 10 MB
 function hasPermanentLikeAccess($employmentType): bool {
   return isLeaveFeatureAvailable($employmentType);
 }
+
+function hrms_column_exists(PDO $pdo, string $table, string $column): bool {
+  static $cache = [];
+  $key = $table . '.' . $column;
+  if (array_key_exists($key, $cache)) {
+    return $cache[$key];
+  }
+  $q = $pdo->prepare("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?");
+  $q->execute([$table, $column]);
+  $cache[$key] = ((int)$q->fetchColumn() > 0);
+  return $cache[$key];
+}
+
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
 // ...existing code continues...
 // ============================================================
@@ -102,6 +115,9 @@ if (!is_dir(UPLOAD_DIR)) mkdir(UPLOAD_DIR, 0755, true);
 if (!defined('PHOTO_DIR')) define('PHOTO_DIR', __DIR__ . '/../uploads/profile_photos/');
 if (!defined('PHOTO_URL')) define('PHOTO_URL', '../uploads/profile_photos/');
 if (!is_dir(PHOTO_DIR)) mkdir(PHOTO_DIR, 0755, true);
+if (!defined('LEAVE_SIG_DIR')) define('LEAVE_SIG_DIR', __DIR__ . '/../uploads/leave_signatures/');
+if (!defined('LEAVE_SIG_URL')) define('LEAVE_SIG_URL', '../uploads/leave_signatures/');
+if (!is_dir(LEAVE_SIG_DIR)) mkdir(LEAVE_SIG_DIR, 0755, true);
 
 $allowedMimes = [
     'application/pdf'  => 'pdf',
@@ -113,6 +129,10 @@ $allowedMimes = [
     'image/png'  => 'png',
     'image/gif'  => 'gif',
 ];
+  $signatureMimes = [
+    'image/png'  => 'png',
+    'image/jpeg' => 'jpg',
+  ];
 $maxFileSize = 10 * 1024 * 1024; // 10 MB
 
 // ════════════════════════════════════════════════════════════
@@ -259,8 +279,15 @@ if ($action) {
 
 
             case 'profile':
+              $hasEmpSigCols = hrms_column_exists($pdo, 'employees', 'signature_file_path')
+                && hrms_column_exists($pdo, 'employees', 'signature_original_name')
+                && hrms_column_exists($pdo, 'employees', 'signature_uploaded_at');
+              $sigSelect = $hasEmpSigCols
+                ? "e.signature_file_path, e.signature_original_name, e.signature_uploaded_at"
+                : "NULL AS signature_file_path, NULL AS signature_original_name, NULL AS signature_uploaded_at";
                 $stmt = $pdo->prepare("
-                    SELECT e.*, d.name AS department_name
+                SELECT e.*, d.name AS department_name,
+                     $sigSelect
                     FROM   employees e
                     LEFT JOIN departments d ON d.department_id = e.department_id
                     WHERE  e.user_id = ?
@@ -270,7 +297,8 @@ if ($action) {
                 if (!$row) {
                   // Fallback 1: link through user_accounts.employee_id
                   $stmtUa = $pdo->prepare(" 
-                    SELECT e.*, d.name AS department_name
+                        SELECT e.*, d.name AS department_name,
+                          $sigSelect
                     FROM   user_accounts u
                     JOIN   employees e   ON e.employee_id = u.employee_id
                     LEFT JOIN departments d ON d.department_id = e.department_id
@@ -287,7 +315,8 @@ if ($action) {
                 if (!$row) {
                     // Try matching by email as fallback
                     $stmt2 = $pdo->prepare("
-                        SELECT e.*, d.name AS department_name
+                         SELECT e.*, d.name AS department_name,
+                           $sigSelect
                         FROM   employees e
                         LEFT JOIN departments d ON d.department_id = e.department_id
                         JOIN   user_accounts u ON u.user_id = ?
@@ -452,6 +481,54 @@ if ($action) {
                 // P3-9: profile_photo column managed by config/migrations/004_service_records.sql
                 $pdo->prepare("UPDATE employees SET profile_photo=? WHERE employee_id=?")->execute([$photoUrl,$employeeId]);
                 echo json_encode(['success'=>true,'photo_url'=>$photoUrl,'url'=>$photoUrl]);
+                break;
+
+              // ── UPLOAD PROFILE SIGNATURE (PNG/JPG) ─────────
+              case 'upload_signature':
+                if (!$employeeId) { echo json_encode(['success'=>false,'message'=>'Employee not found.']); break; }
+                if (!hrms_column_exists($pdo, 'employees', 'signature_file_path')
+                  || !hrms_column_exists($pdo, 'employees', 'signature_original_name')
+                  || !hrms_column_exists($pdo, 'employees', 'signature_uploaded_at')) {
+                  echo json_encode(['success'=>false,'message'=>'System update required: run latest database migrations first.']);
+                  break;
+                }
+                if (empty($_FILES['signature'])) { echo json_encode(['success'=>false,'message'=>'No signature file received.']); break; }
+
+                $f = $_FILES['signature'];
+                if ($f['error'] !== UPLOAD_ERR_OK) { echo json_encode(['success'=>false,'message'=>'Upload error.']); break; }
+                if ($f['size'] > 5 * 1024 * 1024) { echo json_encode(['success'=>false,'message'=>'Signature must be under 5MB.']); break; }
+
+                $fi = finfo_open(FILEINFO_MIME_TYPE);
+                $mime = finfo_file($fi, $f['tmp_name']);
+                finfo_close($fi);
+                if (!array_key_exists($mime, $signatureMimes)) {
+                  echo json_encode(['success'=>false,'message'=>'Only PNG and JPG signatures are allowed.']);
+                  break;
+                }
+
+                $ext = $signatureMimes[$mime];
+                $name = 'sig_emp_' . $employeeId . '_' . time() . '.' . $ext;
+                $dest = LEAVE_SIG_DIR . $name;
+
+                $oldSigStmt = $pdo->prepare("SELECT signature_file_path FROM employees WHERE employee_id = ?");
+                $oldSigStmt->execute([$employeeId]);
+                $oldSig = $oldSigStmt->fetchColumn();
+                if ($oldSig) {
+                  $oldPath = __DIR__ . '/../' . ltrim(str_replace('../', '', $oldSig), '/');
+                  if (file_exists($oldPath)) { @unlink($oldPath); }
+                }
+
+                if (!move_uploaded_file($f['tmp_name'], $dest)) {
+                  echo json_encode(['success'=>false,'message'=>'Failed to save signature.']);
+                  break;
+                }
+
+                $sigUrl = LEAVE_SIG_URL . $name;
+                $origName = basename((string)$f['name']);
+                $pdo->prepare("UPDATE employees SET signature_file_path = ?, signature_original_name = ?, signature_uploaded_at = NOW() WHERE employee_id = ?")
+                  ->execute([$sigUrl, $origName, $employeeId]);
+
+                echo json_encode(['success'=>true, 'signature_url'=>$sigUrl, 'signature_name'=>$origName]);
                 break;
 
             // ── UPDATE PERSONAL INFO ─────────────────────────
@@ -744,12 +821,31 @@ if ($action) {
                 // Determine if leave is with pay or without pay
                 $withPay = ($daysReq <= $available) ? 1 : 0;
 
+                if (!hrms_column_exists($pdo, 'employees', 'signature_file_path')
+                  || !hrms_column_exists($pdo, 'leave_requests', 'signature_file_path')
+                  || !hrms_column_exists($pdo, 'leave_requests', 'signature_original_name')
+                  || !hrms_column_exists($pdo, 'leave_requests', 'signature_uploaded_at')) {
+                  echo json_encode(['success' => false, 'message' => 'System update required: run latest database migrations first.']);
+                  break;
+                }
+
+                // Require profile e-signature before filing leave
+                $sigStmt = $pdo->prepare("SELECT signature_file_path, signature_original_name FROM employees WHERE employee_id = ?");
+                $sigStmt->execute([$employeeId]);
+                $sigRow = $sigStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+                $sigPath = trim((string)($sigRow['signature_file_path'] ?? ''));
+                $sigName = trim((string)($sigRow['signature_original_name'] ?? ''));
+                if ($sigPath === '') {
+                    echo json_encode(['success' => false, 'message' => 'Please upload your e-signature in My Profile before filing leave.']);
+                    break;
+                }
+
                 $stmt = $pdo->prepare("
                   INSERT INTO leave_requests
-                    (employee_id, leave_type_id, date_from, date_to, days_requested, with_pay, reason, status, filed_at, updated_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending Dept Head', NOW(), NOW())
+                    (employee_id, leave_type_id, date_from, date_to, days_requested, with_pay, reason, signature_file_path, signature_original_name, signature_uploaded_at, status, filed_at, updated_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), 'Pending Dept Head', NOW(), NOW())
                 ");
-                $stmt->execute([$employeeId, $leaveTypeId, $dateFrom, $dateTo, $daysReq, $withPay, $reason]);
+                $stmt->execute([$employeeId, $leaveTypeId, $dateFrom, $dateTo, $daysReq, $withPay, $reason, $sigPath, $sigName !== '' ? $sigName : null]);
                 $requestId = (int)$pdo->lastInsertId();
 
                 // Prepare notification message for response
@@ -2527,6 +2623,16 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
             <button id="piSaveBtn" onclick="saveProfileChanges()" style="padding:8px 20px;background:linear-gradient(135deg,var(--primary),var(--primary-dk));color:#fff;border:none;border-radius:var(--r-sm);font-family:'Nunito',sans-serif;font-size:.84rem;font-weight:700;cursor:pointer;box-shadow:0 2px 10px rgba(37,99,235,.28);transition:all .2s;" onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 4px 14px rgba(37,99,235,.38)'" onmouseout="this.style.transform='';this.style.boxShadow='0 2px 10px rgba(37,99,235,.28)'">💾 Save Changes</button>
           </div>
         </div>
+        <div style="margin-bottom:14px;padding:12px;border:1px dashed var(--g200);border-radius:10px;background:#f8fafc;">
+          <div style="font-size:.78rem;font-weight:800;color:var(--g700);margin-bottom:6px;">✍️ Leave E-Signature (PNG/JPG)</div>
+          <div id="sigStatusText" style="font-size:.73rem;color:var(--g500);margin-bottom:8px;">No signature uploaded.</div>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <button type="button" id="btnUploadSignature" onclick="document.getElementById('signatureFileInput').click()" style="padding:8px 14px;background:linear-gradient(135deg,var(--primary),var(--primary-dk));color:#fff;border:none;border-radius:8px;font-size:.78rem;font-weight:700;cursor:pointer;">📎 Upload Signature</button>
+            <input type="file" id="signatureFileInput" accept="image/png,image/jpeg" style="display:none;" onchange="uploadProfileSignature(this)" />
+            <span id="sigFileName" style="font-size:.72rem;color:var(--g500);"></span>
+          </div>
+          <div style="font-size:.68rem;color:var(--g400);margin-top:8px;">This saved signature is required for leave filing and will be used in the printed leave form.</div>
+        </div>
         <div class="field-grid" id="profilePersonal"></div>
       </div>
       <div class="card" style="padding:20px 22px;">
@@ -2664,6 +2770,9 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
             </div>
 
             <div class="fg"><label>Reason / Remarks <span class="req">*</span></label><textarea id="flReason" placeholder="Briefly describe why you are filing this leave…"></textarea></div>
+            <div style="margin-top:10px;padding:10px 12px;border:1px solid #bfdbfe;background:#eff6ff;border-radius:9px;font-size:.74rem;color:#1e40af;line-height:1.5;">
+              <strong>Signature Required:</strong> Leave submission uses your saved profile e-signature (PNG/JPG). If not set, upload it first in <strong>My Profile</strong>.
+            </div>
             <button class="submit-btn" onclick="submitLeave()">📤 Submit Leave Request</button>
           </div>
         </div>
@@ -5110,6 +5219,7 @@ async function loadProfile() {
     document.getElementById('phChips').innerHTML = phChips;
 
     window._profileData = e;
+    renderSignatureStatus(e);
     var personal = [
       {label:'First Name',   key:'first_name',     val:e.first_name,     type:'text'},
       {label:'Last Name',    key:'last_name',       val:e.last_name,      type:'text'},
@@ -5248,6 +5358,69 @@ async function uploadProfilePhoto(input) {
     showToast('❌ Network error during upload.', 'error');
   }
   input.value = ''; // Reset so same file can be re-selected
+}
+
+function renderSignatureStatus(profile) {
+  var statusEl = document.getElementById('sigStatusText');
+  var fileEl = document.getElementById('sigFileName');
+  if (!statusEl || !fileEl) return;
+
+  if (!profile || !profile.signature_file_path) {
+    statusEl.textContent = 'No signature uploaded.';
+    statusEl.style.color = 'var(--g500)';
+    fileEl.textContent = '';
+    return;
+  }
+
+  var when = profile.signature_uploaded_at
+    ? new Date(profile.signature_uploaded_at).toLocaleString('en-PH', { month:'short', day:'numeric', year:'numeric', hour:'2-digit', minute:'2-digit' })
+    : 'recently';
+  statusEl.textContent = 'Signature saved (' + when + ').';
+  statusEl.style.color = '#166534';
+  fileEl.textContent = profile.signature_original_name || 'signature.png';
+}
+
+async function uploadProfileSignature(input) {
+  if (!input.files || !input.files[0]) return;
+  var file = input.files[0];
+  if (!['image/png', 'image/jpeg'].includes(file.type)) {
+    showToast('❌ Only PNG or JPG signatures are allowed.', 'error');
+    input.value = '';
+    return;
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    showToast('❌ Signature must be under 5MB.', 'error');
+    input.value = '';
+    return;
+  }
+
+  var fd = new FormData();
+  fd.append('action', 'upload_signature');
+  fd.append('signature', file);
+  fd.append('csrf_token', CSRF_TOKEN);
+
+  showToast('✍️ Uploading signature…', 'info');
+  try {
+    var res = await fetch('Employee_portal.php', { method: 'POST', body: fd });
+    var j = await res.json();
+    if (!j.success) {
+      showToast('❌ ' + (j.message || 'Signature upload failed.'), 'error');
+      input.value = '';
+      return;
+    }
+
+    showToast('✅ Signature saved to your profile.', 'success');
+    if (window._profileData) {
+      window._profileData.signature_file_path = j.signature_url || '';
+      window._profileData.signature_original_name = j.signature_name || file.name;
+      window._profileData.signature_uploaded_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      renderSignatureStatus(window._profileData);
+    }
+  } catch (e) {
+    showToast('❌ Network error while uploading signature.', 'error');
+  }
+
+  input.value = '';
 }
 
 async function saveProfileChanges() {
@@ -5937,6 +6110,13 @@ function getLeaveDetail() {
 }
 
 async function submitLeave() {
+  var p = window._profileData || {};
+  if (!p.signature_file_path) {
+    showToast('⚠️ Please upload your e-signature in My Profile before filing leave.', 'info');
+    goPage('profile', document.querySelectorAll('.sb-item')[1]);
+    return;
+  }
+
   const from=document.getElementById('flFrom').value;const to=document.getElementById('flTo').value;const reason=document.getElementById('flReason').value.trim();const days=parseInt(document.getElementById('daysNum').textContent)||0;
   let ok=true;
   document.getElementById('flFrom').classList.toggle('err',!from); if(!from)ok=false;

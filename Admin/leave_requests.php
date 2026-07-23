@@ -32,6 +32,18 @@ require_once __DIR__ . '/../config/csrf.php';
 // Initialize CSRF token in session
 csrf_token();
 
+function hrms_column_exists(PDO $pdo, string $table, string $column): bool {
+  static $cache = [];
+  $key = $table . '.' . $column;
+  if (array_key_exists($key, $cache)) {
+    return $cache[$key];
+  }
+  $q = $pdo->prepare("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?");
+  $q->execute([$table, $column]);
+  $cache[$key] = ((int)$q->fetchColumn() > 0);
+  return $cache[$key];
+}
+
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
 
 if ($action) {
@@ -174,10 +186,24 @@ if ($action) {
 
             case 'get':
                 $id   = (int)($_GET['id'] ?? 0);
+              $hasEmpSigCols = hrms_column_exists($pdo, 'employees', 'signature_file_path')
+                && hrms_column_exists($pdo, 'employees', 'signature_original_name')
+                && hrms_column_exists($pdo, 'employees', 'signature_uploaded_at');
+              $hasLeaveSigCols = hrms_column_exists($pdo, 'leave_requests', 'signature_file_path')
+                && hrms_column_exists($pdo, 'leave_requests', 'signature_original_name')
+                && hrms_column_exists($pdo, 'leave_requests', 'signature_uploaded_at');
+              $sigSelect = $hasLeaveSigCols
+                ? "lr.signature_file_path, lr.signature_original_name, lr.signature_uploaded_at,"
+                : "NULL AS signature_file_path, NULL AS signature_original_name, NULL AS signature_uploaded_at,";
+              $deptHeadSigSelect = $hasEmpSigCols
+                ? "dh.signature_file_path AS dept_head_signature_file_path, dh.signature_uploaded_at AS dept_head_signature_uploaded_at,"
+                : "NULL AS dept_head_signature_file_path, NULL AS dept_head_signature_uploaded_at,";
                   $stmt = $pdo->prepare("
                       SELECT lr.request_id, lr.status, lr.date_from, lr.date_to,
                         lr.days_requested, lr.reason, lr.admin_remarks,
                         lr.filed_at, lr.reviewed_by, lr.reviewed_at,
+                  $sigSelect
+                        $deptHeadSigSelect
                         lr.with_pay,
                         e.first_name,
                         COALESCE(e.middle_name, '')  AS middle_name,
@@ -206,14 +232,38 @@ if ($action) {
                 $stmt->execute([$id]);
                 $row = $stmt->fetch();
                 if ($row) {
-                    // Fetch the HR department head for 7.A certification
-                    $hrHead = $pdo->query("
-                        SELECT COALESCE(head_name, '') FROM departments
-                        WHERE LOWER(name) REGEXP 'human.?resource|hr.?office|hrmo'
-                        AND is_active = 1
-                        ORDER BY department_id ASC LIMIT 1
-                    ")->fetchColumn();
-                    $row['hr_head_name'] = $hrHead ?: '';
+                    // Fetch the HR department head details for 7.A certification
+                    if ($hasEmpSigCols) {
+                        $hrHeadStmt = $pdo->query("
+                            SELECT
+                              COALESCE(CONCAT(he.first_name, ' ', he.last_name), d.head_name, '') AS hr_head_name,
+                              he.signature_file_path AS hr_head_signature_file_path,
+                              he.signature_uploaded_at AS hr_head_signature_uploaded_at
+                            FROM departments d
+                            LEFT JOIN employees he ON he.employee_id = d.head_employee_id
+                            WHERE LOWER(d.name) REGEXP 'human.?resource|hr.?office|hrmo'
+                              AND d.is_active = 1
+                            ORDER BY d.department_id ASC
+                            LIMIT 1
+                        ");
+                    } else {
+                        $hrHeadStmt = $pdo->query("
+                            SELECT
+                              COALESCE(CONCAT(he.first_name, ' ', he.last_name), d.head_name, '') AS hr_head_name,
+                              NULL AS hr_head_signature_file_path,
+                              NULL AS hr_head_signature_uploaded_at
+                            FROM departments d
+                            LEFT JOIN employees he ON he.employee_id = d.head_employee_id
+                            WHERE LOWER(d.name) REGEXP 'human.?resource|hr.?office|hrmo'
+                              AND d.is_active = 1
+                            ORDER BY d.department_id ASC
+                            LIMIT 1
+                        ");
+                    }
+                    $hrHeadRow = $hrHeadStmt ? $hrHeadStmt->fetch(PDO::FETCH_ASSOC) : null;
+                    $row['hr_head_name'] = trim((string)($hrHeadRow['hr_head_name'] ?? ''));
+                    $row['hr_head_signature_file_path'] = $hrHeadRow['hr_head_signature_file_path'] ?? null;
+                    $row['hr_head_signature_uploaded_at'] = $hrHeadRow['hr_head_signature_uploaded_at'] ?? null;
                 }
                 echo json_encode($row
                     ? ['success'=>true,'data'=>$row]
@@ -1101,7 +1151,12 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
               <div class="csf-field-label">6.D&nbsp; COMMUTATION</div>
               <div class="csf-check-row" style="margin-top:6px;"><span class="csf-chk csf-chk-x" id="cb-not-requested"></span> Not Requested</div>
               <div class="csf-check-row" style="margin-top:3px;"><span class="csf-chk" id="cb-requested"></span> Requested</div>
-              <div style="margin-top:22px;border-top:1px solid #000;padding-top:3px;text-align:center;">
+              <div style="margin-top:22px;padding-top:3px;text-align:center;">
+                <div id="cf-applicant-signature-wrap" style="min-height:48px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:3px;">
+                  <img id="cf-applicant-signature" alt="Applicant signature" style="max-height:42px;max-width:210px;object-fit:contain;display:none;" />
+                </div>
+                <div id="cf-applicant-signature-name" style="font-size:.74rem;font-weight:700;letter-spacing:.02em;text-transform:uppercase;min-height:12px;"></div>
+                <div style="border-top:1px solid #000;max-width:220px;margin:2px auto 3px;"></div>
                 <div style="font-size:.63rem;">(Signature of Applicant)</div>
               </div>
             </td>
@@ -1140,6 +1195,9 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
                 </tr>
               </table>
               <div style="margin-top:24px;text-align:center;">
+                <div id="cf-7a-signature-wrap" style="min-height:44px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:2px;">
+                  <img id="cf-7a-signature" alt="HR Head signature" style="max-height:38px;max-width:210px;object-fit:contain;display:none;" />
+                </div>
                 <div id="cf-authorized-officer" style="font-size:.80rem;font-weight:700;letter-spacing:.02em;text-transform:uppercase;">AIREEN G. BERAN, HRMO</div>
                 <div style="border-top:1px solid #000;margin-top:4px;padding-top:4px;font-size:.63rem;color:#333;">(Authorized Officer)</div>
               </div>
@@ -1157,6 +1215,9 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
               <div style="min-height:12px;border-bottom:1px solid #000;margin:2px 0;">&nbsp;</div>
               <div style="min-height:12px;border-bottom:1px solid #000;margin:2px 0;">&nbsp;</div>
               <div style="margin-top:24px;text-align:center;">
+                <div id="cf-7b-signature-wrap" style="min-height:44px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:2px;">
+                  <img id="cf-7b-signature" alt="Department Head signature" style="max-height:38px;max-width:210px;object-fit:contain;display:none;" />
+                </div>
                 <div id="cf-7b-authorized-officer" style="font-size:.80rem;font-weight:700;letter-spacing:.02em;text-transform:uppercase;"></div>
                 <div style="border-top:1px solid #000;margin-top:4px;padding-top:4px;font-size:.63rem;color:#333;">(Authorized Officer)</div>
               </div>
@@ -1694,6 +1755,23 @@ async function doDeleteRequest() {
     set('cf-days',  r.days_requested + ' day' + (r.days_requested != 1 ? 's' : ''));
     set('cf-dates', fmtDateShort(r.date_from) + ' to ' + fmtDateShort(r.date_to));
 
+    // 6D — applicant e-signature (snapshot from leave request)
+    var sigImg = document.getElementById('cf-applicant-signature');
+    if (sigImg) {
+      var sigPath = (r.signature_file_path || '').trim();
+      if (sigPath) {
+        sigImg.src = sigPath;
+        sigImg.style.display = 'block';
+      } else {
+        sigImg.removeAttribute('src');
+        sigImg.style.display = 'none';
+      }
+    }
+    var applicantSigName = document.getElementById('cf-applicant-signature-name');
+    if (applicantSigName) {
+      applicantSigName.textContent = name || '';
+    }
+
     // Reason — show clean version without the [detail] prefix
     set('cf-reason', cleanReason);
 
@@ -1709,6 +1787,19 @@ async function doDeleteRequest() {
     set('cf-ref-no', 'LR-' + String(r.request_id || id).padStart(6, '0'));
     set('cf-printed-at', new Date().toLocaleString());
 
+    function setOfficerSignature(imgId, signaturePath) {
+      var img = document.getElementById(imgId);
+      if (!img) return;
+      var cleanPath = (signaturePath || '').trim();
+      if (cleanPath) {
+        img.src = cleanPath;
+        img.style.display = 'block';
+      } else {
+        img.removeAttribute('src');
+        img.style.display = 'none';
+      }
+    }
+
     // 7B — recommendation based on status
     // 7A — CERTIFICATION OF LEAVE CREDITS: Always HRMO
     var hrmoName = r.hr_head_name && r.hr_head_name.trim() ? r.hr_head_name.trim() : 'HRMO';
@@ -1718,6 +1809,7 @@ async function doDeleteRequest() {
       certOfficer.textContent = hrmoLabel;
       certOfficer.style.textTransform = 'uppercase';
     }
+    setOfficerSignature('cf-7a-signature', r.hr_head_signature_file_path || '');
 
     // 7B — Recommendation: Dept Head input
     var cbApprove = document.getElementById('cb-rec-approve');
@@ -1734,6 +1826,7 @@ async function doDeleteRequest() {
       authOfficer7b.textContent = deptHeadName;
       authOfficer7b.style.textTransform = 'uppercase';
     }
+    setOfficerSignature('cf-7b-signature', r.dept_head_signature_file_path || '');
 
     // 7D — Disapproved due to: HR/Admin input
     // (Already handled below in fillDisapproveLines with r.admin_remarks)
