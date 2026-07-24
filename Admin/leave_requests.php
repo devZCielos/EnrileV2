@@ -1630,7 +1630,7 @@ async function doDeleteRequest() {
       ['special privilege',                'ck-spl'],
       // 'Special Leave' (seed code SPL) = Special Privilege Leave
       ['special leave',                    'ck-spl'],
-      ['adoption',                         'ck-adopt'],
+      ['adoption', 'adaption',             'ck-adopt'],
       ['study',                            'ck-study'],
       ['sick',                             'ck-sl'],
       ['vacation',                         'ck-vl'],

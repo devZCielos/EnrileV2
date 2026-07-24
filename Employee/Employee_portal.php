@@ -206,7 +206,7 @@ if ($action) {
                 AND lb.calendar_year = YEAR(lr.filed_at)
               WHERE e.department_id = ?
                 AND lr.status IN ('Pending Dept Head', 'Pending HR', 'Denied by Dept Head')
-              ORDER BY lr.filed_at ASC
+              ORDER BY CASE WHEN lr.status = 'Pending Dept Head' THEN 0 ELSE 1 END ASC, lr.filed_at ASC
             ";
             $stmt = $pdo->prepare($query);
             $stmt->execute([$deptId]);
