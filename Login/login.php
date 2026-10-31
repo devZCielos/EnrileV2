@@ -50,19 +50,30 @@ if (!empty($_COOKIE['remember_token'])) {
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Nunito', sans-serif; }
 
     body {
-      background: linear-gradient(135deg, #2563eb 0%, #1e40af 50%, #22c55e 100%);
+      background: #0b3658 url('../images/Municipal_Hall_of_Enrile,_Cagayan.jpg') center / cover fixed no-repeat;
       color: var(--secondary);
       line-height: 1.6;
       min-height: 100vh;
+      position: relative;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: linear-gradient(90deg, rgba(4, 33, 57, 0.84) 0%, rgba(8, 52, 79, 0.66) 48%, rgba(7, 35, 54, 0.36) 100%);
+      pointer-events: none;
+      z-index: -1;
     }
 
     header {
-      background: white;
-      padding: 15px 40px;
+      background: rgba(255,255,255,0.93);
+      padding: 14px clamp(20px, 4vw, 56px);
       display: flex;
       justify-content: space-between;
       align-items: center;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+      box-shadow: 0 1px 0 rgba(255,255,255,0.45), 0 5px 24px rgba(0,0,0,0.15);
+      backdrop-filter: blur(12px);
       position: sticky;
       top: 0;
       z-index: 100;
@@ -107,9 +118,9 @@ if (!empty($_COOKIE['remember_token'])) {
     /* spinning glow ring around logo */
     .logo-wrapper {
       position: relative;
-      width: 200px;
-      height: 200px;
-      margin: 0 auto 28px;
+      width: 220px;
+      height: 220px;
+      margin: 0 auto 32px;
     }
 
     .logo-wrapper::before {
@@ -166,8 +177,7 @@ if (!empty($_COOKIE['remember_token'])) {
     }*/
 
     .tagline-main {
-      font-family: 'Playfair Display', serif;
-      font-size: 2rem;
+      font-size: 2.2rem;
       font-weight: 900;
       line-height: 1.15;
       color: #fff;
@@ -182,7 +192,7 @@ if (!empty($_COOKIE['remember_token'])) {
     }
 
     .tagline-sub {
-      font-size: 0.92rem;
+      font-size: 1rem;
       color: rgba(255,255,255,0.72);
       font-style: italic;
       margin-top: 2px;
@@ -224,23 +234,20 @@ if (!empty($_COOKIE['remember_token'])) {
 
     .login-box {
       flex: 1;
-      background: rgba(255, 255, 255, 0.20);
-      backdrop-filter: blur(14px);
-      -webkit-backdrop-filter: blur(14px);
-      border: 1px solid rgba(255, 255, 255, 0.35);
+      background: rgba(255, 255, 255, 0.68);
+      backdrop-filter: blur(18px) saturate(135%);
+      -webkit-backdrop-filter: blur(18px) saturate(135%);
+      border: 1px solid rgba(255, 255, 255, 0.72);
       border-radius: 18px;
       padding: 40px 36px;
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+      box-shadow: 0 22px 55px rgba(0, 23, 40, 0.35);
     }
 
     .login-header { text-align: center; margin-bottom: 20px; }
 
     .login-box h2 {
       margin: 0 0 10px;
-      background: linear-gradient(135deg, #ffffff, #d1fae5);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
+      color: #123b56;
       font-family: 'Playfair Display', serif;
       font-weight: 700;
       font-size: 1.8rem;
@@ -250,7 +257,7 @@ if (!empty($_COOKIE['remember_token'])) {
     .login-box > p,
     .login-header p {
       text-align: center;
-      color: rgba(255, 255, 255, 0.80);
+      color: #64748b;
       margin-bottom: 0;
       font-size: 0.9rem;
       transition: all 0.25s;
@@ -260,7 +267,7 @@ if (!empty($_COOKIE['remember_token'])) {
     .login-btn {
       width: 100%;
       padding: 12px;
-      background: linear-gradient(to right, var(--primary), #1d4ed8);
+      background: linear-gradient(135deg, #0f5a86, #087c73);
       color: white;
       border: none;
       border-radius: 6px;
@@ -291,7 +298,7 @@ if (!empty($_COOKIE['remember_token'])) {
       display: block;
       margin-bottom: 8px;
       font-weight: 700;
-      color: rgba(255, 255, 255, 0.95);
+      color: #28485e;
       font-size: 0.95rem;
     }
 
@@ -300,24 +307,24 @@ if (!empty($_COOKIE['remember_token'])) {
     input[type="text"] {
       width: 100%;
       padding: 12px;
-      border: 2px solid rgba(255, 255, 255, 0.40);
+      border: 1px solid #cbd5e1;
       border-radius: 6px;
       font-size: 1rem;
       font-family: 'Nunito', sans-serif;
       transition: border-color 0.3s, background 0.3s;
-      background: rgba(255, 255, 255, 0.15);
-      color: #fff;
+      background: rgba(255, 255, 255, 0.72);
+      color: #0f172a;
     }
 
     input[type="email"]::placeholder,
-    input[type="password"]::placeholder { color: rgba(255,255,255,0.50); }
+    input[type="password"]::placeholder { color: #94a3b8; }
 
     input[type="email"]:focus,
     input[type="password"]:focus {
       outline: none;
-      border-color: rgba(255,255,255,0.80);
-      background: rgba(255,255,255,0.22);
-      box-shadow: 0 0 0 3px rgba(255,255,255,0.15);
+      border-color: #16817a;
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: 0 0 0 3px rgba(22,129,122,0.12);
     }
 
     .remember-forgot {
@@ -330,16 +337,16 @@ if (!empty($_COOKIE['remember_token'])) {
 
     .remember-forgot a {
       text-decoration: none;
-      color: rgba(255,255,255,0.90);
+      color: #0f6972;
       transition: color 0.3s;
     }
 
-    .remember-forgot a:hover { color: #fff; }
+    .remember-forgot a:hover { color: #074f5d; }
 
     .checkbox-wrapper { display: flex; align-items: center; }
 
     .checkbox-wrapper label {
-      color: rgba(255,255,255,0.90);
+      color: #526a7c;
       margin-bottom: 0;
       font-weight: normal;
     }
@@ -416,6 +423,7 @@ if (!empty($_COOKIE['remember_token'])) {
     @media(max-width: 768px) {
       .login-wrapper {
         flex-direction: column;
+        display: flex;
         justify-content: center;
         align-items: center;
         min-height: calc(100vh - 140px);
@@ -424,8 +432,9 @@ if (!empty($_COOKIE['remember_token'])) {
       }
 
       .branding { flex: none; padding: 20px; }
-      .logo-wrapper { width: 150px; height: 150px; }
-      .tagline-main { font-size: 1.5rem; }
+      .logo-wrapper { width: 180px; height: 180px; }
+      .tagline-main { font-size: 1.8rem; }
+      .tagline-sub { font-size: .98rem; }
       .login-container { flex: none; width: 100%; margin-left: 0; padding: 0; }
       .login-box { padding: 30px 20px; }
       header { flex-direction: column; gap: 15px; }

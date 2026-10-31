@@ -5,12 +5,17 @@
 
 session_start();
 
-// Mock employee session for testing
-$_SESSION['user_id'] = 29;  // Kimberly Bondoc's user_id
-$_SESSION['user_email'] = 'kimberlyy@gmail.com';
-$_SESSION['user_role'] = 'employee';
-
 require_once __DIR__ . '/config/db.php';
+
+// Resolve an active employee fixture instead of relying on a seed-data ID.
+$testUser = $pdo->query("SELECT u.user_id, u.email FROM user_accounts u JOIN employees e ON e.user_id = u.user_id WHERE u.role = 'employee' AND e.employment_status = 'Active' ORDER BY u.user_id LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+if (!$testUser) {
+    fwrite(STDERR, "ERROR: No active employee account is available for the integration test.\n");
+    exit(1);
+}
+$_SESSION['user_id'] = (int)$testUser['user_id'];
+$_SESSION['user_email'] = $testUser['email'];
+$_SESSION['user_role'] = 'employee';
 
 echo "═══════════════════════════════════════════════════════════════\n";
 echo "  EMPLOYEE PORTAL AJAX ENDPOINTS TEST\n";
@@ -23,8 +28,8 @@ $empRow->execute([$userId]);
 $employeeId = (int)($empRow->fetchColumn() ?: 0);
 
 if (!$employeeId) {
-    echo "ERROR: Could not resolve employee_id\n";
-    exit;
+    fwrite(STDERR, "ERROR: Could not resolve employee_id\n");
+    exit(1);
 }
 
 echo "Testing with: User ID: $userId, Employee ID: $employeeId\n\n";

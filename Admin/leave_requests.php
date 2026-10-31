@@ -53,15 +53,16 @@ if ($action) {
         switch ($action) {
 
            case 'stats':
+    // Exclude dept-head-only stages so these cards match what's actually shown in the list below.
     $s = $pdo->query("
         SELECT
             COUNT(*) AS total,
-            SUM(status='Pending')   AS pending,
+            SUM(status IN ('Pending','Pending HR')) AS pending,
             SUM(status='Approved')  AS approved,
             SUM(status='Denied')    AS denied,
             SUM(status='Cancelled') AS cancelled
         FROM leave_requests
-        WHERE is_deleted = 0
+        WHERE is_deleted = 0 AND status NOT IN ('Pending Dept Head', 'Denied by Dept Head')
     ")->fetch();
     echo json_encode(['success'=>true,'data'=>$s]);
     break;
@@ -76,14 +77,11 @@ if ($action) {
 
                 // Always exclude deleted requests
                 $where[] = 'lr.is_deleted = 0';
+                // Dept-head-only stages never reach Admin/HR, so never show them here.
+                $where[] = "lr.status NOT IN ('Pending Dept Head', 'Denied by Dept Head')";
 
                 $tab = $_GET['tab'] ?? 'all';
                 $status = $_GET['status'] ?? '';
-
-                // By default, exclude 'Pending Dept Head' from Admin/HR view unless a status filter is set
-                if (empty($status) && $tab === 'all') {
-                  $where[] = "lr.status != 'Pending Dept Head'";
-                }
 
                 // If dropdown status is selected, use it; otherwise use tab
                 if (!empty($status)) {
@@ -118,14 +116,8 @@ if ($action) {
                 $sortCol = $sortMap[$_GET['sort'] ?? ''] ?? 'lr.filed_at';
                 $sortDir = strtoupper($_GET['dir'] ?? 'DESC') === 'ASC' ? 'ASC' : 'DESC';
 
-                // Always float pending requests to the top when viewing all and no status filter.
-                // Applies when sort is empty OR when using the default sort (filed/DESC).
-                $isDefaultSort = (empty($_GET['sort']) || ($_GET['sort'] === 'filed' && $sortDir === 'DESC'));
-                if (empty($status) && $tab === 'all' && $isDefaultSort) {
-                  $orderBy = "ORDER BY (lr.status = 'Pending') DESC, lr.filed_at DESC";
-                } else {
-                  $orderBy = "ORDER BY $sortCol $sortDir";
-                }
+                // Pending requests (including those awaiting HR review) always float to the top, regardless of filter/sort.
+                $orderBy = "ORDER BY (lr.status IN ('Pending', 'Pending HR')) DESC, $sortCol $sortDir";
 
                 $page     = max(1, (int)($_GET['page'] ?? 1));
                 $pageSize = 8;
@@ -166,7 +158,9 @@ if ($action) {
                 $rows = $stmt->fetchAll();
 
                 $counts = $pdo->query("
-                  SELECT status, COUNT(*) AS cnt FROM leave_requests WHERE is_deleted = 0 GROUP BY status
+                  SELECT status, COUNT(*) AS cnt FROM leave_requests
+                  WHERE is_deleted = 0 AND status NOT IN ('Pending Dept Head', 'Denied by Dept Head')
+                  GROUP BY status
                 ")->fetchAll();
                 $tabCounts = ['all'=>0,'pending'=>0,'approved'=>0,'denied'=>0,'cancelled'=>0];
                 foreach ($counts as $c) {
@@ -195,6 +189,9 @@ if ($action) {
               $sigSelect = $hasLeaveSigCols
                 ? "lr.signature_file_path, lr.signature_original_name, lr.signature_uploaded_at,"
                 : "NULL AS signature_file_path, NULL AS signature_original_name, NULL AS signature_uploaded_at,";
+              $employeeSigSelect = $hasEmpSigCols
+                ? "e.signature_file_path AS employee_signature_file_path,"
+                : "NULL AS employee_signature_file_path,";
               $deptHeadSigSelect = $hasEmpSigCols
                 ? "dh.signature_file_path AS dept_head_signature_file_path, dh.signature_uploaded_at AS dept_head_signature_uploaded_at,"
                 : "NULL AS dept_head_signature_file_path, NULL AS dept_head_signature_uploaded_at,";
@@ -203,6 +200,7 @@ if ($action) {
                         lr.days_requested, lr.reason, lr.admin_remarks,
                         lr.filed_at, lr.reviewed_by, lr.reviewed_at,
                   $sigSelect
+                    $employeeSigSelect
                         $deptHeadSigSelect
                         lr.with_pay,
                         e.first_name,
@@ -232,6 +230,13 @@ if ($action) {
                 $stmt->execute([$id]);
                 $row = $stmt->fetch();
                 if ($row) {
+                  $snapshotPath = trim((string)($row['signature_file_path'] ?? ''));
+                  if ($snapshotPath !== '') {
+                    $snapshotFile = __DIR__ . '/../' . ltrim(str_replace('../', '', $snapshotPath), '/');
+                    if (!is_file($snapshotFile)) {
+                      $row['signature_file_path'] = $row['employee_signature_file_path'] ?? null;
+                    }
+                  }
                     // Fetch the HR department head details for 7.A certification
                     if ($hasEmpSigCols) {
                         $hrHeadStmt = $pdo->query("
@@ -293,75 +298,77 @@ if ($action) {
                 break;
 
             case 'approve':
+              if (!in_array($_SESSION['user_role'] ?? '', ['admin', 'hr_staff'], true)) {
+                echo json_encode(['success'=>false,'message'=>'Only HR/Admin can approve leave requests.']);
+                break;
+              }
                 $id      = (int)($_POST['id']     ?? 0);
                 $remark  = trim($_POST['remark']  ?? '') ?: 'Approved.';
                 $adminId = $_SESSION['user_id'];
 
-                $req = $pdo->prepare("SELECT * FROM leave_requests WHERE request_id = ? AND LOWER(status) LIKE 'pending%'");
+              try {
+                $pdo->beginTransaction();
+                $req = $pdo->prepare("SELECT * FROM leave_requests WHERE request_id = ? AND status = 'Pending HR' AND is_deleted = 0 FOR UPDATE");
                 $req->execute([$id]);
                 $r = $req->fetch();
-                if (!$r) { echo json_encode(['success'=>false,'message'=>'Request not found or already processed.']); break; }
+                if (!$r) {
+                  $pdo->rollBack();
+                  echo json_encode(['success'=>false,'message'=>'Request must be forwarded by the department head before HR approval.']);
+                  break;
+                }
 
-                // P2-3 — Balance sufficiency check before approving
                 $leaveYear = (int)date('Y', strtotime($r['date_from']));
-                $balStmt = $pdo->prepare("
-                    SELECT remaining_days FROM leave_balances
-                    WHERE employee_id=? AND leave_type_id=? AND calendar_year=?
-                ");
+                $balStmt = $pdo->prepare("SELECT remaining_days FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND calendar_year=? FOR UPDATE");
                 $balStmt->execute([$r['employee_id'], $r['leave_type_id'], $leaveYear]);
                 $balance = $balStmt->fetchColumn();
-                if ($balance !== false && (float)$balance < (float)$r['days_requested']) {
-                    echo json_encode(['success'=>false,'message'=>'Insufficient leave balance. Employee has ' . (float)$balance . ' day(s) remaining.']);
-                    break;
+                if ($balance === false) {
+                  $pdo->rollBack();
+                  echo json_encode(['success'=>false,'message'=>'Leave balance record not found; approval aborted.']);
+                  break;
+                }
+                if ((float)$balance < (float)$r['days_requested']) {
+                  $pdo->rollBack();
+                  echo json_encode(['success'=>false,'message'=>'Insufficient leave balance. Employee has ' . (float)$balance . ' day(s) remaining.']);
+                  break;
                 }
 
-                // P2-2 — Overlap detection: reject if another approved leave covers same dates
-                $overlapStmt = $pdo->prepare("
-                    SELECT COUNT(*) FROM leave_requests
-                    WHERE employee_id=? AND request_id!=? AND is_deleted=0
-                      AND status='Approved'
-                      AND date_from <= ? AND date_to >= ?
-                ");
+                $overlapStmt = $pdo->prepare("SELECT COUNT(*) FROM leave_requests WHERE employee_id=? AND request_id!=? AND is_deleted=0 AND status='Approved' AND date_from <= ? AND date_to >= ? FOR UPDATE");
                 $overlapStmt->execute([$r['employee_id'], $id, $r['date_to'], $r['date_from']]);
                 if ((int)$overlapStmt->fetchColumn() > 0) {
-                    echo json_encode(['success'=>false,'message'=>'Overlap detected: employee already has an approved leave covering these dates.']);
-                    break;
+                  $pdo->rollBack();
+                  echo json_encode(['success'=>false,'message'=>'Overlap detected: employee already has an approved leave covering these dates.']);
+                  break;
                 }
 
-                $pdo->prepare("
-                    UPDATE leave_requests
-                    SET status='Approved', admin_remarks=?, reviewed_by=?, reviewed_at=NOW(), updated_at=NOW()
-                    WHERE request_id=?
-                ")->execute([$remark, $adminId, $id]);
-
-                // P2-1 — Deduct from leave balance using the year of date_from, not YEAR(NOW())
-                // Note: remaining_days is a GENERATED ALWAYS AS column, so only update used_days
-                $pdo->prepare("
-                    UPDATE leave_balances
-                    SET used_days = used_days + ?
-                    WHERE employee_id=? AND leave_type_id=? AND calendar_year=?
-                ")->execute([$r['days_requested'], $r['employee_id'], $r['leave_type_id'], $leaveYear]);
-
-                // Log activity (only if table exists)
+                $pdo->prepare("UPDATE leave_requests SET status='Approved', admin_remarks=?, reviewed_by=?, reviewed_at=NOW(), updated_at=NOW() WHERE request_id=?")
+                  ->execute([$remark, $adminId, $id]);
+                $pdo->prepare("UPDATE leave_balances SET used_days = used_days + ? WHERE employee_id=? AND leave_type_id=? AND calendar_year=?")
+                  ->execute([$r['days_requested'], $r['employee_id'], $r['leave_type_id'], $leaveYear]);
                 try {
-                    $pdo->prepare("
-                        INSERT INTO activity_logs (user_id, action, description)
-                        VALUES (?, 'APPROVE_LEAVE', ?)
-                    ")->execute([$adminId, "Approved leave request #$id"]);
+                  $pdo->prepare("INSERT INTO activity_logs (user_id, action, description) VALUES (?, 'APPROVE_LEAVE', ?)")
+                    ->execute([$adminId, "Approved leave request #$id"]);
                 } catch (PDOException $ignored) {}
-
+                $pdo->commit();
                 echo json_encode(['success'=>true,'message'=>'Leave request approved.']);
+              } catch (Throwable $approvalError) {
+                if ($pdo->inTransaction()) { $pdo->rollBack(); }
+                throw $approvalError;
+              }
                 break;
 
             case 'deny':
+              if (!in_array($_SESSION['user_role'] ?? '', ['admin', 'hr_staff'], true)) {
+                echo json_encode(['success'=>false,'message'=>'Only HR/Admin can deny leave requests.']);
+                break;
+              }
                 $id      = (int)($_POST['id']    ?? 0);
                 $remark  = trim($_POST['remark'] ?? '') ?: 'Request denied.';
                 $adminId = $_SESSION['user_id'];
 
 
-                $req = $pdo->prepare("SELECT * FROM leave_requests WHERE request_id=? AND LOWER(status) LIKE 'pending%'");
+                $req = $pdo->prepare("SELECT * FROM leave_requests WHERE request_id=? AND status='Pending HR' AND is_deleted=0");
                 $req->execute([$id]);
-                if (!$req->fetch()) { echo json_encode(['success'=>false,'message'=>'Request not found or already processed.']); break; }
+                if (!$req->fetch()) { echo json_encode(['success'=>false,'message'=>'Request must be forwarded by the department head before HR action.']); break; }
 
                 $pdo->prepare("
                     UPDATE leave_requests
@@ -806,6 +813,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
       <a class="nav-item active" href="leave_requests.php"><div class="nav-icon">📋</div>Leave Requests<span class="nav-badge" id="sidebarBadge"></span></a>
       <a class="nav-item" href="leave_types.php"><div class="nav-icon">📁</div>Leave Types</a>
       <a class="nav-item" href="leave_balances.php"><div class="nav-icon">⚖️</div>Leave Balances</a>
+      <a class="nav-item" href="holidays.php"><div class="nav-icon">📅</div>Holidays</a>
       <div class="nav-label">Documents</div>
       <a class="nav-item" href="documents.php"><div class="nav-icon">📄</div>HR Documents</a>
     <a class="nav-item" href="pds_saln.php"><div class="nav-icon">🪪</div>PDS & SALN</a>
@@ -923,8 +931,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
                 <th onclick="sortBy('name')">Employee ↕</th>
                 <th onclick="sortBy('type')">Leave Type ↕</th>
                 <th>Leave Balance</th>
-                <th onclick="sortBy('from')">Date From ↕</th>
-                <th onclick="sortBy('to')">Date To ↕</th>
+                <th onclick="sortBy('from')">Date Range ↕</th>
                 <th onclick="sortBy('days')">Days ↕</th>
                 <th>Reason</th>
                 <th onclick="sortBy('filed')">Filed On ↕</th>
@@ -933,7 +940,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
               </tr>
             </thead>
             <tbody id="leaveBody">
-              <tr><td colspan="10" style="text-align:center;padding:40px;color:var(--gray-400);">Loading…</td></tr>
+              <tr><td colspan="9" style="text-align:center;padding:40px;color:var(--gray-400);">Loading…</td></tr>
             </tbody>
           </table>
           <div class="empty-state" id="emptyState" style="display:none;">
@@ -1375,6 +1382,20 @@ if (!CSRF_TOKEN) {
   let approveTarget=null,denyTarget=null,cancelTarget=null,debounceTimer=null;
 
   const fmt   = d => d ? new Date(d.slice(0,10)+'T00:00:00').toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'numeric'}) : '—';
+  function fmtDateRange(from, to) {
+    if (!from || !to) return '—';
+    const start = new Date(from.slice(0,10) + 'T00:00:00');
+    const end = new Date(to.slice(0,10) + 'T00:00:00');
+    const month = date => date.toLocaleDateString('en-US', {month:'long'});
+    const year = date => date.getFullYear();
+    if (year(start) === year(end) && start.getMonth() === end.getMonth()) {
+      return `${month(start)} ${start.getDate()}-${end.getDate()} ${year(start)}`;
+    }
+    if (year(start) === year(end)) {
+      return `${month(start)} ${start.getDate()} - ${month(end)} ${end.getDate()} ${year(start)}`;
+    }
+    return `${month(start)} ${start.getDate()} ${year(start)} - ${month(end)} ${end.getDate()} ${year(end)}`;
+  }
   const ini   = n => n.split(' ').slice(0,2).map(w=>w[0]).join('').toUpperCase();
   const aColor= s => COLORS[Math.abs([...s].reduce((a,c)=>a+c.charCodeAt(0),0)) % COLORS.length];
 
@@ -1453,8 +1474,7 @@ function renderTable(rows){
       <td><div class="emp-cell"><div class="emp-avatar" style="background:${c};">${av}</div><div><div class="emp-name">${name}</div><div class="emp-dept">${r.department||'—'}</div></div></div></td>
       <td>${typeBadge(r.leave_type)}</td>
       <td><span class="days-pill">${parseFloat(r.leave_balance || 0).toFixed(2)} days</span></td>
-      <td style="font-size:0.80rem;color:var(--gray-600);">${fmt(r.date_from)}</td>
-      <td style="font-size:0.80rem;color:var(--gray-600);">${fmt(r.date_to)}</td>
+      <td style="font-size:0.80rem;color:var(--gray-600);white-space:nowrap;">${fmtDateRange(r.date_from,r.date_to)}</td>
       <td><span class="days-pill">${r.days_requested} day${r.days_requested!=1?'s':''}</span></td>
       <td class="rc-col" data-id="${r.request_id}">${rcBuild(r.reason,r.request_id)}</td>
       <td style="font-size:0.78rem;color:var(--gray-400);">${fmt(r.filed_at)}</td>
@@ -1564,6 +1584,118 @@ async function doDeleteRequest() {
   ];
 
   var currentViewId = null;
+  const signatureScanCache = new Map();
+
+  async function scanSignatureForPrint(signaturePath) {
+    var cleanPath = (signaturePath || '').trim();
+    if (!cleanPath) return '';
+    if (signatureScanCache.has(cleanPath)) return signatureScanCache.get(cleanPath);
+
+    try {
+      var scanned = await new Promise(function(resolve, reject) {
+        var img = new Image();
+        img.onload = function() {
+          try {
+            var canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth || img.width;
+            canvas.height = img.naturalHeight || img.height;
+            var ctx = canvas.getContext('2d', { willReadFrequently: true });
+            if (!ctx) throw new Error('Canvas context unavailable.');
+
+            ctx.drawImage(img, 0, 0);
+            var frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            var px = frame.data;
+
+            // Estimate paper/background tone from image corners.
+            var w = canvas.width;
+            var h = canvas.height;
+            var samples = [
+              [0, 0],
+              [w - 1, 0],
+              [0, h - 1],
+              [w - 1, h - 1],
+              [Math.floor(w * 0.5), 0],
+              [Math.floor(w * 0.5), h - 1],
+              [0, Math.floor(h * 0.5)],
+              [w - 1, Math.floor(h * 0.5)]
+            ];
+            var bgR = 0, bgG = 0, bgB = 0, bgCount = 0;
+            for (var s = 0; s < samples.length; s++) {
+              var sx = samples[s][0];
+              var sy = samples[s][1];
+              var si = (sy * w + sx) * 4;
+              bgR += px[si];
+              bgG += px[si + 1];
+              bgB += px[si + 2];
+              bgCount++;
+            }
+            bgR = Math.round(bgR / Math.max(1, bgCount));
+            bgG = Math.round(bgG / Math.max(1, bgCount));
+            bgB = Math.round(bgB / Math.max(1, bgCount));
+
+            for (var i = 0; i < px.length; i += 4) {
+              var r = px[i];
+              var g = px[i + 1];
+              var b = px[i + 2];
+              var a = px[i + 3];
+              if (a === 0) continue;
+
+              var maxCh = Math.max(r, g, b);
+              var minCh = Math.min(r, g, b);
+              var saturation = maxCh - minCh;
+              var lum = 0.299 * r + 0.587 * g + 0.114 * b;
+              var deltaBg = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
+
+              // Remove paper-like background noise, keep only signature strokes.
+              if (deltaBg < 52 && saturation < 42 && lum > 135) {
+                px[i + 3] = 0;
+                continue;
+              }
+
+              var edgeStrength = Math.max(0, deltaBg - 14);
+              var ink = Math.max(0, Math.min(255, Math.round((232 - lum) * 1.9 + edgeStrength * 2.8)));
+              if (ink < 20) {
+                px[i + 3] = 0;
+                continue;
+              }
+
+              // Preserve uploaded pen color and tighten stroke opacity.
+              px[i + 3] = Math.max(a, Math.min(255, ink + 18));
+            }
+
+            ctx.putImageData(frame, 0, 0);
+            resolve(canvas.toDataURL('image/png'));
+          } catch (e) {
+            reject(e);
+          }
+        };
+        img.onerror = function() { reject(new Error('Failed to load signature image.')); };
+        img.src = cleanPath;
+      });
+
+      signatureScanCache.set(cleanPath, scanned);
+      return scanned;
+    } catch (e) {
+      // Fallback to the raw image path if scan fails.
+      return cleanPath;
+    }
+  }
+
+  async function setScannedSignature(imgId, signaturePath) {
+    var img = document.getElementById(imgId);
+    if (!img) return;
+
+    var cleanPath = (signaturePath || '').trim();
+    if (!cleanPath) {
+      img.removeAttribute('src');
+      img.style.display = 'none';
+      return;
+    }
+
+    var scannedSrc = await scanSignatureForPrint(cleanPath);
+    img.src = scannedSrc || cleanPath;
+    img.style.display = 'block';
+  }
 
   async function viewRequest(id) {
     currentViewId = id;
@@ -1756,17 +1888,7 @@ async function doDeleteRequest() {
     set('cf-dates', fmtDateShort(r.date_from) + ' to ' + fmtDateShort(r.date_to));
 
     // 6D — applicant e-signature (snapshot from leave request)
-    var sigImg = document.getElementById('cf-applicant-signature');
-    if (sigImg) {
-      var sigPath = (r.signature_file_path || '').trim();
-      if (sigPath) {
-        sigImg.src = sigPath;
-        sigImg.style.display = 'block';
-      } else {
-        sigImg.removeAttribute('src');
-        sigImg.style.display = 'none';
-      }
-    }
+    await setScannedSignature('cf-applicant-signature', r.signature_file_path || '');
     var applicantSigName = document.getElementById('cf-applicant-signature-name');
     if (applicantSigName) {
       applicantSigName.textContent = name || '';
@@ -1787,19 +1909,6 @@ async function doDeleteRequest() {
     set('cf-ref-no', 'LR-' + String(r.request_id || id).padStart(6, '0'));
     set('cf-printed-at', new Date().toLocaleString());
 
-    function setOfficerSignature(imgId, signaturePath) {
-      var img = document.getElementById(imgId);
-      if (!img) return;
-      var cleanPath = (signaturePath || '').trim();
-      if (cleanPath) {
-        img.src = cleanPath;
-        img.style.display = 'block';
-      } else {
-        img.removeAttribute('src');
-        img.style.display = 'none';
-      }
-    }
-
     // 7B — recommendation based on status
     // 7A — CERTIFICATION OF LEAVE CREDITS: Always HRMO
     var hrmoName = r.hr_head_name && r.hr_head_name.trim() ? r.hr_head_name.trim() : 'HRMO';
@@ -1809,7 +1918,7 @@ async function doDeleteRequest() {
       certOfficer.textContent = hrmoLabel;
       certOfficer.style.textTransform = 'uppercase';
     }
-    setOfficerSignature('cf-7a-signature', r.hr_head_signature_file_path || '');
+    await setScannedSignature('cf-7a-signature', r.hr_head_signature_file_path || '');
 
     // 7B — Recommendation: Dept Head input
     var cbApprove = document.getElementById('cb-rec-approve');
@@ -1826,7 +1935,7 @@ async function doDeleteRequest() {
       authOfficer7b.textContent = deptHeadName;
       authOfficer7b.style.textTransform = 'uppercase';
     }
-    setOfficerSignature('cf-7b-signature', r.dept_head_signature_file_path || '');
+    await setScannedSignature('cf-7b-signature', r.dept_head_signature_file_path || '');
 
     // 7D — Disapproved due to: HR/Admin input
     // (Already handled below in fillDisapproveLines with r.admin_remarks)

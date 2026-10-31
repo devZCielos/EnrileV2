@@ -35,12 +35,6 @@ if (!in_array($_SESSION['user_role'] ?? '', $allowedRoles)) {
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
 
-// ── Auto-migration: add is_mayor column if it doesn't exist yet ──────────
-try { $pdo->query("SELECT is_mayor FROM employees LIMIT 0"); }
-catch (PDOException $_e) {
-    $pdo->exec("ALTER TABLE employees ADD COLUMN is_mayor TINYINT(1) NOT NULL DEFAULT 0");
-}
-
 // ════════════════════════════════════════════════════════════
 //  AJAX HANDLER  — ?action=...
 //  Returns JSON and exits before any HTML is rendered.
@@ -613,6 +607,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
       <a class="nav-item" href="leave_requests.php"><div class="nav-icon">📋</div>Leave Requests<span class="nav-badge" id="pendingBadge"></span></a>
       <a class="nav-item" href="leave_types.php"><div class="nav-icon">📁</div>Leave Types</a>
       <a class="nav-item" href="leave_balances.php"><div class="nav-icon">⚖️</div>Leave Balances</a>
+      <a class="nav-item" href="holidays.php"><div class="nav-icon">📅</div>Holidays</a>
       <div class="nav-label">Documents</div>
       <a class="nav-item" href="documents.php"><div class="nav-icon">📄</div>HR Documents</a>
       <a class="nav-item" href="pds_saln.php"><div class="nav-icon">🪪</div>PDS & SALN</a>

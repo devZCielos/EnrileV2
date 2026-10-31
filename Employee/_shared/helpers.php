@@ -135,19 +135,24 @@ function sanitize($input) {
 
 // ── Business-day leave day counter ──
 // Returns the number of working days between two date strings (inclusive),
-// excluding Saturdays, Sundays, and any dates in the `holidays` table.
+// excluding Saturdays, Sundays, and configured one-time or recurring holidays.
 function countBusinessDays(PDO $pdo, string $dateFrom, string $dateTo): int {
     $start   = new DateTime($dateFrom);
     $end     = new DateTime($dateTo);
     $end->modify('+1 day'); // make end exclusive for DatePeriod
 
-    // Fetch holidays in range
-    $stmt = $pdo->prepare("
-        SELECT holiday_date FROM holidays
-        WHERE holiday_date BETWEEN ? AND ?
-    ");
-    $stmt->execute([$dateFrom, $dateTo]);
-    $holidays = array_flip($stmt->fetchAll(PDO::FETCH_COLUMN));
+    // Fetch all declared holidays so annual and non-annual holidays reflect on leave calculations
+    $stmt = $pdo->query("SELECT holiday_date, is_recurring FROM holidays");
+    $dateHolidays = [];
+    $recurringHolidays = [];
+    if ($stmt) {
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $holiday) {
+            if (!empty($holiday['holiday_date'])) {
+                $dateHolidays[$holiday['holiday_date']] = true;
+                $recurringHolidays[substr($holiday['holiday_date'], 5)] = true;
+            }
+        }
+    }
 
     $days = 0;
     $interval = new DateInterval('P1D');
@@ -155,7 +160,7 @@ function countBusinessDays(PDO $pdo, string $dateFrom, string $dateTo): int {
     foreach ($period as $day) {
         $dow = (int)$day->format('N'); // 1=Mon...7=Sun
         if ($dow >= 6) continue;       // skip Sat (6) and Sun (7)
-        if (isset($holidays[$day->format('Y-m-d')])) continue; // skip holidays
+        if (isset($dateHolidays[$day->format('Y-m-d')]) || isset($recurringHolidays[$day->format('m-d')])) continue;
         $days++;
     }
     return $days;

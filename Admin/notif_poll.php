@@ -1,7 +1,7 @@
 <?php
 // ── Admin Notification Poll ───────────────────────────────────────────────
 session_start();
-if (empty($_SESSION['user_id'])) {
+if (empty($_SESSION['user_id']) || !in_array($_SESSION['user_role'] ?? '', ['admin', 'hr_staff', 'dept_head'], true)) {
     header('Content-Type: application/json');
     echo json_encode(['success'=>false,'notifications'=>[],'count'=>0]);
     exit();
@@ -25,6 +25,61 @@ try {
             'nid'=>md5('lr'.$r['emp_name'].$r['leave_type'].(string)$r['days_requested'].($r['filed_at']??'')),
         ];
     }
+    // Pending Certificate of Employment requests
+    try {
+        $coe = $pdo->query("SELECT CONCAT(e.first_name,' ',e.last_name) AS emp_name, c.purpose, c.filed_at
+            FROM coe_requests c JOIN employees e ON e.employee_id=c.employee_id
+            WHERE c.status='Pending' AND c.is_deleted=0 ORDER BY c.filed_at DESC LIMIT 10")->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($coe as $request) {
+            $npNotifs[] = [
+                'icon'=>'📄','color'=>'#2563eb','title'=>'COE Request',
+                'body'=>htmlspecialchars($request['emp_name']).' requested a Certificate of Employment'.(!empty($request['purpose']) ? ': '.htmlspecialchars($request['purpose']) : ''),
+                'time'=>$request['filed_at'],'link'=>'coe_requests.php',
+                'nid'=>md5('coe'.$request['emp_name'].($request['filed_at'] ?? '')),
+            ];
+        }
+    } catch (Exception $ex) {}
+    // Pending service record requests
+    try {
+        $serviceRequests = $pdo->query("SELECT CONCAT(e.first_name,' ',e.last_name) AS emp_name, r.purpose, r.requested_at
+            FROM sr_requests r JOIN employees e ON e.employee_id=r.employee_id
+            WHERE r.status='Pending' ORDER BY r.requested_at DESC LIMIT 10")->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($serviceRequests as $request) {
+            $npNotifs[] = [
+                'icon'=>'📜','color'=>'#7c3aed','title'=>'Service Record Request',
+                'body'=>htmlspecialchars($request['emp_name']).' requested a service record'.(!empty($request['purpose']) ? ': '.htmlspecialchars($request['purpose']) : ''),
+                'time'=>$request['requested_at'],'link'=>'service_records.php',
+                'nid'=>md5('sr'.$request['emp_name'].($request['requested_at'] ?? '')),
+            ];
+        }
+    } catch (Exception $ex) {}
+    // Employee-submitted documents and updated PDS/SALN records
+    try {
+        $documents = $pdo->query("SELECT CONCAT(e.first_name,' ',e.last_name) AS emp_name, d.document_type, d.file_name, d.uploaded_at
+            FROM documents d JOIN employees e ON e.employee_id=d.employee_id
+            ORDER BY d.uploaded_at DESC LIMIT 10")->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($documents as $document) {
+            $npNotifs[] = [
+                'icon'=>'📁','color'=>'#0891b2','title'=>'Document Uploaded',
+                'body'=>htmlspecialchars($document['emp_name']).' uploaded '.htmlspecialchars($document['document_type']).': '.htmlspecialchars($document['file_name']),
+                'time'=>$document['uploaded_at'],'link'=>'documents.php',
+                'nid'=>md5('doc'.$document['emp_name'].$document['file_name'].($document['uploaded_at'] ?? '')),
+            ];
+        }
+    } catch (Exception $ex) {}
+    try {
+        $pdsRecords = $pdo->query("SELECT CONCAT(e.first_name,' ',e.last_name) AS emp_name, p.updated_at
+            FROM pds_records p JOIN employees e ON e.employee_id=p.employee_id
+            ORDER BY p.updated_at DESC LIMIT 10")->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($pdsRecords as $record) {
+            $npNotifs[] = [
+                'icon'=>'📝','color'=>'#0f766e','title'=>'PDS/SALN Updated',
+                'body'=>htmlspecialchars($record['emp_name']).' updated their PDS or SALN record',
+                'time'=>$record['updated_at'],'link'=>'pds_saln.php',
+                'nid'=>md5('pds'.$record['emp_name'].($record['updated_at'] ?? '')),
+            ];
+        }
+    } catch (Exception $ex) {}
     // Expiring contracts
     try {
         $ec = $pdo->query("SELECT CONCAT(e.first_name,' ',e.last_name) AS emp_name,

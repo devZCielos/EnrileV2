@@ -191,9 +191,13 @@ if ($action) {
 
                 if (!$row) { echo json_encode(['success' => false, 'message' => 'Document not found.']); break; }
 
-                // Delete physical file
-                $absPath = __DIR__ . '/' . ltrim(str_replace('../', '', $row['file_path']), '/');
-                if (file_exists($absPath)) @unlink($absPath);
+                // Stored paths are display URLs; resolve only their filename in the upload directory.
+                $filename = basename((string)$row['file_path']);
+                $uploadDir = realpath(UPLOAD_DIR);
+                $absPath = $uploadDir ? realpath($uploadDir . DIRECTORY_SEPARATOR . $filename) : false;
+                if ($uploadDir && $absPath && is_file($absPath) && str_starts_with($absPath, $uploadDir . DIRECTORY_SEPARATOR)) {
+                  @unlink($absPath);
+                }
 
                 $pdo->prepare("DELETE FROM documents WHERE document_id = ?")->execute([$id]);
                 echo json_encode(['success' => true, 'message' => 'Document deleted.']);
@@ -219,7 +223,18 @@ if ($action) {
 
             // ── DOCUMENT TYPES LIST ────────────────────────────
             case 'doc_types':
-                $types = $pdo->query("SELECT DISTINCT document_type FROM documents ORDER BY document_type")->fetchAll(PDO::FETCH_COLUMN);
+                $types = [
+                    'Appointment',
+                    'Contract',
+                    'PDS',
+                    'SALN',
+                    'Certificate',
+                    'Medical Certificate',
+                    'Leave Form',
+                    'Payslip',
+                    'ID',
+                    'Other',
+                ];
                 echo json_encode(['success' => true, 'data' => $types]);
                 break;
 
@@ -522,6 +537,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     <a class="nav-item" href="leave_requests.php"><div class="nav-icon">📋</div>Leave Requests<span class="nav-badge" id="sidebarBadge"></span></a>
     <a class="nav-item" href="leave_types.php"><div class="nav-icon">📁</div>Leave Types</a>
     <a class="nav-item" href="leave_balances.php"><div class="nav-icon">⚖️</div>Leave Balances</a>
+    <a class="nav-item" href="holidays.php"><div class="nav-icon">📅</div>Holidays</a>
     <div class="nav-label">Documents</div>
     <a class="nav-item active" href="documents.php"><div class="nav-icon">📄</div>HR Documents</a>
     <a class="nav-item" href="pds_saln.php"><div class="nav-icon">🪪</div>PDS & SALN</a>

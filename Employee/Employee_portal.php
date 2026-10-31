@@ -169,6 +169,11 @@ if ($action) {
         }
 
         switch ($action) {
+          case 'holiday_calendar':
+            $stmt = $pdo->query("SELECT holiday_date, description, is_recurring FROM holidays ORDER BY holiday_date ASC");
+            echo json_encode(['success' => true, 'data' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
+            break;
+
           // ── SESSION / LINKAGE CHECK ─────────────────────
           case 'whoami':
             echo json_encode([
@@ -514,8 +519,16 @@ if ($action) {
                 $oldSigStmt->execute([$employeeId]);
                 $oldSig = $oldSigStmt->fetchColumn();
                 if ($oldSig) {
-                  $oldPath = __DIR__ . '/../' . ltrim(str_replace('../', '', $oldSig), '/');
-                  if (file_exists($oldPath)) { @unlink($oldPath); }
+                  $usedByLeave = false;
+                  if (hrms_column_exists($pdo, 'leave_requests', 'signature_file_path')) {
+                    $usageStmt = $pdo->prepare("SELECT 1 FROM leave_requests WHERE signature_file_path = ? LIMIT 1");
+                    $usageStmt->execute([$oldSig]);
+                    $usedByLeave = (bool)$usageStmt->fetchColumn();
+                  }
+                  if (!$usedByLeave) {
+                    $oldPath = __DIR__ . '/../' . ltrim(str_replace('../', '', $oldSig), '/');
+                    if (file_exists($oldPath)) { @unlink($oldPath); }
+                  }
                 }
 
                 if (!move_uploaded_file($f['tmp_name'], $dest)) {
@@ -587,6 +600,54 @@ if ($action) {
                 $where  = 'lr.employee_id = ?';
                 $params = [$employeeId];
                 $pendingStatuses = ['Pending', 'Pending Dept Head', 'Pending HR'];
+
+                $leaveTypeId = (int)($_GET['leave_type_id'] ?? 0);
+                if ($leaveTypeId > 0) {
+                  $where .= ' AND lr.leave_type_id = ?';
+                  $params[] = $leaveTypeId;
+                }
+
+                $dateMode = $_GET['date_mode'] ?? '';
+                $dateValue = trim($_GET['date_value'] ?? '');
+                if ($dateMode !== '' || $dateValue !== '') {
+                  $rangeStart = null;
+                  $rangeEnd = null;
+                  if ($dateMode === 'date' && preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateValue)) {
+                    [$year, $month, $day] = array_map('intval', explode('-', $dateValue));
+                    if (checkdate($month, $day, $year)) {
+                      $rangeStart = $dateValue;
+                      $rangeEnd = $dateValue;
+                    }
+                  } elseif (
+                    $dateMode === 'week'
+                    && preg_match('/^\d{4}-W\d{2}$/', $dateValue)
+                    && (int)substr($dateValue, 6, 2) >= 1
+                    && (int)substr($dateValue, 6, 2) <= 53
+                  ) {
+                    $weekStart = new DateTimeImmutable($dateValue . '-1');
+                    $rangeStart = $weekStart->format('Y-m-d');
+                    $rangeEnd = $weekStart->modify('+6 days')->format('Y-m-d');
+                  } elseif ($dateMode === 'month' && preg_match('/^\d{4}-\d{2}$/', $dateValue)) {
+                    [$year, $month] = array_map('intval', explode('-', $dateValue));
+                    if (checkdate($month, 1, $year)) {
+                      $monthStart = new DateTimeImmutable($dateValue . '-01');
+                      $rangeStart = $monthStart->format('Y-m-d');
+                      $rangeEnd = $monthStart->modify('last day of this month')->format('Y-m-d');
+                    }
+                  } elseif ($dateMode === 'year' && preg_match('/^\d{4}$/', $dateValue) && (int)$dateValue >= 1900) {
+                    $rangeStart = $dateValue . '-01-01';
+                    $rangeEnd = $dateValue . '-12-31';
+                  }
+                  if (!$rangeStart || !$rangeEnd) {
+                    echo json_encode(['success' => false, 'message' => 'Please provide a valid date filter.']); break;
+                  }
+                  $where .= ' AND lr.date_from <= ? AND lr.date_to >= ?';
+                  $params[] = $rangeEnd;
+                  $params[] = $rangeStart;
+                }
+
+                $filteredWhere = $where;
+                $filteredParams = $params;
                 if ($status !== 'all') {
                   if (strtolower($status) === 'pending') {
                     $where .= ' AND lr.status IN (?,?,?)';
@@ -617,11 +678,13 @@ if ($action) {
 
                 // Count logic: group all pending-like statuses under 'Pending'
                 $counts = $pdo->prepare("
-                  SELECT status, COUNT(*) AS cnt
-                  FROM   leave_requests WHERE employee_id = ?
+                  SELECT lr.status, COUNT(*) AS cnt
+                  FROM   leave_requests lr
+                  JOIN   leave_types lt ON lt.leave_type_id = lr.leave_type_id
+                  WHERE  $filteredWhere
                   GROUP  BY status
                 ");
-                $counts->execute([$employeeId]);
+                $counts->execute($filteredParams);
                 $statusCounts = ['Pending'=>0,'Approved'=>0,'Denied'=>0,'Cancelled'=>0];
                 foreach ($counts->fetchAll() as $sc) {
                   if (in_array($sc['status'], $pendingStatuses)) {
@@ -631,8 +694,25 @@ if ($action) {
                   }
                 }
 
+                $typeOptions = $pdo->prepare("
+                  SELECT DISTINCT lt.leave_type_id, lt.name
+                  FROM leave_requests lr
+                  JOIN leave_types lt ON lt.leave_type_id = lr.leave_type_id
+                  WHERE lr.employee_id = ?
+                  ORDER BY lt.name
+                ");
+                $typeOptions->execute([$employeeId]);
+
                 ob_clean();
-                echo json_encode(['success' => true, 'data' => $rows, 'counts' => $statusCounts, 'total' => $prTotal, 'page' => $prPage, 'per_page' => $prPerPage]);
+                echo json_encode([
+                  'success' => true,
+                  'data' => $rows,
+                  'counts' => $statusCounts,
+                  'total' => $prTotal,
+                  'page' => $prPage,
+                  'per_page' => $prPerPage,
+                  'type_options' => $typeOptions->fetchAll(),
+                ]);
                 break;
 
               // ── COE REQUESTS ────────────────────────────────
@@ -1018,7 +1098,13 @@ if ($action) {
                 $stmt = $pdo->prepare("SELECT * FROM pds_records WHERE employee_id = ? ORDER BY created_at DESC LIMIT 1");
                 $stmt->execute([$employeeId]);
                 $row = $stmt->fetch();
-                echo json_encode(['success'=>true,'data'=>$row?:null]);
+                $empSig = null;
+                if (hrms_column_exists($pdo, 'employees', 'signature_file_path')) {
+                    $sg = $pdo->prepare("SELECT signature_file_path FROM employees WHERE employee_id = ?");
+                    $sg->execute([$employeeId]);
+                    $empSig = ['signature_file_path' => $sg->fetchColumn() ?: null];
+                }
+                echo json_encode(['success'=>true,'data'=>$row?:null,'employee'=>$empSig]);
                 break;
 
             case 'save_pds':
@@ -1063,39 +1149,61 @@ if ($action) {
                 $notifs = []; $nCount = 0;
                 if ($employeeId) { try {
 
-                    // ── Leave request status updates (approved OR denied, last 30 days) ──
-                    $lrS = $pdo->prepare("SELECT lr.status, lr.reviewed_at, lr.admin_remarks,
-                        lt.name AS lt, lr.days_requested
+                    // ── Leave request progress updates (last 30 days) ──
+                    $lrS = $pdo->prepare("SELECT lr.request_id, lr.status, lr.filed_at, lr.reviewed_at,
+                      lr.admin_remarks, lr.dept_head_action_date, lr.dept_head_remarks,
+                      lt.name AS lt, lr.days_requested
                         FROM leave_requests lr
                         JOIN leave_types lt ON lt.leave_type_id = lr.leave_type_id
                         WHERE lr.employee_id = ?
-                          AND lr.status IN ('Approved','Denied')
-                          AND lr.reviewed_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-                        ORDER BY lr.reviewed_at DESC LIMIT 10");
+                        AND lr.status IN ('Pending Dept Head','Pending HR','Approved','Denied','Denied by Dept Head')
+                        AND (lr.filed_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                        OR lr.dept_head_action_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                        OR lr.reviewed_at >= DATE_SUB(NOW(), INTERVAL 30 DAY))
+                      ORDER BY GREATEST(lr.filed_at, COALESCE(lr.dept_head_action_date, lr.filed_at), COALESCE(lr.reviewed_at, lr.filed_at)) DESC LIMIT 10");
                     $lrS->execute([$employeeId]);
                     foreach ($lrS->fetchAll(PDO::FETCH_ASSOC) as $lr) {
-                        $ok   = $lr['status'] === 'Approved';
                         $days = (int)$lr['days_requested'];
-                        $body = ($ok ? '✅ Approved: ' : '❌ Denied: ') . 'Your ' . htmlspecialchars($lr['lt'])
-                              . ' request (' . $days . ' day' . ($days !== 1 ? 's' : '') . ') was ' . strtolower($lr['status']);
-                        if (!$ok && !empty($lr['admin_remarks'])) {
-                            $body .= ' — ' . htmlspecialchars($lr['admin_remarks']);
+                      $requestLabel = 'Your ' . htmlspecialchars($lr['lt']) . ' request (' . $days . ' day' . ($days !== 1 ? 's' : '') . ')';
+                      $events = [];
+                      if (!empty($lr['filed_at']) && strtotime($lr['filed_at']) >= strtotime('-30 days')) {
+                          $filingBody = $requestLabel . ' was submitted.';
+                          if ($lr['status'] === 'Pending Dept Head') {
+                            $filingBody = $requestLabel . ' was submitted and is awaiting Department Head review.';
+                          }
+                          $events[] = ['title' => 'Leave Request Submitted', 'body' => $filingBody, 'time' => $lr['filed_at'], 'icon' => '📋', 'color' => '#f59e0b'];
                         }
-                        $notifs[] = [
-                            'icon'  => $ok ? '✅' : '❌',
-                            'color' => $ok ? '#22c55e' : '#ef4444',
-                            'title' => 'Leave Request ' . $lr['status'],
-                            'body'  => $body,
-                            'time'  => $lr['reviewed_at'],
-                            'page'  => 'requests',
-                            'nid'   => md5($lr['status'] . $lr['lt'] . $days . ($lr['reviewed_at'] ?? '')),
-                        ];
+                      if (!empty($lr['dept_head_action_date']) && strtotime($lr['dept_head_action_date']) >= strtotime('-30 days')) {
+                        $headDenied = $lr['status'] === 'Denied by Dept Head';
+                        $headStatus = $headDenied ? 'Denied' : 'Approved';
+                        $headBody = $requestLabel . ($headDenied ? ' was denied by your Department Head.' : ' was approved by your Department Head and forwarded to HR.');
+                        if ($headDenied && !empty($lr['dept_head_remarks'])) {
+                          $headBody .= ' — ' . htmlspecialchars($lr['dept_head_remarks']);
+                        }
+                        $events[] = ['title' => 'Department Head ' . $headStatus, 'body' => $headBody, 'time' => $lr['dept_head_action_date'], 'icon' => $headDenied ? '❌' : '✅', 'color' => $headDenied ? '#ef4444' : '#22c55e'];
+                      }
+                      if (in_array($lr['status'], ['Approved', 'Denied'], true) && !empty($lr['reviewed_at']) && strtotime($lr['reviewed_at']) >= strtotime('-30 days')) {
+                        $hrApproved = $lr['status'] === 'Approved';
+                        $hrBody = $requestLabel . ' was ' . strtolower($lr['status']) . ' by HR.';
+                        if (!$hrApproved && !empty($lr['admin_remarks'])) {
+                          $hrBody .= ' — ' . htmlspecialchars($lr['admin_remarks']);
+                        }
+                        $events[] = ['title' => 'HR ' . $lr['status'] . ' Leave', 'body' => $hrBody, 'time' => $lr['reviewed_at'], 'icon' => $hrApproved ? '✅' : '❌', 'color' => $hrApproved ? '#22c55e' : '#ef4444'];
+                      }
+                      foreach ($events as $event) {
+                        $event['page'] = 'requests';
+                        $event['nid'] = md5($event['title'] . $event['body'] . $event['time']);
+                        $notifs[] = $event;
+                      }
                     }
 
                     // ── Announcements (last 7 days) ───────────────────────────────────
                     try {
                         $anns = $pdo->query("SELECT title, created_at FROM announcements
-                            WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+                            WHERE status = 'Published'
+                              AND (publish_date IS NULL OR publish_date <= CURDATE())
+                              AND (expiry_date IS NULL OR expiry_date >= CURDATE())
+                              AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
                             ORDER BY created_at DESC LIMIT 5")->fetchAll(PDO::FETCH_ASSOC);
                         foreach ($anns as $a) {
                             $notifs[] = [
@@ -1106,6 +1214,25 @@ if ($action) {
                                 'nid'   => md5('ann' . $a['title'] . ($a['created_at'] ?? '')),
                             ];
                         }
+                    } catch (Exception $ex) {}
+
+                    // ── Employee's contract expiry ────────────────────────────────────
+                    try {
+                      $contracts = $pdo->prepare("SELECT contract_id, end_date, DATEDIFF(end_date, CURDATE()) AS days_left
+                        FROM contracts
+                        WHERE employee_id = ? AND status = 'Active' AND end_date IS NOT NULL
+                          AND DATEDIFF(end_date, CURDATE()) BETWEEN 0 AND 30
+                        ORDER BY end_date ASC LIMIT 3");
+                      $contracts->execute([$employeeId]);
+                      foreach ($contracts->fetchAll(PDO::FETCH_ASSOC) as $contract) {
+                        $daysLeft = (int)$contract['days_left'];
+                        $notifs[] = [
+                          'icon' => '📝', 'color' => '#ef4444', 'title' => 'Contract Expiring',
+                          'body' => 'Your contract expires in ' . $daysLeft . ' day' . ($daysLeft === 1 ? '' : 's'),
+                          'time' => $contract['end_date'], 'page' => 'profile',
+                          'nid' => md5('contract' . $contract['contract_id'] . $contract['end_date']),
+                        ];
+                      }
                     } catch (Exception $ex) {}
 
                     // ── Low leave balance warnings (< 3 days remaining) ───────────────
@@ -1179,6 +1306,41 @@ if ($action) {
                             ];
                         }
                     } catch (Exception $ex) {}
+
+                      // ── Certificate of Employment request resolved ────────────────────
+                      try {
+                        $coe = $pdo->prepare("SELECT status, admin_remarks, reviewed_at FROM coe_requests
+                          WHERE employee_id = ? AND is_deleted = 0 AND status IN ('Approved','Denied')
+                            AND reviewed_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                          ORDER BY reviewed_at DESC LIMIT 5");
+                        $coe->execute([$employeeId]);
+                        foreach ($coe->fetchAll(PDO::FETCH_ASSOC) as $request) {
+                          $ok = $request['status'] === 'Approved';
+                          $notifs[] = [
+                            'icon' => $ok ? '✅' : '❌', 'color' => $ok ? '#22c55e' : '#ef4444',
+                            'title' => 'COE Request ' . $request['status'],
+                            'body' => 'Your Certificate of Employment request was ' . strtolower($request['status']) . (!empty($request['admin_remarks']) ? ' — ' . htmlspecialchars($request['admin_remarks']) : ''),
+                            'time' => $request['reviewed_at'], 'page' => 'coe',
+                            'nid' => md5('coe' . $request['status'] . ($request['reviewed_at'] ?? '')),
+                          ];
+                        }
+                      } catch (Exception $ex) {}
+
+                      // ── Documents made available to this employee ─────────────────────
+                      try {
+                        $docs = $pdo->prepare("SELECT document_id, document_type, file_name, uploaded_at FROM documents
+                          WHERE employee_id = ? AND uploaded_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                          ORDER BY uploaded_at DESC LIMIT 5");
+                        $docs->execute([$employeeId]);
+                        foreach ($docs->fetchAll(PDO::FETCH_ASSOC) as $document) {
+                          $notifs[] = [
+                            'icon' => '📁', 'color' => '#0891b2', 'title' => 'Document Available',
+                            'body' => htmlspecialchars($document['document_type']) . ': ' . htmlspecialchars($document['file_name']),
+                            'time' => $document['uploaded_at'], 'page' => 'documents',
+                            'nid' => md5('doc' . $document['document_id'] . ($document['uploaded_at'] ?? '')),
+                          ];
+                        }
+                      } catch (Exception $ex) {}
 
                     // ── Sort by time desc ─────────────────────────────────────────────
                     usort($notifs, function($a,$b) {
@@ -1343,6 +1505,68 @@ if ($action) {
                 echo json_encode(['success'=>true,'message'=>"SALN saved successfully. (employee_id=$employeeId, user_id=$userId, year=$year)"]);
                 break;
 
+            // P4-1 — Annex B (AS-1) / Annex C (AS-2) additional sheets
+            case 'save_saln_annex':
+                $empTypeCheck = $pdo->prepare("SELECT employment_type FROM employees WHERE employee_id = ?");
+                $empTypeCheck->execute([$employeeId]);
+                $empType = $empTypeCheck->fetchColumn() ?: 'Unknown';
+                if (!hasPermanentLikeAccess($empType)) {
+                  echo json_encode(['success'=>false,'message'=>'SALN is only available to Permanent, Co-Terminus, and Elective employees.']); break;
+                }
+                if (!$employeeId) {
+                    echo json_encode(['success'=>false,'message'=>'Your user account is not linked to any employee record.']);
+                    break;
+                }
+                $data  = json_decode(file_get_contents('php://input'), true) ?? [];
+                $which = $data['which'] ?? '';
+                if (!in_array($which, ['annex_b','annex_c'], true)) {
+                    echo json_encode(['success'=>false,'message'=>'Invalid annex.']); break;
+                }
+                $year = (int)($data['saln_year'] ?? date('Y'));
+                $prefix = $which === 'annex_b' ? 'as1' : 'as2';
+
+                $real = $data['real_properties']     ?? [];
+                $pers = $data['personal_properties'] ?? [];
+                $liab = $data['liabilities']          ?? [];
+                $biz  = $data['biz_interests']        ?? [];
+
+                $fields = [
+                    "{$prefix}_real_properties"     => json_encode($real),
+                    "{$prefix}_personal_properties" => json_encode($pers),
+                    "{$prefix}_liabilities"         => json_encode($liab),
+                    "{$prefix}_biz_interests"       => json_encode($biz),
+                    'updated_at'                    => date('Y-m-d H:i:s'),
+                ];
+                // Annex B (AS-1) additionally tracks its own subtotal/total columns.
+                if ($which === 'annex_b') {
+                    $realTotal = array_sum(array_map(fn($r) => (float)($r['market_value'] ?? $r['assessed_value'] ?? 0), $real));
+                    $persTotal = array_sum(array_map(fn($r) => (float)($r['acq_cost'] ?? 0), $pers));
+                    $liabTotal = array_sum(array_map(fn($r) => (float)($r['balance'] ?? 0), $liab));
+                    $fields['as1_real_subtotal']     = $realTotal;
+                    $fields['as1_personal_subtotal'] = $persTotal;
+                    $fields['as1_total_assets']      = $realTotal + $persTotal;
+                    $fields['as1_total_liabilities'] = $liabTotal;
+                } else {
+                    $fields['as2_name_info'] = json_encode($data['name_info'] ?? []);
+                }
+
+                $existing = $pdo->prepare("SELECT saln_id FROM saln_records WHERE employee_id = ? AND saln_year = ? LIMIT 1");
+                $existing->execute([$employeeId, $year]); $existingId = $existing->fetchColumn();
+
+                if ($existingId) {
+                    $set = implode(', ', array_map(fn($k) => "$k = ?", array_keys($fields)));
+                    $pdo->prepare("UPDATE saln_records SET $set WHERE saln_id = ?")->execute([...array_values($fields), $existingId]);
+                } else {
+                    $fields['employee_id'] = $employeeId;
+                    $fields['saln_year']   = $year;
+                    $fields['created_at']  = date('Y-m-d H:i:s');
+                    $cols = implode(',', array_keys($fields));
+                    $phs  = implode(',', array_fill(0, count($fields), '?'));
+                    $pdo->prepare("INSERT INTO saln_records ($cols) VALUES ($phs)")->execute(array_values($fields));
+                }
+                echo json_encode(['success'=>true,'message'=>ucfirst(str_replace('_',' ',$which)).' saved successfully.']);
+                break;
+
             case 'my_documents':
                 if (!$employeeId) { echo json_encode(['success'=>false,'message'=>'Employee not found.']); break; }
                 $type   = trim($_GET['type']   ?? '');
@@ -1459,16 +1683,35 @@ $employmentType = $_empTypeRow->fetchColumn() ?: 'Permanent';
 // ── Employee Notifications ───────────────────────────────────────────────
 $empNotifications=[]; $empNotifCount=0;
 if(isset($pdo)&&isset($employeeId)&&$employeeId){try{
-    // Leave status changes (last 30 days)
-    $lrS=$pdo->prepare("SELECT lr.status,lr.reviewed_at,lt.name AS lt,lr.days_requested
+    // Leave request progress (last 30 days)
+    $lrS=$pdo->prepare("SELECT lr.request_id,lr.status,lr.filed_at,lr.reviewed_at,lr.admin_remarks,
+        lr.dept_head_action_date,lr.dept_head_remarks,lt.name AS lt,lr.days_requested
         FROM leave_requests lr JOIN leave_types lt ON lt.leave_type_id=lr.leave_type_id
-        WHERE lr.employee_id=? AND lr.status IN ('Approved','Denied')
-        AND lr.reviewed_at>=DATE_SUB(NOW(),INTERVAL 30 DAY) ORDER BY lr.reviewed_at DESC LIMIT 5");
+        WHERE lr.employee_id=? AND lr.status IN ('Pending Dept Head','Pending HR','Approved','Denied','Denied by Dept Head')
+        AND (lr.filed_at>=DATE_SUB(NOW(),INTERVAL 30 DAY) OR lr.dept_head_action_date>=DATE_SUB(NOW(),INTERVAL 30 DAY) OR lr.reviewed_at>=DATE_SUB(NOW(),INTERVAL 30 DAY))
+        ORDER BY GREATEST(lr.filed_at,COALESCE(lr.dept_head_action_date,lr.filed_at),COALESCE(lr.reviewed_at,lr.filed_at)) DESC LIMIT 5");
     $lrS->execute([$employeeId]);
-    foreach($lrS->fetchAll(PDO::FETCH_ASSOC) as $lr){$ok=$lr['status']==='Approved';
-      $empNotifications[]=['icon'=>$ok?'✅':'✗','color'=>$ok?'#22c55e':'#ef4444','title'=>'Leave '.$lr['status'],
-        'body'=>'Your '.htmlspecialchars($lr['lt']).' request ('.(int)$lr['days_requested'].' day'.((int)$lr['days_requested']!==1?'s':'').') was '.strtolower($lr['status']),
-        'time'=>$lr['reviewed_at'],'page'=>'requests'];}
+    foreach($lrS->fetchAll(PDO::FETCH_ASSOC) as $lr){
+      $requestLabel='Your '.htmlspecialchars($lr['lt']).' request ('.(int)$lr['days_requested'].' day'.((int)$lr['days_requested']!==1?'s':'').')';
+      $events=[];
+      if(!empty($lr['filed_at'])&&strtotime($lr['filed_at'])>=strtotime('-30 days')){
+        $body=$requestLabel.' was submitted.';
+        if($lr['status']==='Pending Dept Head')$body=$requestLabel.' was submitted and is awaiting Department Head review.';
+        $events[]=['icon'=>'📋','color'=>'#f59e0b','title'=>'Leave Request Submitted','body'=>$body,'time'=>$lr['filed_at']];
+      }
+      if(!empty($lr['dept_head_action_date'])&&strtotime($lr['dept_head_action_date'])>=strtotime('-30 days')){
+        $headDenied=$lr['status']==='Denied by Dept Head';$headStatus=$headDenied?'Denied':'Approved';
+        $body=$requestLabel.($headDenied?' was denied by your Department Head.':' was approved by your Department Head and forwarded to HR.');
+        if($headDenied&&!empty($lr['dept_head_remarks']))$body.=' — '.htmlspecialchars($lr['dept_head_remarks']);
+        $events[]=['icon'=>$headDenied?'❌':'✅','color'=>$headDenied?'#ef4444':'#22c55e','title'=>'Department Head '.$headStatus,'body'=>$body,'time'=>$lr['dept_head_action_date']];
+      }
+      if(in_array($lr['status'],['Approved','Denied'],true)&&!empty($lr['reviewed_at'])&&strtotime($lr['reviewed_at'])>=strtotime('-30 days')){
+        $hrApproved=$lr['status']==='Approved';$body=$requestLabel.' was '.strtolower($lr['status']).' by HR.';
+        if(!$hrApproved&&!empty($lr['admin_remarks']))$body.=' — '.htmlspecialchars($lr['admin_remarks']);
+        $events[]=['icon'=>$hrApproved?'✅':'❌','color'=>$hrApproved?'#22c55e':'#ef4444','title'=>'HR '.$lr['status'].' Leave','body'=>$body,'time'=>$lr['reviewed_at']];
+      }
+      foreach($events as $event){$event['page']='requests';$empNotifications[]=$event;}
+    }
     // Low balance warnings
     $bw=$pdo->prepare("SELECT lt.name,lb.remaining_days FROM leave_balances lb
         JOIN leave_types lt ON lt.leave_type_id=lb.leave_type_id
@@ -1675,12 +1918,18 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
 
     /* DASHBOARD GRID */
     .dash-grid{display:grid;grid-template-columns:1fr 320px;gap:18px;}
+    .recent-requests-card{display:flex;flex-direction:column;}
     .mini-tbl{width:100%;border-collapse:collapse;font-size:.81rem;}
     .mini-tbl th{padding:9px 14px;text-align:left;font-size:.65rem;font-weight:800;color:var(--g400);text-transform:uppercase;letter-spacing:.07em;border-bottom:1.5px solid var(--g200);background:var(--g50);}
     .mini-tbl td{padding:11px 14px;border-bottom:1px solid var(--g100);vertical-align:middle;}
     .mini-tbl tr:last-child td{border-bottom:none;}
     .mini-tbl tbody tr{transition:background .15s;cursor:pointer;}
     .mini-tbl tbody tr:hover{background:var(--g50);}
+    .recent-req-pagination{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:auto;padding:12px 14px;border-top:1px solid var(--g100);font-size:.72rem;font-weight:700;color:var(--g400);flex-wrap:wrap;}
+    .recent-req-page-buttons{display:flex;gap:4px;}
+    .recent-req-page-btn{min-width:30px;height:30px;padding:0 8px;border:1.5px solid var(--g200);border-radius:7px;background:#fff;color:var(--g600);font:700 .75rem 'Nunito',sans-serif;cursor:pointer;}
+    .recent-req-page-btn:hover:not(:disabled),.recent-req-page-btn.active{border-color:var(--primary);background:var(--primary);color:#fff;}
+    .recent-req-page-btn:disabled{cursor:default;opacity:.4;}
 
     /* QUICK ACTIONS */
     .qa-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:14px 16px;}
@@ -1734,6 +1983,13 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     .req-tab.active{background:linear-gradient(135deg,var(--primary),var(--primary-dk));color:#fff;}
     .req-tab .tc{background:rgba(255,255,255,.25);padding:1px 6px;border-radius:10px;font-size:.60rem;font-weight:800;}
     .req-tab:not(.active) .tc{background:var(--g100);color:var(--g600);}
+    .req-filters{display:flex;align-items:end;gap:10px;margin-bottom:16px;padding:12px 14px;background:var(--white);border:1.5px solid var(--g200);border-radius:var(--r-sm);box-shadow:var(--sh-sm);flex-wrap:wrap;}
+    .req-filter-field{display:flex;flex-direction:column;gap:4px;min-width:150px;flex:1;}
+    .req-filter-field label{font-size:.64rem;font-weight:800;color:var(--g400);letter-spacing:.06em;text-transform:uppercase;}
+    .req-filter-field select,.req-filter-field input{width:100%;box-sizing:border-box;padding:8px 10px;border:1.5px solid var(--g200);border-radius:7px;background:#fff;color:var(--g700);font:700 .78rem 'Nunito',sans-serif;outline:none;}
+    .req-filter-field select:focus,.req-filter-field input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.10);}
+    .req-filter-reset{height:34px;padding:0 12px;border:1.5px solid var(--g200);border-radius:7px;background:#fff;color:var(--g600);font:700 .76rem 'Nunito',sans-serif;cursor:pointer;}
+    .req-filter-reset:hover{border-color:var(--primary);color:var(--primary);}
     .req-list{display:flex;flex-direction:column;gap:12px;}
     .req-card{background:var(--white);border-radius:var(--r);border:1.5px solid var(--g200);display:flex;align-items:stretch;box-shadow:var(--sh-sm);transition:transform .2s,box-shadow .2s;animation:fadeUp .35s ease both;overflow:hidden;}
     .req-card:hover{transform:translateY(-2px);box-shadow:var(--sh-md);}
@@ -1754,10 +2010,18 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     .empty-msg{text-align:center;padding:52px 20px;color:var(--g400);}
     .empty-msg .ei{font-size:2.6rem;margin-bottom:12px;opacity:.45;}
     .empty-msg p{font-size:.875rem;font-weight:600;}
+    .req-pagination{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:16px;padding:12px 14px;border:1.5px solid var(--g200);border-radius:var(--r-sm);background:var(--white);box-shadow:var(--sh-sm);font-size:.74rem;font-weight:700;color:var(--g400);flex-wrap:wrap;}
+    .req-page-buttons{display:flex;gap:4px;}
+    .req-page-btn{min-width:30px;height:30px;padding:0 8px;border:1.5px solid var(--g200);border-radius:7px;background:#fff;color:var(--g600);font:700 .75rem 'Nunito',sans-serif;cursor:pointer;}
+    .req-page-btn:hover:not(:disabled),.req-page-btn.active{border-color:var(--primary);background:var(--primary);color:#fff;}
+    .req-page-btn:disabled{cursor:default;opacity:.4;}
 
     /* FILE LEAVE */
-    .fl-wrap{display:grid;grid-template-columns:1fr 360px;gap:22px;align-items:start;}
+    .fl-wrap{display:flex;flex-direction:column;gap:18px;}
     .fl-right{display:flex;flex-direction:column;gap:16px;}
+    .fl-form-card{border:1px solid var(--g200);border-radius:16px;overflow:hidden;box-shadow:var(--shadow-sm);background:#fff;}
+    .fl-reminder-card{border:1px solid var(--g200);border-radius:16px;overflow:hidden;box-shadow:var(--shadow-sm);background:#fff;}
+    .fl-form-card .form-header{border-radius:0;}
     /* balance list inside right panel */
     .fl-bal-row{display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--g100);}
     .fl-bal-row:last-child{border-bottom:none;}
@@ -1770,12 +2034,37 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     .fl-bal-fill.low{background:linear-gradient(90deg,#f59e0b,#ef4444);}
     /* calendar preview */
     .fl-cal-empty{font-size:.78rem;color:var(--g400);text-align:center;padding:12px 0;font-style:italic;}
+    .holiday-calendar{margin-top:16px;padding:14px;border:1px solid var(--g200);border-radius:10px;background:var(--g50);}
+    .holiday-calendar-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;}
+    .holiday-calendar-title{font-size:.78rem;font-weight:800;color:var(--g800);}
+    .holiday-calendar-key{display:flex;align-items:center;gap:5px;color:var(--g500);font-size:.65rem;font-weight:700;}
+    .holiday-calendar-key i{width:8px;height:8px;border-radius:50%;background:#16a34a;display:block;}
+    .holiday-months{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
+    .holiday-month{min-width:0;background:#fff;border:1px solid var(--g200);border-radius:8px;padding:8px;}
+    .holiday-month-name{text-align:center;font-size:.7rem;font-weight:800;color:var(--g700);margin-bottom:6px;}
+    .holiday-weekdays,.holiday-days{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;text-align:center;}
+    .holiday-weekdays span{font-size:.54rem;color:var(--g400);font-weight:800;}
+    .holiday-day{height:22px;display:grid;place-items:center;border-radius:5px;font-size:.62rem;color:var(--g700);position:relative;cursor:default;}
+    .holiday-day.weekend{color:var(--g400);}.holiday-day.selected{background:#dbeafe;color:#1e40af;font-weight:800;}.holiday-day.holiday{background:#dcfce7;color:#166534;font-weight:800;cursor:help;}.holiday-day.holiday::after{content:'';position:absolute;bottom:2px;width:3px;height:3px;border-radius:50%;background:#16a34a;}
+    .holiday-calendar-note{font-size:.66rem;color:var(--g500);line-height:1.45;margin:10px 2px 0;}
+    .leave-date-input{display:flex;align-items:center;border:1.5px solid var(--g200);border-radius:var(--r-sm);background:#fff;transition:border-color .2s,box-shadow .2s;}
+    .leave-date-input:focus-within{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.1);}
+    .leave-date-input input{min-width:0;flex:1;border:0!important;background:transparent!important;box-shadow:none!important;}
+    .leave-date-input input.err{border-radius:var(--r-sm);background:#fef2f2!important;}
+    .leave-date-trigger{width:38px;height:36px;border:0;border-left:1px solid var(--g200);background:transparent;color:var(--g600);cursor:pointer;font-size:.9rem;}
+    .leave-date-trigger:hover{color:var(--primary);background:var(--primary-lt);}.leave-date-help{margin:8px 0 0;color:var(--g500);font-size:.7rem;line-height:1.45;}
+    .leave-date-picker{margin-top:14px;padding:14px;background:#fff;border:2px solid var(--g200);border-radius:12px;box-shadow:var(--shadow-sm);}
+    .leave-date-picker-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;}.leave-date-picker-title{font-size:.82rem;font-weight:800;color:var(--g800);}
+    .leave-date-picker-nav{display:flex;gap:5px;}.leave-date-picker-nav button{width:30px;height:30px;border:1px solid var(--g200);border-radius:6px;background:#fff;color:var(--g600);font-weight:800;cursor:pointer;}.leave-date-picker-nav button:hover{background:var(--primary-lt);color:var(--primary);border-color:var(--primary);}
+    .leave-date-picker-clear{min-width:90px;height:36px;padding:0 18px;border:1px solid var(--primary);border-radius:8px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;font-weight:800;font-size:.95rem;cursor:pointer;box-shadow:0 2px 6px rgba(37,99,235,.18);transition:all .18s ease;}.leave-date-picker-clear:hover{background:linear-gradient(135deg,#1d4ed8,#1e40af);transform:translateY(-1px);box-shadow:0 4px 10px rgba(37,99,235,.2);}
+    .leave-date-picker-grid{display:grid;grid-template-columns:1fr;gap:10px;}.leave-picker-month{border:1px solid var(--g200);border-radius:10px;padding:10px;min-width:0;width:100%;background:#fff;}.leave-picker-month-title{text-align:center;color:var(--g700);font-size:.72rem;font-weight:800;margin-bottom:8px;}.leave-picker-weekdays,.leave-picker-days{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;text-align:center;}.leave-picker-weekdays span{font-size:.56rem;font-weight:800;color:var(--g400);padding:3px 0;}.leave-picker-day{height:31px;border:1px solid var(--g200);border-radius:6px;background:transparent;color:var(--g700);font:700 .68rem 'Nunito',sans-serif;cursor:pointer;position:relative;display:flex;align-items:center;justify-content:center;}.leave-picker-day:hover:not(:disabled){background:#dbeafe;color:#1e40af;}.leave-picker-day.weekend{color:var(--g400);cursor:not-allowed;}.leave-picker-day.holiday{background:#dcfce7;color:#166534;cursor:not-allowed;}.leave-picker-day.holiday::after{content:'';position:absolute;bottom:2px;left:50%;width:3px;height:3px;margin-left:-1.5px;background:#16a34a;border-radius:50%;}.leave-picker-day.conflict{background:#fecaca;color:#991b1b;cursor:not-allowed;}.leave-picker-day.conflict::after{content:'';position:absolute;bottom:2px;left:50%;width:3px;height:3px;margin-left:-1.5px;background:#dc2626;border-radius:50%;}.leave-picker-day.in-range:not(.holiday):not(.weekend):not(.conflict){background:#dbeafe;color:#1e40af;}.leave-picker-day.start-date:not(.holiday):not(.weekend):not(.conflict),.leave-picker-day.end-date:not(.holiday):not(.weekend):not(.conflict){background:linear-gradient(135deg,#2563eb,#1e40af);color:#fff;}.leave-picker-day:disabled{opacity:1;}.leave-picker-day.empty{pointer-events:none;border:none;background:transparent;}.leave-date-picker-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:12px;color:var(--g500);font-size:.66rem;}.leave-date-picker-key{display:flex;gap:10px;flex-wrap:wrap;}.leave-date-picker-key span{display:flex;align-items:center;gap:4px;}.leave-date-picker-key i{width:9px;height:9px;border-radius:3px;display:block;background:#dcfce7;border:1px solid #16a34a;}.leave-date-picker-key i.weekend{background:var(--g100);border-color:var(--g300);}
     .fl-cal-box{text-align:center;}
     .fl-cal-range{font-size:.84rem;font-weight:800;color:var(--g800);margin-bottom:10px;}
     .fl-cal-days-strip{display:flex;gap:5px;flex-wrap:wrap;justify-content:center;}
     .fl-cal-day{width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:800;}
     .fl-cal-day.in-range{background:linear-gradient(135deg,#2563eb,#1e40af);color:#fff;}
     .fl-cal-day.weekend{background:var(--g100);color:var(--g400);}
+    .fl-cal-day.holiday{background:#dcfce7;color:#166534;}
     .fl-cal-day.today{outline:2px solid var(--primary);outline-offset:1px;}
     .fl-cal-summary{margin-top:10px;font-size:.78rem;color:var(--g600);font-weight:600;}
     /* recent request mini cards */
@@ -1928,6 +2217,25 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     .m-btn-danger{background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;}
     .m-btn-danger:hover{transform:translateY(-1px);}
 
+    /* SIGNATURE CROP MODAL */
+    .sig-crop-modal{max-width:880px;width:96%;}
+    .sig-crop-body{padding:16px 18px 18px;}
+    .sig-crop-grid{display:grid;grid-template-columns:minmax(0,1.9fr) minmax(0,1fr);gap:14px;align-items:start;}
+    .sig-canvas-wrap{background:#f8fafc;border:1.5px solid var(--g200);border-radius:10px;padding:10px;}
+    .sig-canvas-hint{font-size:.68rem;color:var(--g500);margin-bottom:7px;}
+    .sig-canvas{width:100%;height:320px;border-radius:8px;background:#fff;border:1px solid var(--g200);display:block;cursor:grab;touch-action:none;}
+    .sig-canvas.dragging{cursor:grabbing;}
+    .sig-crop-side{background:#f8fafc;border:1.5px solid var(--g200);border-radius:10px;padding:10px;}
+    .sig-preview-box{height:110px;border:1px dashed var(--g300);border-radius:8px;background:#fff;display:flex;align-items:center;justify-content:center;padding:8px;margin-bottom:10px;}
+    .sig-preview-box img{max-width:100%;max-height:100%;object-fit:contain;display:block;}
+    .sig-zoom-label{font-size:.70rem;font-weight:700;color:var(--g600);margin-bottom:6px;}
+    .sig-zoom-range{width:100%;accent-color:#2563eb;}
+    .sig-zoom-value{font-size:.68rem;color:var(--g500);margin-top:4px;text-align:right;}
+    @media(max-width:768px){
+      .sig-crop-grid{grid-template-columns:1fr;}
+      .sig-canvas{height:250px;}
+    }
+
     /* TOAST */
     .toast{position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:var(--r-sm);font-size:.83rem;font-weight:700;box-shadow:var(--sh-lg);z-index:999;color:#fff;animation:fadeUp .3s ease both;max-width:340px;}
     .toast.success{background:linear-gradient(135deg,#22c55e,#15803d);}
@@ -2038,6 +2346,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
       .fg input,.fg select,.fg textarea{padding:8px 10px;font-size:.83rem;}
       .fg textarea{height:65px;}
       .fg-row{grid-template-columns:1fr;gap:10px;}
+      .leave-date-picker-grid{grid-template-columns:1fr;}.leave-date-picker{max-height:70vh;overflow-y:auto;}
       
       /* Balances */
       .balances-grid{grid-template-columns:1fr;gap:14px;}
@@ -2471,12 +2780,12 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     <button class="sb-item" onclick="goPage('documents',this)"><div class="sb-icon">📁</div>All Documents</button>
     <button class="sb-item sb-sub" onclick="goPage('pds',this)"><div class="sb-icon">📋</div>PDS</button>
     <?php if (hasPermanentLikeAccess($employmentType)): ?>
-    <button class="sb-item sb-sub" onclick="goPage('saln',this)"><div class="sb-icon">📊</div>SALN</button>
+    <button class="sb-item sb-sub" onclick="goPage('saln',this)"><div class="sb-icon">📊</div>SALN(Annex A)</button>
     <?php else: ?>
     <button class="sb-item sb-sub" disabled title="SALN is only available to Permanent, Co-Terminus, and Elective employees"><div class="sb-icon">📊</div>SALN</button>
     <?php endif; ?>
-    <button class="sb-item sb-sub annex-link" onclick="goPage('annex_b',this)"><div class="sb-icon">🅱️</div>Annex B</button>
-    <button class="sb-item sb-sub annex-link" onclick="goPage('annex_c',this)"><div class="sb-icon">🇨</div>Annex C</button>
+    <button class="sb-item sb-sub annex-link" onclick="goPage('annex_b',this)"><div class="sb-icon">🅱️</div>SALN Annex B</button>
+    <button class="sb-item sb-sub annex-link" onclick="goPage('annex_c',this)"><div class="sb-icon">🇨</div>SALN Annex C</button>
     <button class="sb-item sb-sub" onclick="goPage('service_record',this)"><div class="sb-icon">📜</div>Service Record</button>
     <button class="sb-item sb-sub" onclick="goPage('coe',this)"><div class="sb-icon">📄</div>Certificate of Employment</button>
   </nav>
@@ -2515,7 +2824,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
               <div class="np-ico" style="background:<?=htmlspecialchars($en['color'])?>22;"><?=$en['icon']?></div>
               <div class="np-body">
                 <div class="np-title"><?=htmlspecialchars($en['title'])?></div>
-                <div class="np-text"><?=htmlspecialchars($en['body'])?></div>
+                <div class="np-text"><?=$en['body']?></div>
                 <?php if($en['time']):?><div class="np-time"><?=empTimeAgo($en['time'])?></div><?php endif;?>
               </div>
             </div>
@@ -2559,7 +2868,7 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
     </div>
 
     <div class="dash-grid">
-      <div class="card">
+      <div class="card recent-requests-card">
         <div class="card-header">
           <div><div class="card-title">📋 My Recent Leave Requests</div><div class="card-sub">Latest applications</div></div>
           <button class="card-link" onclick="goPage('requests',document.querySelectorAll('.sb-item')[2])">View all →</button>
@@ -2568,6 +2877,10 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
           <thead><tr><th>Type</th><th>Duration</th><th>Days</th><th>Status</th></tr></thead>
           <tbody id="recentReqTbody"><tr><td colspan="4" style="text-align:center;padding:24px;color:var(--g400);">Loading…</td></tr></tbody>
         </table>
+        <div class="recent-req-pagination" id="recentReqPagination" hidden>
+          <span id="recentReqPageInfo"></span>
+          <div class="recent-req-page-buttons" id="recentReqPageButtons"></div>
+        </div>
       </div>
 
       <div style="display:flex;flex-direction:column;gap:16px;">
@@ -2628,10 +2941,14 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
           <div id="sigStatusText" style="font-size:.73rem;color:var(--g500);margin-bottom:8px;">No signature uploaded.</div>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
             <button type="button" id="btnUploadSignature" onclick="document.getElementById('signatureFileInput').click()" style="padding:8px 14px;background:linear-gradient(135deg,var(--primary),var(--primary-dk));color:#fff;border:none;border-radius:8px;font-size:.78rem;font-weight:700;cursor:pointer;">📎 Upload Signature</button>
-            <input type="file" id="signatureFileInput" accept="image/png,image/jpeg" style="display:none;" onchange="uploadProfileSignature(this)" />
+            <input type="file" id="signatureFileInput" accept="image/png,image/jpeg" style="display:none;" onchange="openSignatureCropper(this)" />
             <span id="sigFileName" style="font-size:.72rem;color:var(--g500);"></span>
           </div>
           <div style="font-size:.68rem;color:var(--g400);margin-top:8px;">This saved signature is required for leave filing and will be used in the printed leave form.</div>
+          <div id="sigCropQuickPreviewWrap" style="display:none;margin-top:10px;">
+            <div style="font-size:.66rem;color:var(--g500);margin-bottom:5px;">Latest crop preview</div>
+            <img id="sigCropQuickPreview" alt="Signature crop preview" style="display:block;max-width:240px;max-height:70px;object-fit:contain;background:#fff;border:1px dashed var(--g200);border-radius:6px;padding:4px;" />
+          </div>
         </div>
         <div class="field-grid" id="profilePersonal"></div>
       </div>
@@ -2644,159 +2961,183 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
 
   <!-- ══ MY LEAVE REQUESTS ══ -->
   <div class="page" id="page-requests">
-    <div class="req-tabs">
-      <button class="req-tab active" onclick="filterReqs('all',this)">All <span class="tc" id="tc-all">0</span></button>
-      <button class="req-tab" onclick="filterReqs('pending',this)">⏳ Pending <span class="tc" id="tc-pending">0</span></button>
-      <button class="req-tab" onclick="filterReqs('approved',this)">✅ Approved <span class="tc" id="tc-approved">0</span></button>
-      <button class="req-tab" onclick="filterReqs('denied',this)">✗ Denied <span class="tc" id="tc-denied">0</span></button>
-      <button class="req-tab" onclick="filterReqs('cancelled',this)">— Cancelled <span class="tc" id="tc-cancelled">0</span></button>
+    <div class="req-filters">
+      <div class="req-filter-field">
+        <label for="reqStatusFilter">Status</label>
+        <select id="reqStatusFilter" onchange="filterRequestStatus()">
+          <option value="all">All</option>
+          <option value="pending">Pending</option>
+          <option value="approved">Approved</option>
+          <option value="denied">Denied</option>
+          <option value="cancelled">Cancelled</option>
+        </select>
+      </div>
+      <div class="req-filter-field">
+        <label for="reqTypeFilter">Leave type</label>
+        <select id="reqTypeFilter" onchange="applyRequestFilters()">
+          <option value="">All leave types</option>
+        </select>
+      </div>
+      <div class="req-filter-field">
+        <label for="reqDateMode">Date period</label>
+        <select id="reqDateMode" onchange="updateRequestDateInput()">
+          <option value="">Any date</option>
+          <option value="date">Specific date</option>
+          <option value="week">Week</option>
+          <option value="month">Month</option>
+          <option value="year">Year</option>
+        </select>
+      </div>
+      <div class="req-filter-field" id="reqDateValueField" hidden>
+        <label for="reqDateValue" id="reqDateValueLabel">Date</label>
+        <input id="reqDateValue" type="date" onchange="applyRequestFilters()">
+      </div>
+      <button type="button" class="req-filter-reset" onclick="clearRequestFilters()">Reset filters</button>
     </div>
     <div class="req-list" id="reqList"></div>
     <div class="empty-msg" id="reqEmpty" style="display:none;"><div class="ei">📋</div><p>No leave requests here.</p></div>
+    <div class="req-pagination" id="reqPagination" hidden>
+      <span id="reqPageInfo"></span>
+      <div class="req-page-buttons" id="reqPageButtons"></div>
+    </div>
   </div>
 
   <!-- ══ FILE LEAVE ══ -->
   <div class="page" id="page-file">
     <div class="fl-wrap">
-
-      <!-- LEFT: form -->
-      <div>
-        <div class="card">
-          <div class="form-header">
-            <h3>📝 File a Leave Request</h3>
-            <p>Submit your application — HR will review within 1–2 working days</p>
-          </div>
-          <div style="padding:20px 22px;">
-            <div class="fg"><label>Select Leave Type <span class="req">*</span></label></div>
-            <div class="lt-grid" id="ltGrid"><div style="color:var(--g400);font-size:.82rem;padding:10px;">Loading leave types…</div></div>
-            <div class="days-box">
-              <div class="days-num" id="daysNum">0</div>
-              <div><div class="days-lbl">Days Requested</div><div class="days-bal" id="daysBal">Select a leave type</div></div>
-            </div>
-            <div class="fg-row">
-              <div class="fg"><label>Date From <span class="req">*</span></label><input type="date" id="flFrom" onchange="calcDays()"/></div>
-              <div class="fg"><label>Date To <span class="req">*</span></label><input type="date"   id="flTo"   onchange="calcDays()"/></div>
-            </div>
-
-            <!-- 6B: Details of Leave (shown based on leave type) -->
-
-            <!-- Vacation / Special Privilege -->
-            <div class="detail-section" id="detail-vacation">
-              <div class="detail-section-title">📋 Details of Leave — Location</div>
-              <div class="detail-radio-group">
-                <label class="detail-radio-row">
-                  <input type="radio" name="vac_location" id="vac_within_ph" value="Within the Philippines" checked/>
-                  Within the Philippines
-                </label>
-                <label class="detail-radio-row">
-                  <input type="radio" name="vac_location" id="vac_abroad" value="Abroad"/>
-                  Abroad
-                </label>
-              </div>
-              <div class="detail-extra" id="vac_abroad_detail" style="display:none;">
-                <label>Specify Destination</label>
-                <input type="text" id="vac_abroad_spec" placeholder="e.g. Japan, USA…"/>
-              </div>
-            </div>
-
-            <!-- Sick Leave -->
-            <div class="detail-section" id="detail-sick">
-              <div class="detail-section-title">📋 Details of Leave — Sick Leave</div>
-              <div class="detail-radio-group">
-                <label class="detail-radio-row">
-                  <input type="radio" name="sick_type" id="sick_hospital" value="In Hospital" checked/>
-                  In Hospital
-                </label>
-                <label class="detail-radio-row">
-                  <input type="radio" name="sick_type" id="sick_outpatient" value="Out Patient"/>
-                  Out Patient
-                </label>
-              </div>
-              <div class="detail-extra" style="margin-top:10px;">
-                <label>Specify Illness</label>
-                <input type="text" id="sick_illness" placeholder="e.g. Fever, Hypertension…"/>
-              </div>
-            </div>
-
-            <!-- Special Leave Benefits for Women -->
-            <div class="detail-section" id="detail-women">
-              <div class="detail-section-title">📋 Details of Leave — Special Leave Benefits for Women</div>
-              <div class="detail-extra">
-                <label>Specify Illness / Gynecological Disorder</label>
-                <input type="text" id="women_illness" placeholder="e.g. Myoma, Endometriosis…"/>
-              </div>
-            </div>
-
-            <!-- Study Leave -->
-            <div class="detail-section" id="detail-study">
-              <div class="detail-section-title">📋 Details of Leave — Study Leave</div>
-              <div class="detail-radio-group">
-                <label class="detail-radio-row">
-                  <input type="radio" name="study_purpose" id="study_masters" value="Completion of Master's Degree" checked/>
-                  Completion of Master's Degree
-                </label>
-                <label class="detail-radio-row">
-                  <input type="radio" name="study_purpose" id="study_bar" value="BAR/Board Examination Review"/>
-                  BAR/Board Examination Review
-                </label>
-              </div>
-            </div>
-
-            <!-- Monetization / Terminal (Other purpose) -->
-            <div class="detail-section" id="detail-other">
-              <div class="detail-section-title">📋 Other Purpose</div>
-              <div class="detail-radio-group">
-                <label class="detail-radio-row">
-                  <input type="radio" name="other_purpose" id="other_monetization" value="Monetization of Leave Credits" checked/>
-                  Monetization of Leave Credits
-                </label>
-                <label class="detail-radio-row">
-                  <input type="radio" name="other_purpose" id="other_terminal" value="Terminal Leave"/>
-                  Terminal Leave
-                </label>
-              </div>
-            </div>
-
-            <!-- Others Leave Type -->
-            <div class="detail-section" id="detail-others">
-              <div class="detail-section-title">📋 Details of Leave — Specify Type</div>
-              <div class="detail-extra">
-                <label>
-                  <input type="checkbox" id="others_leave_confirm" disabled />
-                  <span>What kind of leave are you filing? <span class="req">*</span></span>
-                </label>
-                <input type="text" id="others_leave_spec" placeholder="e.g. Personal, Family emergency, Cultural activity…"/>
-              </div>
-            </div>
-
-            <div class="fg"><label>Reason / Remarks <span class="req">*</span></label><textarea id="flReason" placeholder="Briefly describe why you are filing this leave…"></textarea></div>
-            <div style="margin-top:10px;padding:10px 12px;border:1px solid #bfdbfe;background:#eff6ff;border-radius:9px;font-size:.74rem;color:#1e40af;line-height:1.5;">
-              <strong>Signature Required:</strong> Leave submission uses your saved profile e-signature (PNG/JPG). If not set, upload it first in <strong>My Profile</strong>.
-            </div>
-            <button class="submit-btn" onclick="submitLeave()">📤 Submit Leave Request</button>
-          </div>
+      <div class="fl-reminder-card">
+        <div class="card-header" style="padding-bottom:8px;">
+          <div class="card-title">💡 Filing Reminders</div>
         </div>
+        <ul class="tips">
+          <li><span>📅</span>File planned leaves at least <strong>3 working days</strong> in advance.</li>
+          <li><span>🏥</span>Sick &amp; Emergency leaves may be filed on the same day.</li>
+          <li><span>✅</span>Approval is required from your Dept. Head <em>and</em> HR Admin.</li>
+          <li><span>⚖️</span>Check your balance above to avoid denial due to insufficient credits.</li>
+          <li><span>📎</span>Supporting documents may be required for medical leaves.</li>
+          <li><span>🚫</span>Approved leaves cannot be cancelled — contact HR directly.</li>
+        </ul>
       </div>
 
-      <!-- RIGHT: info panel -->
-      <div class="fl-right">
-
-        <!-- Filing reminders -->
-        <div class="card">
-          <div class="card-header" style="padding-bottom:8px;">
-            <div class="card-title">💡 Filing Reminders</div>
-          </div>
-          <ul class="tips">
-            <li><span>📅</span>File planned leaves at least <strong>3 working days</strong> in advance.</li>
-            <li><span>🏥</span>Sick &amp; Emergency leaves may be filed on the same day.</li>
-            <li><span>✅</span>Approval is required from your Dept. Head <em>and</em> HR Admin.</li>
-            <li><span>⚖️</span>Check your balance above to avoid denial due to insufficient credits.</li>
-            <li><span>📎</span>Supporting documents may be required for medical leaves.</li>
-            <li><span>🚫</span>Approved leaves cannot be cancelled — contact HR directly.</li>
-          </ul>
+      <div class="fl-form-card">
+        <div class="form-header">
+          <h3>📝 File a Leave Request</h3>
+          <p>Submit your application — HR will review within 1–2 working days</p>
         </div>
+        <div style="padding:20px 22px;">
+          <div class="fg"><label>Select Leave Type <span class="req">*</span></label></div>
+          <div class="lt-grid" id="ltGrid"><div style="color:var(--g400);font-size:.82rem;padding:10px;">Loading leave types…</div></div>
+          <div class="days-box">
+            <div class="days-num" id="daysNum">0</div>
+            <div><div class="days-lbl">Days Requested</div><div class="days-bal" id="daysBal">Select a leave type</div></div>
+          </div>
+          <input type="hidden" id="flFrom"/>
+          <input type="hidden" id="flTo"/>
+          <div class="fg-row leave-date-fields">
+            <div class="fg"><label for="flFromDisplay">Date From <span class="req">*</span></label><div class="leave-date-input"><input type="text" id="flFromDisplay" placeholder="mm/dd/yyyy" inputmode="numeric" autocomplete="off" aria-describedby="leaveDateHelp"/><button type="button" class="leave-date-trigger" data-picker-target="from" aria-label="Choose leave start date" title="Choose date">▣</button></div></div>
+            <div class="fg"><label for="flToDisplay">Date To <span class="req">*</span></label><div class="leave-date-input"><input type="text" id="flToDisplay" placeholder="mm/dd/yyyy" inputmode="numeric" autocomplete="off" aria-describedby="leaveDateHelp"/><button type="button" class="leave-date-trigger" data-picker-target="to" aria-label="Choose leave end date" title="Choose date">▣</button></div></div>
+          </div>
+          <p class="leave-date-help" id="leaveDateHelp">Weekends and declared holidays are unavailable and do not use leave credits.</p>
+          <div class="leave-date-picker" id="leaveDatePicker" hidden></div>
 
-      </div><!-- /fl-right -->
+          <!-- 6B: Details of Leave (shown based on leave type) -->
+
+          <!-- Vacation / Special Privilege -->
+          <div class="detail-section" id="detail-vacation">
+            <div class="detail-section-title">📋 Details of Leave — Location</div>
+            <div class="detail-radio-group">
+              <label class="detail-radio-row">
+                <input type="radio" name="vac_location" id="vac_within_ph" value="Within the Philippines" checked/>
+                Within the Philippines
+              </label>
+              <label class="detail-radio-row">
+                <input type="radio" name="vac_location" id="vac_abroad" value="Abroad"/>
+                Abroad
+              </label>
+            </div>
+            <div class="detail-extra" id="vac_abroad_detail" style="display:none;">
+              <label>Specify Destination</label>
+              <input type="text" id="vac_abroad_spec" placeholder="e.g. Japan, USA…"/>
+            </div>
+          </div>
+
+          <!-- Sick Leave -->
+          <div class="detail-section" id="detail-sick">
+            <div class="detail-section-title">📋 Details of Leave — Sick Leave</div>
+            <div class="detail-radio-group">
+              <label class="detail-radio-row">
+                <input type="radio" name="sick_type" id="sick_hospital" value="In Hospital" checked/>
+                In Hospital
+              </label>
+              <label class="detail-radio-row">
+                <input type="radio" name="sick_type" id="sick_outpatient" value="Out Patient"/>
+                Out Patient
+              </label>
+            </div>
+            <div class="detail-extra" style="margin-top:10px;">
+              <label>Specify Illness</label>
+              <input type="text" id="sick_illness" placeholder="e.g. Fever, Hypertension…"/>
+            </div>
+          </div>
+
+          <!-- Special Leave Benefits for Women -->
+          <div class="detail-section" id="detail-women">
+            <div class="detail-section-title">📋 Details of Leave — Special Leave Benefits for Women</div>
+            <div class="detail-extra">
+              <label>Specify Illness / Gynecological Disorder</label>
+              <input type="text" id="women_illness" placeholder="e.g. Myoma, Endometriosis…"/>
+            </div>
+          </div>
+
+          <!-- Study Leave -->
+          <div class="detail-section" id="detail-study">
+            <div class="detail-section-title">📋 Details of Leave — Study Leave</div>
+            <div class="detail-radio-group">
+              <label class="detail-radio-row">
+                <input type="radio" name="study_purpose" id="study_masters" value="Completion of Master's Degree" checked/>
+                Completion of Master's Degree
+              </label>
+              <label class="detail-radio-row">
+                <input type="radio" name="study_purpose" id="study_bar" value="BAR/Board Examination Review"/>
+                BAR/Board Examination Review
+              </label>
+            </div>
+          </div>
+
+          <!-- Monetization / Terminal (Other purpose) -->
+          <div class="detail-section" id="detail-other">
+            <div class="detail-section-title">📋 Other Purpose</div>
+            <div class="detail-radio-group">
+              <label class="detail-radio-row">
+                <input type="radio" name="other_purpose" id="other_monetization" value="Monetization of Leave Credits" checked/>
+                Monetization of Leave Credits
+              </label>
+              <label class="detail-radio-row">
+                <input type="radio" name="other_purpose" id="other_terminal" value="Terminal Leave"/>
+                Terminal Leave
+              </label>
+            </div>
+          </div>
+
+          <!-- Others Leave Type -->
+          <div class="detail-section" id="detail-others">
+            <div class="detail-section-title">📋 Details of Leave — Specify Type</div>
+            <div class="detail-extra">
+              <label>
+                <input type="checkbox" id="others_leave_confirm" disabled />
+                <span>What kind of leave are you filing? <span class="req">*</span></span>
+              </label>
+              <input type="text" id="others_leave_spec" placeholder="e.g. Personal, Family emergency, Cultural activity…"/>
+            </div>
+          </div>
+
+          <div class="fg"><label>Reason / Remarks <span class="req">*</span></label><textarea id="flReason" placeholder="Briefly describe why you are filing this leave…"></textarea></div>
+          <div style="margin-top:10px;padding:10px 12px;border:1px solid #bfdbfe;background:#eff6ff;border-radius:9px;font-size:.74rem;color:#1e40af;line-height:1.5;">
+            <strong>Signature Required:</strong> Leave submission uses your saved profile e-signature (PNG/JPG). If not set, upload it first in <strong>My Profile</strong>.
+          </div>
+          <button class="submit-btn" onclick="submitLeave()">📤 Submit Leave Request</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -4135,6 +4476,38 @@ if(!function_exists('empTimeAgo')){function empTimeAgo($dt){if(!$dt)return '';$d
   </div>
 </div>
 
+<!-- SIGNATURE CROP MODAL -->
+<div class="modal-overlay" id="modalSignatureCrop">
+  <div class="modal sig-crop-modal">
+    <div class="modal-head">
+      <div><h3>✂️ Crop E-Signature</h3><p>Adjust and preview before uploading</p></div>
+      <button class="modal-x" onclick="closeSignatureCropper()">✕</button>
+    </div>
+    <div class="sig-crop-body">
+      <div class="sig-crop-grid">
+        <div class="sig-canvas-wrap">
+          <div class="sig-canvas-hint">Drag to position your signature inside the highlighted crop area.</div>
+          <canvas id="sigCropCanvas" class="sig-canvas" width="720" height="320"></canvas>
+        </div>
+        <div class="sig-crop-side">
+          <div style="font-size:.74rem;font-weight:800;color:var(--g700);margin-bottom:8px;">Preview</div>
+          <div class="sig-preview-box">
+            <img id="sigCropPreview" alt="Cropped signature preview" />
+          </div>
+          <div class="sig-zoom-label">Zoom</div>
+          <input id="sigCropZoom" class="sig-zoom-range" type="range" min="100" max="300" value="100" oninput="onSignatureCropZoom(this.value)" />
+          <div class="sig-zoom-value" id="sigCropZoomValue">100%</div>
+          <div style="font-size:.68rem;color:var(--g500);margin-top:9px;line-height:1.5;">Tip: Keep the signature strokes centered and avoid large blank margins.</div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="m-btn m-btn-cancel" onclick="closeSignatureCropper()">Cancel</button>
+      <button class="m-btn m-btn-primary" id="sigCropUploadBtn" onclick="confirmSignatureCropUpload()">✅ Use Crop & Upload</button>
+    </div>
+  </div>
+</div>
+
   <!-- ══ SERVICE RECORD PAGE ══ -->
   <!-- ══ SERVICE RECORD PAGE ══ -->
   <!-- ══ SERVICE RECORD PAGE ══ -->
@@ -4298,6 +4671,8 @@ const DOC_COLORS = {'Appointment':{bg:'#dbeafe',c:'#1e40af'},'Contract':{bg:'#dc
 let profileData = null, balanceData = [], leaveTypes = [];
 let selTypeId = null, selTypeName = '', selTypeBal = 0;
 let curReqTab = 'all';
+const REQUESTS_PER_PAGE = 8;
+let requestPage = 1;
 let curCoeTab = 'all';
 let docFile = null, docDeleteTarget = null;
 let docDebounce = null;
@@ -5015,47 +5390,9 @@ async function pollEpNotifications() {
 
 // ── Poll for latest leave requests/statuses every 30 seconds ───────────────
 async function pollLeaveRequests() {
-  // Only poll if the requests page is currently active
   const reqPage = document.getElementById('page-requests');
   if (!reqPage || !reqPage.classList.contains('active')) return;
-  try {
-    // Use the same logic as loadRequests, but only update if on the requests page
-    const res  = await fetch(`Employee_portal.php?action=requests&status=${curReqTab}`);
-    const json = await res.json();
-    if (!json.success) return;
-    // Update counts and badge
-    const all=(json.counts.Pending||0)+(json.counts.Approved||0)+(json.counts.Denied||0)+(json.counts.Cancelled||0);
-    const tcAll = document.getElementById('tc-all');
-    if (tcAll) tcAll.textContent=all;
-    const tcPending = document.getElementById('tc-pending');
-    if (tcPending) tcPending.textContent=json.counts.Pending||0;
-    const tcApproved = document.getElementById('tc-approved');
-    if (tcApproved) tcApproved.textContent=json.counts.Approved||0;
-    const tcDenied = document.getElementById('tc-denied');
-    if (tcDenied) tcDenied.textContent=json.counts.Denied||0;
-    const tcCancelled = document.getElementById('tc-cancelled');
-    if (tcCancelled) tcCancelled.textContent=json.counts.Cancelled||0;
-    const pending=json.counts.Pending||0;
-    const badge=document.getElementById('pendBadge');
-    if (badge) { badge.textContent=pending; badge.style.display=pending?'inline-block':'none'; }
-    // Update requests list if present
-    const list=document.getElementById('reqList');
-    const empty=document.getElementById('reqEmpty');
-    if(list && empty) {
-      if(!json.data.length){list.innerHTML='';empty.style.display='block';return;}
-      empty.style.display='none';
-      list.innerHTML=json.data.map(r=>{
-        const remarkCls=r.status==='Approved'?'approved':r.status==='Denied'?'denied':'pending';
-        const remarkHtml=r.admin_remarks?`<div class="req-remark ${remarkCls}">💬 HR NOTE:  ${r.admin_remarks}</div>`:'';
-        const pendingLike = ['Pending', 'Pending Dept Head', 'Pending HR'];
-        const cancelHtml = pendingLike.includes(r.status) ? `<button class="cancel-btn" onclick="cancelReq(${r.request_id})">Cancel</button>` : '';
-        const color=TYPE_COLORS[r.type_name]||'#2563eb';
-        return `<div class="req-card"><div class="req-stripe" style="background:${color};"></div><div class="req-body"><div class="req-top"><div class="req-title"><span class="badge" style="background:${color}22;color:${color};">${r.type_name} Leave</span></div><span class="badge ${ST_CLS[r.status]||'b-pending'}">${ST_ICO[r.status]||''} ${r.status}</span></div><div class="req-meta"><span>📅 ${fmt(r.date_from)} – ${fmt(r.date_to)}</span><span>📆 <strong>${r.days_requested} day${r.days_requested!=1?'s':''}</strong></span></div><div class="req-reason">Reason of Leave: ${r.reason}</div>${remarkHtml}<div class="req-footer"><span class="req-filed">Filed: ${fmt(r.filed_at)}</span>${cancelHtml}</div></div></div>`;
-      }).join('');
-    }
-  } catch(e) {
-    // Optionally log or handle errors
-  }
+  await loadRequests();
 }
 
 function epFmtTime(dt) {
@@ -5380,8 +5717,29 @@ function renderSignatureStatus(profile) {
   fileEl.textContent = profile.signature_original_name || 'signature.png';
 }
 
-async function uploadProfileSignature(input) {
-  if (!input.files || !input.files[0]) return;
+var sigCropState = {
+  img: null,
+  originalName: 'signature.png',
+  zoomPercent: 100,
+  minScale: 1,
+  scale: 1,
+  offsetX: 0,
+  offsetY: 0,
+  cropX: 0,
+  cropY: 0,
+  cropW: 0,
+  cropH: 0,
+  drawX: 0,
+  drawY: 0,
+  drawW: 0,
+  drawH: 0,
+  dragging: false,
+  lastX: 0,
+  lastY: 0
+};
+
+function openSignatureCropper(input) {
+  if (!input || !input.files || !input.files[0]) return;
   var file = input.files[0];
   if (!['image/png', 'image/jpeg'].includes(file.type)) {
     showToast('❌ Only PNG or JPG signatures are allowed.', 'error');
@@ -5394,6 +5752,245 @@ async function uploadProfileSignature(input) {
     return;
   }
 
+  var reader = new FileReader();
+  reader.onload = function(ev) {
+    var img = new Image();
+    img.onload = function() {
+      sigCropState.img = img;
+      sigCropState.originalName = file.name || 'signature.png';
+      sigCropState.zoomPercent = 100;
+      sigCropState.offsetX = 0;
+      sigCropState.offsetY = 0;
+      initSignatureCropViewport();
+      bindSignatureCropCanvasEvents();
+      openModal('modalSignatureCrop');
+      renderSignatureCropCanvas();
+    };
+    img.onerror = function() { showToast('❌ Failed to read signature image.', 'error'); };
+    img.src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
+}
+
+function closeSignatureCropper() {
+  closeModal('modalSignatureCrop');
+  sigCropState.dragging = false;
+}
+
+function initSignatureCropViewport() {
+  var canvas = document.getElementById('sigCropCanvas');
+  var zoom = document.getElementById('sigCropZoom');
+  var zoomText = document.getElementById('sigCropZoomValue');
+  if (!canvas || !sigCropState.img) return;
+
+  var targetH = Math.round(canvas.clientHeight || 320);
+  var targetW = Math.round(canvas.clientWidth || 720);
+  if (targetW < 320) targetW = 320;
+  if (targetH < 180) targetH = 180;
+  canvas.width = targetW;
+  canvas.height = targetH;
+
+  var cropW = canvas.width - 64;
+  var cropH = Math.round(cropW / 4);
+  var maxCropH = canvas.height - 56;
+  if (cropH > maxCropH) {
+    cropH = maxCropH;
+    cropW = Math.round(cropH * 4);
+  }
+  sigCropState.cropW = cropW;
+  sigCropState.cropH = cropH;
+  sigCropState.cropX = Math.round((canvas.width - cropW) / 2);
+  sigCropState.cropY = Math.round((canvas.height - cropH) / 2);
+
+  sigCropState.minScale = Math.max(
+    sigCropState.cropW / sigCropState.img.naturalWidth,
+    sigCropState.cropH / sigCropState.img.naturalHeight
+  );
+  sigCropState.scale = sigCropState.minScale;
+  sigCropState.offsetX = 0;
+  sigCropState.offsetY = 0;
+  sigCropState.zoomPercent = 100;
+
+  if (zoom) zoom.value = '100';
+  if (zoomText) zoomText.textContent = '100%';
+}
+
+function clampSignatureCropOffsets() {
+  var rangeX = Math.max(0, (sigCropState.drawW - sigCropState.cropW) / 2);
+  var rangeY = Math.max(0, (sigCropState.drawH - sigCropState.cropH) / 2);
+  sigCropState.offsetX = Math.max(-rangeX, Math.min(rangeX, sigCropState.offsetX));
+  sigCropState.offsetY = Math.max(-rangeY, Math.min(rangeY, sigCropState.offsetY));
+}
+
+function renderSignatureCropCanvas() {
+  var canvas = document.getElementById('sigCropCanvas');
+  if (!canvas || !sigCropState.img) return;
+  var ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  var img = sigCropState.img;
+  sigCropState.drawW = img.naturalWidth * sigCropState.scale;
+  sigCropState.drawH = img.naturalHeight * sigCropState.scale;
+  clampSignatureCropOffsets();
+
+  sigCropState.drawX = (canvas.width - sigCropState.drawW) / 2 + sigCropState.offsetX;
+  sigCropState.drawY = (canvas.height - sigCropState.drawH) / 2 + sigCropState.offsetY;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, sigCropState.drawX, sigCropState.drawY, sigCropState.drawW, sigCropState.drawH);
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(15,23,42,0.38)';
+  ctx.beginPath();
+  ctx.rect(0, 0, canvas.width, canvas.height);
+  ctx.rect(sigCropState.cropX, sigCropState.cropY, sigCropState.cropW, sigCropState.cropH);
+  ctx.fill('evenodd');
+  ctx.restore();
+
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(sigCropState.cropX + 0.5, sigCropState.cropY + 0.5, sigCropState.cropW - 1, sigCropState.cropH - 1);
+
+  updateSignatureCropPreview();
+}
+
+function getSignatureCanvasPoint(evt) {
+  var canvas = document.getElementById('sigCropCanvas');
+  if (!canvas) return { x: 0, y: 0 };
+  var rect = canvas.getBoundingClientRect();
+  var sx = canvas.width / rect.width;
+  var sy = canvas.height / rect.height;
+  return {
+    x: (evt.clientX - rect.left) * sx,
+    y: (evt.clientY - rect.top) * sy
+  };
+}
+
+function bindSignatureCropCanvasEvents() {
+  var canvas = document.getElementById('sigCropCanvas');
+  if (!canvas || canvas.dataset.boundSigCrop === '1') return;
+  canvas.dataset.boundSigCrop = '1';
+
+  canvas.addEventListener('pointerdown', function(evt) {
+    if (!sigCropState.img) return;
+    var p = getSignatureCanvasPoint(evt);
+    var inside = p.x >= sigCropState.cropX && p.x <= (sigCropState.cropX + sigCropState.cropW)
+      && p.y >= sigCropState.cropY && p.y <= (sigCropState.cropY + sigCropState.cropH);
+    if (!inside) return;
+    sigCropState.dragging = true;
+    sigCropState.lastX = p.x;
+    sigCropState.lastY = p.y;
+    canvas.classList.add('dragging');
+    canvas.setPointerCapture(evt.pointerId);
+  });
+
+  canvas.addEventListener('pointermove', function(evt) {
+    if (!sigCropState.dragging) return;
+    var p = getSignatureCanvasPoint(evt);
+    sigCropState.offsetX += (p.x - sigCropState.lastX);
+    sigCropState.offsetY += (p.y - sigCropState.lastY);
+    sigCropState.lastX = p.x;
+    sigCropState.lastY = p.y;
+    renderSignatureCropCanvas();
+  });
+
+  function stopDrag() {
+    sigCropState.dragging = false;
+    canvas.classList.remove('dragging');
+  }
+  canvas.addEventListener('pointerup', stopDrag);
+  canvas.addEventListener('pointercancel', stopDrag);
+  canvas.addEventListener('pointerleave', stopDrag);
+}
+
+function onSignatureCropZoom(val) {
+  if (!sigCropState.img) return;
+  var zoom = Math.max(100, Math.min(300, parseInt(val, 10) || 100));
+  sigCropState.zoomPercent = zoom;
+  sigCropState.scale = sigCropState.minScale * (zoom / 100);
+  var zoomText = document.getElementById('sigCropZoomValue');
+  if (zoomText) zoomText.textContent = zoom + '%';
+  renderSignatureCropCanvas();
+}
+
+function updateSignatureCropPreview() {
+  var imgEl = document.getElementById('sigCropPreview');
+  if (!imgEl || !sigCropState.img) return;
+  var tmp = document.createElement('canvas');
+  tmp.width = 520;
+  tmp.height = 130;
+  var tctx = tmp.getContext('2d');
+  if (!tctx) return;
+
+  var sx = ((sigCropState.cropX - sigCropState.drawX) / sigCropState.drawW) * sigCropState.img.naturalWidth;
+  var sy = ((sigCropState.cropY - sigCropState.drawY) / sigCropState.drawH) * sigCropState.img.naturalHeight;
+  var sw = (sigCropState.cropW / sigCropState.drawW) * sigCropState.img.naturalWidth;
+  var sh = (sigCropState.cropH / sigCropState.drawH) * sigCropState.img.naturalHeight;
+
+  tctx.fillStyle = '#ffffff';
+  tctx.fillRect(0, 0, tmp.width, tmp.height);
+  tctx.drawImage(sigCropState.img, sx, sy, sw, sh, 0, 0, tmp.width, tmp.height);
+  imgEl.src = tmp.toDataURL('image/png');
+}
+
+function getCroppedSignatureBlob() {
+  if (!sigCropState.img) return Promise.resolve(null);
+  var out = document.createElement('canvas');
+  out.width = 1200;
+  out.height = 300;
+  var octx = out.getContext('2d');
+  if (!octx) return Promise.resolve(null);
+
+  var sx = ((sigCropState.cropX - sigCropState.drawX) / sigCropState.drawW) * sigCropState.img.naturalWidth;
+  var sy = ((sigCropState.cropY - sigCropState.drawY) / sigCropState.drawH) * sigCropState.img.naturalHeight;
+  var sw = (sigCropState.cropW / sigCropState.drawW) * sigCropState.img.naturalWidth;
+  var sh = (sigCropState.cropH / sigCropState.drawH) * sigCropState.img.naturalHeight;
+
+  if (sw <= 0 || sh <= 0) return Promise.resolve(null);
+  octx.fillStyle = '#ffffff';
+  octx.fillRect(0, 0, out.width, out.height);
+  octx.drawImage(sigCropState.img, sx, sy, sw, sh, 0, 0, out.width, out.height);
+
+  return new Promise(function(resolve) {
+    out.toBlob(function(blob) { resolve(blob); }, 'image/png', 0.98);
+  });
+}
+
+async function confirmSignatureCropUpload() {
+  if (!sigCropState.img) return;
+  var btn = document.getElementById('sigCropUploadBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Uploading…'; }
+
+  try {
+    var blob = await getCroppedSignatureBlob();
+    if (!blob) {
+      showToast('❌ Failed to crop signature.', 'error');
+      return;
+    }
+
+    var base = (sigCropState.originalName || 'signature').replace(/\.[^.]+$/, '');
+    var uploadFile = new File([blob], base + '.png', { type: 'image/png' });
+    var ok = await uploadProfileSignatureFile(uploadFile);
+    if (ok) {
+      var quickWrap = document.getElementById('sigCropQuickPreviewWrap');
+      var quickImg = document.getElementById('sigCropQuickPreview');
+      var cropPreview = document.getElementById('sigCropPreview');
+      if (quickWrap && quickImg && cropPreview && cropPreview.src) {
+        quickImg.src = cropPreview.src;
+        quickWrap.style.display = 'block';
+      }
+      closeSignatureCropper();
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '✅ Use Crop & Upload'; }
+  }
+}
+
+async function uploadProfileSignatureFile(file) {
+  if (!file) return false;
   var fd = new FormData();
   fd.append('action', 'upload_signature');
   fd.append('signature', file);
@@ -5405,8 +6002,7 @@ async function uploadProfileSignature(input) {
     var j = await res.json();
     if (!j.success) {
       showToast('❌ ' + (j.message || 'Signature upload failed.'), 'error');
-      input.value = '';
-      return;
+      return false;
     }
 
     showToast('✅ Signature saved to your profile.', 'success');
@@ -5416,11 +6012,11 @@ async function uploadProfileSignature(input) {
       window._profileData.signature_uploaded_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
       renderSignatureStatus(window._profileData);
     }
+    return true;
   } catch (e) {
     showToast('❌ Network error while uploading signature.', 'error');
+    return false;
   }
-
-  input.value = '';
 }
 
 async function saveProfileChanges() {
@@ -5653,9 +6249,19 @@ function renderLeaveTypePicker() {
 // ════════════════════════════════════════════════════════
 //  RECENT REQUESTS
 // ════════════════════════════════════════════════════════
-async function loadRecentRequests() {
+const RECENT_REQUESTS_PER_PAGE = 10;
+let recentRequestsPage = 1;
+
+async function loadRecentRequests(page = recentRequestsPage) {
+  recentRequestsPage = Math.max(1, page);
   try {
-    const res  = await fetch('Employee_portal.php?action=requests&status=all');
+    const params = new URLSearchParams({
+      action: 'requests',
+      status: 'all',
+      page: recentRequestsPage,
+      per_page: RECENT_REQUESTS_PER_PAGE
+    });
+    const res  = await fetch(`Employee_portal.php?${params}`);
     const text = await res.text();
     let json;
     try { json = JSON.parse(text); } catch(e) { console.error('Requests: bad JSON', text.substring(0,200)); return; }
@@ -5673,10 +6279,53 @@ async function loadRecentRequests() {
     // Only update table if element exists
     const tbody=document.getElementById('recentReqTbody');
     if (!tbody) return; // Element doesn't exist on this page
-    
-    const recent=json.data.slice(0,8);
-    if(!recent.length){tbody.innerHTML='<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--g400);">No requests yet.</td></tr>';return;}
+
+    const totalPages = Math.max(1, Math.ceil((json.total || 0) / RECENT_REQUESTS_PER_PAGE));
+    if (recentRequestsPage > totalPages) {
+      return loadRecentRequests(totalPages);
+    }
+
+    const recent = json.data || [];
+    const pagination = document.getElementById('recentReqPagination');
+    if(!recent.length){
+      tbody.innerHTML='<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--g400);">No requests yet.</td></tr>';
+      if (pagination) pagination.hidden = true;
+      return;
+    }
     tbody.innerHTML=recent.map(r=>`<tr onclick="goPage('requests',document.querySelectorAll('.sb-item')[2])"><td><span class="badge" style="background:${(TYPE_COLORS[r.type_name]||'#2563eb')}22;color:${TYPE_COLORS[r.type_name]||'#2563eb'};">${r.type_name}</span></td><td style="font-size:.77rem;color:var(--g600);">${fmt(r.date_from)}${r.date_from!==r.date_to?' – '+fmt(r.date_to):''}</td><td style="font-weight:800;">${r.days_requested}</td><td><span class="badge ${ST_CLS[r.status]||'b-pending'}">${ST_ICO[r.status]||''} ${r.status}</span></td></tr>`).join('');
+
+    if (pagination) {
+      const pageInfo = document.getElementById('recentReqPageInfo');
+      const pageButtons = document.getElementById('recentReqPageButtons');
+      const from = (recentRequestsPage - 1) * RECENT_REQUESTS_PER_PAGE + 1;
+      const to = from + recent.length - 1;
+      pageInfo.textContent = `Showing ${from}–${to} of ${json.total} requests`;
+      pageButtons.innerHTML = '';
+
+      const addPageButton = (label, targetPage, disabled = false, active = false) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `recent-req-page-btn${active ? ' active' : ''}`;
+        button.textContent = label;
+        button.disabled = disabled;
+        button.setAttribute('aria-label', label === '‹' ? 'Previous page' : label === '›' ? 'Next page' : `Page ${label}`);
+        button.onclick = () => loadRecentRequests(targetPage);
+        pageButtons.appendChild(button);
+      };
+
+      addPageButton('‹', recentRequestsPage - 1, recentRequestsPage === 1);
+      const firstPage = Math.max(1, recentRequestsPage - 2);
+      const lastPage = Math.min(totalPages, recentRequestsPage + 2);
+      if (firstPage > 1) addPageButton('1', 1);
+      if (firstPage > 2) addPageButton('…', 0, true);
+      for (let pageNumber = firstPage; pageNumber <= lastPage; pageNumber++) {
+        addPageButton(String(pageNumber), pageNumber, false, pageNumber === recentRequestsPage);
+      }
+      if (lastPage < totalPages - 1) addPageButton('…', 0, true);
+      if (lastPage < totalPages) addPageButton(String(totalPages), totalPages);
+      addPageButton('›', recentRequestsPage + 1, recentRequestsPage === totalPages);
+      pagination.hidden = totalPages <= 1;
+    }
   } catch(e) {
     console.error('Recent requests error', e);
     const tbody = document.getElementById('recentReqTbody');
@@ -5703,9 +6352,154 @@ async function loadAnnouncements() {
 // ════════════════════════════════════════════════════════
 //  LEAVE REQUESTS PAGE
 // ════════════════════════════════════════════════════════
+function renderRequestCards(rows) {
+  return rows.map(r=>{
+    const remarkCls=r.status==='Approved'?'approved':r.status==='Denied'?'denied':'pending';
+    const remarkHtml=r.admin_remarks?`<div class="req-remark ${remarkCls}">💬 HR NOTE:  ${r.admin_remarks}</div>`:'';
+    const pendingLike = ['Pending', 'Pending Dept Head', 'Pending HR'];
+    const cancelHtml = pendingLike.includes(r.status) ? `<button class="cancel-btn" onclick="cancelReq(${r.request_id})">Cancel</button>` : '';
+    const color=TYPE_COLORS[r.type_name]||'#2563eb';
+    return `<div class="req-card"><div class="req-stripe" style="background:${color};"></div><div class="req-body"><div class="req-top"><div class="req-title"><span class="badge" style="background:${color}22;color:${color};">${r.type_name} Leave</span></div><span class="badge ${ST_CLS[r.status]||'b-pending'}">${ST_ICO[r.status]||''} ${r.status}</span></div><div class="req-meta"><span>📅 ${fmt(r.date_from)} – ${fmt(r.date_to)}</span><span>📆 <strong>${r.days_requested} day${r.days_requested!=1?'s':''}</strong></span></div><div class="req-reason">Reason of Leave: ${r.reason}</div>${remarkHtml}<div class="req-footer"><span class="req-filed">Filed: ${fmt(r.filed_at)}</span>${cancelHtml}</div></div></div>`;
+  }).join('');
+}
+
+function populateRequestTypeFilter(types) {
+  const select = document.getElementById('reqTypeFilter');
+  if (!select || select.dataset.loaded === 'true') return;
+  types.forEach(type => {
+    const option = document.createElement('option');
+    option.value = type.leave_type_id;
+    option.textContent = type.name;
+    select.appendChild(option);
+  });
+  select.dataset.loaded = 'true';
+}
+
+function updateRequestDateInput() {
+  const mode = document.getElementById('reqDateMode').value;
+  const field = document.getElementById('reqDateValueField');
+  const label = document.getElementById('reqDateValueLabel');
+  const input = document.getElementById('reqDateValue');
+  const configurations = {
+    date: { type: 'date', label: 'Specific date' },
+    week: { type: 'week', label: 'Week' },
+    month: { type: 'month', label: 'Month' },
+    year: { type: 'number', label: 'Year' }
+  };
+  const configuration = configurations[mode];
+  field.hidden = !configuration;
+  input.value = '';
+  if (configuration) {
+    input.type = configuration.type;
+    input.placeholder = configuration.type === 'number' ? 'YYYY' : '';
+    input.min = configuration.type === 'number' ? '1900' : '';
+    input.max = configuration.type === 'number' ? '9999' : '';
+    input.step = configuration.type === 'number' ? '1' : '';
+    label.textContent = configuration.label;
+  }
+  applyRequestFilters();
+}
+
+function applyRequestFilters() {
+  requestPage = 1;
+  loadRequests();
+}
+
+function clearRequestFilters() {
+  document.getElementById('reqStatusFilter').value = 'all';
+  document.getElementById('reqTypeFilter').value = '';
+  document.getElementById('reqDateMode').value = '';
+  document.getElementById('reqDateValue').value = '';
+  document.getElementById('reqDateValueField').hidden = true;
+  curReqTab = 'all';
+  applyRequestFilters();
+}
+
+function updateRequestStatusFilter(counts) {
+  const select = document.getElementById('reqStatusFilter');
+  if (!select) return;
+  const total = (counts.Pending || 0) + (counts.Approved || 0) + (counts.Denied || 0) + (counts.Cancelled || 0);
+  const labels = {
+    all: 'All',
+    pending: 'Pending',
+    approved: 'Approved',
+    denied: 'Denied',
+    cancelled: 'Cancelled'
+  };
+  const values = {
+    all: total,
+    pending: counts.Pending || 0,
+    approved: counts.Approved || 0,
+    denied: counts.Denied || 0,
+    cancelled: counts.Cancelled || 0
+  };
+  Object.keys(labels).forEach(status => {
+    const option = select.querySelector(`option[value="${status}"]`);
+    if (option) option.textContent = `${labels[status]} (${values[status]})`;
+  });
+}
+
+function filterRequestStatus() {
+  curReqTab = document.getElementById('reqStatusFilter').value;
+  requestPage = 1;
+  loadRequests();
+}
+
+function renderRequestPagination(total) {
+  const pagination = document.getElementById('reqPagination');
+  const pages = Math.max(1, Math.ceil(total / REQUESTS_PER_PAGE));
+  if (!pagination) return pages;
+
+  const info = document.getElementById('reqPageInfo');
+  const buttons = document.getElementById('reqPageButtons');
+  const from = total ? (requestPage - 1) * REQUESTS_PER_PAGE + 1 : 0;
+  const to = Math.min(requestPage * REQUESTS_PER_PAGE, total);
+  info.textContent = `Showing ${from}–${to} of ${total} request${total !== 1 ? 's' : ''}`;
+  buttons.innerHTML = '';
+
+  const addButton = (label, targetPage, disabled = false, active = false) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `req-page-btn${active ? ' active' : ''}`;
+    button.textContent = label;
+    button.disabled = disabled;
+    button.setAttribute('aria-label', label === '‹' ? 'Previous page' : label === '›' ? 'Next page' : `Page ${label}`);
+    button.onclick = () => { requestPage = targetPage; loadRequests(); };
+    buttons.appendChild(button);
+  };
+
+  addButton('‹', requestPage - 1, requestPage === 1);
+  const firstPage = Math.max(1, requestPage - 2);
+  const lastPage = Math.min(pages, requestPage + 2);
+  if (firstPage > 1) addButton('1', 1);
+  if (firstPage > 2) addButton('…', 0, true);
+  for (let pageNumber = firstPage; pageNumber <= lastPage; pageNumber++) {
+    addButton(String(pageNumber), pageNumber, false, pageNumber === requestPage);
+  }
+  if (lastPage < pages - 1) addButton('…', 0, true);
+  if (lastPage < pages) addButton(String(pages), pages);
+  addButton('›', requestPage + 1, requestPage === pages);
+  pagination.hidden = pages <= 1;
+  return pages;
+}
+
 async function loadRequests() {
   try {
-    const res  = await fetch(`Employee_portal.php?action=requests&status=${curReqTab}`);
+    const params = new URLSearchParams({
+      action: 'requests',
+      status: curReqTab,
+      page: requestPage,
+      per_page: REQUESTS_PER_PAGE
+    });
+    const typeId = document.getElementById('reqTypeFilter').value;
+    const dateMode = document.getElementById('reqDateMode').value;
+    const dateValue = document.getElementById('reqDateValue').value;
+    if (typeId) params.set('leave_type_id', typeId);
+    if (dateMode && dateValue) {
+      params.set('date_mode', dateMode);
+      params.set('date_value', dateValue);
+    }
+    const res  = await fetch(`Employee_portal.php?${params}`);
     const json = await res.json();
     if (!json.success) {
       showToast('⚠️ ' + (json.message || 'Could not load requests.'), 'error');
@@ -5715,25 +6509,20 @@ async function loadRequests() {
       empty.innerHTML='<div class="ei">⚠️</div><p>Could not load requests: ' + (json.message || 'Unknown error') + '</p>';
       return;
     }
-    const all=(json.counts.Pending||0)+(json.counts.Approved||0)+(json.counts.Denied||0)+(json.counts.Cancelled||0);
-    document.getElementById('tc-all').textContent=all;
-    document.getElementById('tc-pending').textContent=json.counts.Pending||0;
-    document.getElementById('tc-approved').textContent=json.counts.Approved||0;
-    document.getElementById('tc-denied').textContent=json.counts.Denied||0;
-    document.getElementById('tc-cancelled').textContent=json.counts.Cancelled||0;
+    populateRequestTypeFilter(json.type_options || []);
+    updateRequestStatusFilter(json.counts);
     const pending=json.counts.Pending||0;
     const badge=document.getElementById('pendBadge'); badge.textContent=pending; badge.style.display=pending?'inline-block':'none';
     const list=document.getElementById('reqList'); const empty=document.getElementById('reqEmpty');
+    const pages = Math.max(1, Math.ceil((json.total || 0) / REQUESTS_PER_PAGE));
+    if (requestPage > pages) {
+      requestPage = pages;
+      return loadRequests();
+    }
+    renderRequestPagination(json.total || 0);
     if(!json.data.length){list.innerHTML='';empty.style.display='block';return;}
     empty.style.display='none';
-    list.innerHTML=json.data.map(r=>{
-      const remarkCls=r.status==='Approved'?'approved':r.status==='Denied'?'denied':'pending';
-      const remarkHtml=r.admin_remarks?`<div class="req-remark ${remarkCls}">💬 HR NOTE:  ${r.admin_remarks}</div>`:'';
-      const pendingLike = ['Pending', 'Pending Dept Head', 'Pending HR'];
-      const cancelHtml = pendingLike.includes(r.status) ? `<button class="cancel-btn" onclick="cancelReq(${r.request_id})">Cancel</button>` : '';
-      const color=TYPE_COLORS[r.type_name]||'#2563eb';
-      return `<div class="req-card"><div class="req-stripe" style="background:${color};"></div><div class="req-body"><div class="req-top"><div class="req-title"><span class="badge" style="background:${color}22;color:${color};">${r.type_name} Leave</span></div><span class="badge ${ST_CLS[r.status]||'b-pending'}">${ST_ICO[r.status]||''} ${r.status}</span></div><div class="req-meta"><span>📅 ${fmt(r.date_from)} – ${fmt(r.date_to)}</span><span>📆 <strong>${r.days_requested} day${r.days_requested!=1?'s':''}</strong></span></div><div class="req-reason">Reason of Leave: ${r.reason}</div>${remarkHtml}<div class="req-footer"><span class="req-filed">Filed: ${fmt(r.filed_at)}</span>${cancelHtml}</div></div></div>`;
-    }).join('');
+    list.innerHTML=renderRequestCards(json.data);
   } catch(e) {
     showToast('❌ Could not load requests. Network error.', 'error');
     const list=document.getElementById('reqList'); const empty=document.getElementById('reqEmpty');
@@ -5743,8 +6532,6 @@ async function loadRequests() {
     console.error('loadRequests error:', e);
   }
 }
-
-function filterReqs(tab,btn){curReqTab=tab;document.querySelectorAll('.req-tab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');loadRequests();}
 
 async function cancelReq(id) {
   if(!confirm('Cancel this leave request?')) return;
@@ -5904,18 +6691,152 @@ async function loadCoeRequests() {
 //  FILE LEAVE
 // ════════════════════════════════════════════════════════
 function pickLT(el){document.querySelectorAll('.lt-opt').forEach(c=>c.classList.remove('sel'));el.classList.add('sel');selTypeId=parseInt(el.dataset.id);selTypeName=el.dataset.name;selTypeBal=parseInt(el.dataset.bal);document.getElementById('daysBal').textContent=`${selTypeBal} days available for ${selTypeName} Leave`;calcDays();updateDetailSection(selTypeName);}
+let leaveHolidays = new Map();
+let leaveConflictDates = new Set();
+const leavePicker = { from: null, to: null, view: new Date(new Date().getFullYear(), new Date().getMonth(), 1), target: 'from' };
+
+function toLocalDate(dateString) { return new Date(dateString + 'T00:00:00'); }
+function dateKey(date) { return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0'); }
+function sameDate(left, right) { return left && right && dateKey(left) === dateKey(right); }
+function isLeaveHoliday(date) { return leaveHolidays.has(dateKey(date)) || leaveHolidays.has('R-' + dateKey(date).slice(5)); }
+function holidayName(date) { return leaveHolidays.get(dateKey(date)) || leaveHolidays.get('R-' + dateKey(date).slice(5)) || ''; }
+function isLeaveConflictDate(date) { return leaveConflictDates.has(dateKey(date)); }
+function escapeHolidayTooltip(value) { return String(value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function isUnavailableLeaveDate(date) { return date.getDay() === 0 || date.getDay() === 6 || isLeaveHoliday(date) || isLeaveConflictDate(date); }
+function formatLeaveDisplay(date) { return date ? String(date.getMonth() + 1).padStart(2, '0') + '/' + String(date.getDate()).padStart(2, '0') + '/' + date.getFullYear() : ''; }
+
+async function loadExistingLeaveDates() {
+  try {
+    const response = await fetch('Employee_portal.php?action=requests&status=all');
+    const json = await response.json();
+    if (!json || !json.success || !Array.isArray(json.data)) return;
+
+    const activeStatuses = ['Pending', 'Pending Dept Head', 'Pending HR', 'Approved'];
+    leaveConflictDates = new Set();
+    json.data.forEach((row) => {
+      if (!activeStatuses.includes(String(row.status || ''))) return;
+      const start = row.date_from ? new Date(row.date_from + 'T00:00:00') : null;
+      const end = row.date_to ? new Date(row.date_to + 'T00:00:00') : null;
+      if (!start || !end || end < start) return;
+      const cursor = new Date(start);
+      while (cursor <= end) {
+        leaveConflictDates.add(dateKey(cursor));
+        cursor.setDate(cursor.getDate() + 1);
+      }
+    });
+    renderLeaveDatePicker();
+  } catch (error) {
+    console.warn('Could not load existing leave dates for the calendar.', error);
+  }
+}
+
+function syncLeavePickerInputs() {
+  document.getElementById('flFrom').value = leavePicker.from ? dateKey(leavePicker.from) : '';
+  document.getElementById('flTo').value = leavePicker.to ? dateKey(leavePicker.to) : '';
+  document.getElementById('flFromDisplay').value = formatLeaveDisplay(leavePicker.from);
+  document.getElementById('flToDisplay').value = formatLeaveDisplay(leavePicker.to);
+}
+
+function renderLeaveDatePicker() {
+  const picker = document.getElementById('leaveDatePicker');
+  if (!picker) return;
+  const weekdays = ['S','M','T','W','T','F','S'];
+  const month = new Date(leavePicker.view.getFullYear(), leavePicker.view.getMonth(), 1);
+  const blankDays = new Date(month.getFullYear(), month.getMonth(), 1).getDay();
+  const totalDays = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+  let days = Array(blankDays).fill('<span class="leave-picker-day empty"></span>');
+  for (let day = 1; day <= totalDays; day++) {
+    const date = new Date(month.getFullYear(), month.getMonth(), day);
+    const weekend = date.getDay() === 0 || date.getDay() === 6;
+    const holiday = isLeaveHoliday(date);
+    const conflict = isLeaveConflictDate(date);
+    const classes = ['leave-picker-day'];
+    if (weekend) classes.push('weekend');
+    if (holiday) classes.push('holiday');
+    if (conflict) classes.push('conflict');
+    if (leavePicker.from && leavePicker.to && date >= leavePicker.from && date <= leavePicker.to) classes.push('in-range');
+    if (sameDate(date, leavePicker.from)) classes.push('start-date');
+    if (sameDate(date, leavePicker.to)) classes.push('end-date');
+    const note = conflict ? 'Already filed for leave' : (holiday ? holidayName(date) : (weekend ? 'Weekend - not chargeable to leave credits' : 'Select ' + formatLeaveDisplay(date)));
+    const unavailable = weekend || holiday || conflict;
+    const ariaDate = formatLeaveDisplay(date) + (conflict ? ': already filed for leave' : holiday ? ': ' + note : weekend ? ': weekend' : '');
+    days.push(`<button type="button" class="${classes.join(' ')}" data-date="${dateKey(date)}" title="${escapeHolidayTooltip(note)}" aria-label="${escapeHolidayTooltip(ariaDate)}" ${unavailable ? 'disabled' : ''}>${day}</button>`);
+  }
+  const monthHtml = `<div class="leave-picker-month"><div class="leave-picker-month-title">${month.toLocaleDateString('en-PH',{month:'long',year:'numeric'})}</div><div class="leave-picker-weekdays">${weekdays.map(day => `<span>${day}</span>`).join('')}</div><div class="leave-picker-days">${days.join('')}</div></div>`;
+  picker.innerHTML = `<div class="leave-date-picker-head"><div class="leave-date-picker-title">Choose leave dates</div><div class="leave-date-picker-nav"><button type="button" data-leave-nav="prev" aria-label="Previous month" title="Previous month">‹</button><button type="button" data-leave-nav="next" aria-label="Next month" title="Next month">›</button></div></div><div class="leave-date-picker-grid">${monthHtml}</div><div class="leave-date-picker-foot"><div class="leave-date-picker-key"><span><i></i> Holiday</span><span><i class="weekend"></i> Weekend</span></div><button type="button" class="leave-date-picker-clear" id="leavePickerClear">Clear</button></div>`;
+  picker.querySelectorAll('[data-date]').forEach(button => button.addEventListener('click', () => selectLeavePickerDate(toLocalDate(button.dataset.date))));
+  picker.querySelectorAll('[data-leave-nav]').forEach(button => button.addEventListener('click', () => { leavePicker.view.setMonth(leavePicker.view.getMonth() + (button.dataset.leaveNav === 'prev' ? -1 : 1)); renderLeaveDatePicker(); }));
+  const clearBtn = document.getElementById('leavePickerClear');
+  if (clearBtn) clearBtn.addEventListener('click', clearLeavePicker);
+}
+
+function selectLeavePickerDate(date) {
+  if (isLeaveConflictDate(date)) {
+    showToast('⚠️ This date is already covered by an existing leave request.', 'info');
+    return;
+  }
+  if (!leavePicker.from || leavePicker.to) { leavePicker.from = date; leavePicker.to = null; leavePicker.target = 'to'; }
+  else if (date < leavePicker.from) { leavePicker.to = leavePicker.from; leavePicker.from = date; }
+  else { leavePicker.to = date; }
+  syncLeavePickerInputs(); calcDays(); renderLeaveDatePicker();
+}
+
+function clearLeavePicker() {
+  leavePicker.from = null;
+  leavePicker.to = null;
+  leavePicker.target = 'from';
+  leavePicker.view = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+
+  ['flFrom','flTo','flFromDisplay','flToDisplay'].forEach((id) => {
+    const field = document.getElementById(id);
+    if (!field) return;
+    field.value = '';
+    field.classList.remove('err');
+  });
+
+  const daysEl = document.getElementById('daysNum');
+  if (daysEl) daysEl.textContent = '0';
+
+  if (typeof calcDays === 'function') calcDays();
+  renderCalPreview(null, null, 0);
+  renderLeaveDatePicker();
+}
+function parseLeaveDisplay(value) { const match = String(value).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); if (!match) return null; const date = new Date(Number(match[3]), Number(match[1]) - 1, Number(match[2])); return date.getFullYear() === Number(match[3]) && date.getMonth() === Number(match[1]) - 1 && date.getDate() === Number(match[2]) ? date : null; }
+function updateLeavePickerFromDisplay(target) { const input = document.getElementById(target === 'from' ? 'flFromDisplay' : 'flToDisplay'); const date = parseLeaveDisplay(input.value); input.classList.toggle('err', input.value !== '' && (!date || isUnavailableLeaveDate(date))); if (!date || isUnavailableLeaveDate(date)) return; if (target === 'from') leavePicker.from = date; else leavePicker.to = date; if (leavePicker.from && leavePicker.to && leavePicker.to < leavePicker.from) [leavePicker.from, leavePicker.to] = [leavePicker.to, leavePicker.from]; leavePicker.view = new Date((leavePicker.from || date).getFullYear(), (leavePicker.from || date).getMonth(), 1); syncLeavePickerInputs(); calcDays(); renderLeaveDatePicker(); }
+
+function openLeaveDatePicker(target) { leavePicker.target = target; const picker = document.getElementById('leaveDatePicker'); picker.hidden = false; const date = target === 'from' ? leavePicker.from : leavePicker.to; if (date) leavePicker.view = new Date(date.getFullYear(), date.getMonth(), 1); renderLeaveDatePicker(); }
+
+function initLeaveDatePicker() { document.querySelectorAll('.leave-date-trigger').forEach(button => button.addEventListener('click', () => openLeaveDatePicker(button.dataset.pickerTarget))); ['from','to'].forEach(target => document.getElementById(target === 'from' ? 'flFromDisplay' : 'flToDisplay').addEventListener('change', () => updateLeavePickerFromDisplay(target))); renderLeaveDatePicker(); }
+
+async function loadLeaveHolidays() {
+  try {
+    const response = await fetch('Employee_portal.php?action=holiday_calendar');
+    const json = await response.json();
+    if (!json.success) throw new Error('Holiday calendar unavailable');
+    leaveHolidays = new Map();
+    json.data.forEach(holiday => {
+      if (!holiday.holiday_date) return;
+      leaveHolidays.set(holiday.holiday_date, holiday.description);
+      leaveHolidays.set('R-' + holiday.holiday_date.slice(5), holiday.description);
+    });
+    renderLeaveDatePicker();
+  } catch (error) {
+    showToast('Holiday markings are unavailable. Leave totals will still be verified when submitted.', 'info');
+  }
+}
+
 function calcDays() {
   var f = document.getElementById('flFrom').value;
   var t = document.getElementById('flTo').value;
   if (f && t) {
     // Count only weekdays (Mon–Fri); weekends are excluded from leave day counts
-    var start = new Date(f + 'T00:00:00');
-    var end   = new Date(t + 'T00:00:00');
+    var start = toLocalDate(f);
+    var end   = toLocalDate(t);
     var days  = 0;
     var cur   = new Date(start);
     while (cur <= end) {
       var dow = cur.getDay(); // 0=Sun, 6=Sat
-      if (dow !== 0 && dow !== 6) days++;
+      if (dow !== 0 && dow !== 6 && !isLeaveHoliday(cur)) days++;
       cur.setDate(cur.getDate() + 1);
     }
     days = Math.max(0, days);
@@ -5976,8 +6897,9 @@ function renderCalPreview(from, to, totalDays) {
   while (cur <= end) {
     var wd = cur.getDay();
     var isWeekend = (wd === 0 || wd === 6);
-    if (!isWeekend) weekdayCount++;
-    days.push({ d: new Date(cur), weekend: isWeekend, isToday: cur.getTime() === today.getTime() });
+    var isHoliday = isLeaveHoliday(cur);
+    if (!isWeekend && !isHoliday) weekdayCount++;
+    days.push({ d: new Date(cur), weekend: isWeekend, holiday: isHoliday, isToday: cur.getTime() === today.getTime() });
     cur.setDate(cur.getDate() + 1);
     if (days.length > 28) { days.push(null); break; } // cap display
   }
@@ -5985,7 +6907,7 @@ function renderCalPreview(from, to, totalDays) {
   var range = start.toLocaleDateString('en-PH', opts) + ' → ' + end.toLocaleDateString('en-PH', opts);
   var strip = days.map(function(d) {
     if (!d) return '<div style="font-size:.65rem;color:var(--g400);">+more</div>';
-    var cls = d.weekend ? 'weekend' : 'in-range';
+    var cls = d.holiday ? 'holiday' : (d.weekend ? 'weekend' : 'in-range');
     if (d.isToday) cls += ' today';
     return '<div class="fl-cal-day ' + cls + '">' + d.d.getDate() + '</div>';
   }).join('');
@@ -6062,6 +6984,9 @@ function updateDetailSection(typeName) {
 
 /* Show/hide abroad text input */
 document.addEventListener('DOMContentLoaded', function() {
+  initLeaveDatePicker();
+  loadLeaveHolidays();
+  loadExistingLeaveDates();
   var abroadRadios = document.querySelectorAll('input[name="vac_location"]');
   abroadRadios.forEach(function(r) {
     r.addEventListener('change', function() {
@@ -6165,7 +7090,7 @@ async function submitLeave() {
   const body=new FormData();body.append('action','submit_leave');body.append('csrf_token',CSRF_TOKEN);body.append('leave_type_id',selTypeId);body.append('date_from',from);body.append('date_to',to);body.append('days_requested',days);body.append('reason',fullReason);
   try {
     const res=await fetch('Employee_portal.php',{method:'POST',body});const json=await res.json();
-    if(json.success){showToast('✅ Leave request submitted!','success');document.getElementById('flFrom').value='';document.getElementById('flTo').value='';document.getElementById('flReason').value='';document.getElementById('others_leave_spec').value='';document.getElementById('daysNum').textContent='0';['flFrom','flTo','flReason','others_leave_spec'].forEach(id=>document.getElementById(id).classList.remove('err'));updateDetailSection('');await loadBalances();await loadLeaveTypes();await loadRecentRequests();setTimeout(()=>goPage('requests',document.querySelectorAll('.sb-item')[2]),900);}
+    if(json.success){showToast('✅ Leave request submitted!','success');clearLeavePicker();document.getElementById('flReason').value='';document.getElementById('others_leave_spec').value='';document.getElementById('daysNum').textContent='0';['flFrom','flTo','flFromDisplay','flToDisplay','flReason','others_leave_spec'].forEach(id=>document.getElementById(id).classList.remove('err'));updateDetailSection('');await loadBalances();await loadLeaveTypes();await loadRecentRequests();await loadExistingLeaveDates();setTimeout(()=>goPage('requests',document.querySelectorAll('.sb-item')[2]),900);}
     else showToast('❌ '+json.message,'error');
   } catch(e){showToast('❌ Failed.','error');}
 }
@@ -7019,7 +7944,16 @@ async function fetchAndPrintPDS(source = 'saved') {
     if (source === 'form') {
       // Collect from current form
       const d = collectPDSFormData();
-      html = buildPDSPrintHTML(d, null);
+      let savedRec = null;
+      try {
+        const sr = await fetch('Employee_portal.php?action=get_pds');
+        savedRec = await sr.json();
+      } catch(e) {}
+      if (savedRec && savedRec.data) {
+        d.updated_at = savedRec.data.updated_at;
+        d.created_at = savedRec.data.created_at;
+      }
+      html = buildPDSPrintHTML(d, await withScannedSignature((savedRec && savedRec.employee) || null));
       if (!html || html.length < 100) {
         showToast('❌ Error generating PDS: No HTML output', 'error');
         return;
@@ -7155,12 +8089,14 @@ function collectPDSFormData() {
 
 
 function buildAndPrintPDS(d, empRow) {
-  const html = buildPDSPrintHTML(d, empRow);
+  withScannedSignature(empRow).then(function(emp) {
+  const html = buildPDSPrintHTML(d, emp);
   const w = window.open('', '_blank', 'width=960,height=1100');
   w.document.write(html);
   w.document.close();
   w.focus();
   setTimeout(() => w.print(), 600);
+  });
 }
 
 // ════════════════════════════════════════════════════════
@@ -7554,49 +8490,82 @@ function annexCAddRow(type) {
 //  ANNEX B / C — Save & Print
 // ════════════════════════════════════════════════════════
 function saveAnnex(which) {
-  const label = which === 'annex_b' ? 'Annex B' : 'Annex C';
-  const page  = document.getElementById('page-' + which);
-  if (!page) return;
+  const label  = which === 'annex_b' ? 'Annex B' : 'Annex C';
+  const prefix = which === 'annex_b' ? 'annexB'  : 'annexC';
 
-  // Collect all inputs from all tables, keyed by table index + row + col
-  const data = {};
-  page.querySelectorAll('.saln-table-scroll table').forEach((tbl, ti) => {
-    const rows = [];
-    tbl.querySelectorAll('tbody tr').forEach(tr => {
-      const row = {};
-      tr.querySelectorAll('input, select').forEach((inp, ci) => {
-        row['col_' + ci] = inp.value.trim();
-      });
-      rows.push(row);
-    });
-    data['table_' + ti] = rows;
-  });
+  const rowsOf = (tbodyId, mapFn) => {
+    const tbody = document.getElementById(tbodyId);
+    if (!tbody) return [];
+    return [...tbody.querySelectorAll('tr')]
+      .map(tr => mapFn([...tr.querySelectorAll('input, select')].map(inp => inp.value.trim())))
+      .filter(row => Object.values(row).some(v => v !== ''));
+  };
 
-  // Also save the "As of" field
-  const asOf = page.querySelector('.fg input[type="text"]');
-  if (asOf) data['as_of'] = asOf.value.trim();
+  const payload = {
+    which,
+    saln_year: salnCurrentYear,
+    real_properties:     rowsOf(prefix + '-real-tbody',     c => ({description:c[0], kind:c[1], location:c[2], assessed_value:c[3], market_value:c[4], acq_year:c[5], acq_mode:c[6], acq_cost:c[7]})),
+    // Personal/Liabilities sheets only have 3 columns (Description/Value|Amount/Remarks); mapped positionally to match the print layout.
+    personal_properties: rowsOf(prefix + '-personal-tbody', c => ({description:c[0], acq_year:c[1], acq_cost:c[2]})),
+    liabilities:         rowsOf(prefix + '-liab-tbody',      c => ({nature:c[0], creditor:c[1], balance:c[2]})),
+    biz_interests:       rowsOf(prefix + '-biz-tbody',       c => ({entity_name:c[0], biz_address:c[1], nature:c[2], date_acquired:c[3]})),
+  };
 
-  try {
-    localStorage.setItem('hrms_' + which, JSON.stringify({ saved_at: new Date().toISOString(), data }));
-    showToast('✅ ' + label + ' saved! Data will reload when you return to this page.', 'success');
-  } catch(e) {
-    showToast('❌ Could not save ' + label + '.', 'error');
-  }
+  try { localStorage.setItem('hrms_' + which, JSON.stringify({ saved_at: new Date().toISOString(), data: payload })); } catch(e) {}
+
+  fetch('Employee_portal.php?action=save_saln_annex', {
+    method: 'POST', headers: {'Content-Type':'application/json','X-CSRF-TOKEN':CSRF_TOKEN}, body: JSON.stringify(payload)
+  }).then(r => r.json()).then(j => {
+    showToast(j.success ? ('✅ ' + label + ' saved!') : ('❌ ' + (j.message || 'Could not save ' + label + '.')), j.success ? 'success' : 'error');
+  }).catch(() => showToast('❌ Could not save ' + label + '.', 'error'));
 }
 
 function loadAnnex(which) {
+  const page = document.getElementById('page-' + which);
+  if (!page) return;
+  const prefix = which === 'annex_b' ? 'annexB' : 'annexC';
+  const safeJsonLocal = s => { try { return s ? JSON.parse(s) : null; } catch(e) { return null; } };
+
+  const fillTable = (tbodyId, rows, cols, addFn, addType) => {
+    const tbody = document.getElementById(tbodyId);
+    if (!tbody || !rows || !rows.length) return;
+    while (tbody.children.length < rows.length) addFn(addType);
+    [...tbody.querySelectorAll('tr')].forEach((tr, ri) => {
+      const row = rows[ri] || {};
+      [...tr.querySelectorAll('input, select')].forEach((inp, ci) => {
+        if (row[cols[ci]] !== undefined) inp.value = row[cols[ci]];
+      });
+    });
+  };
+
+  fetch('Employee_portal.php?action=get_saln&year=' + salnCurrentYear).then(r => r.json()).then(j => {
+    const d = j.data || {};
+    const p = which === 'annex_b' ? 'as1' : 'as2';
+    const real = safeJsonLocal(d[p + '_real_properties']);
+    const pers = safeJsonLocal(d[p + '_personal_properties']);
+    const liab = safeJsonLocal(d[p + '_liabilities']);
+    const biz  = safeJsonLocal(d[p + '_biz_interests']);
+
+    if (!real && !pers && !liab && !biz) { loadAnnexFromLocal(which); return; }
+
+    const addFn = which === 'annex_b' ? annexBAddRow : annexCAddRow;
+    fillTable(prefix + '-real-tbody',     real, ['description','kind','location','assessed_value','market_value','acq_year','acq_mode','acq_cost'], addFn, 'real');
+    fillTable(prefix + '-personal-tbody', pers, ['description','acq_year','acq_cost'], addFn, 'personal');
+    fillTable(prefix + '-liab-tbody',     liab, ['nature','creditor','balance'], addFn, 'liab');
+    fillTable(prefix + '-biz-tbody',      biz,  ['entity_name','biz_address','nature','date_acquired'], addFn, 'biz');
+  }).catch(() => loadAnnexFromLocal(which));
+}
+
+// Fallback for data saved before server-side persistence existed.
+function loadAnnexFromLocal(which) {
   const page = document.getElementById('page-' + which);
   if (!page) return;
   try {
     const saved = JSON.parse(localStorage.getItem('hrms_' + which) || 'null');
     if (!saved || !saved.data) return;
     const data = saved.data;
-
-    // Restore "As of" field
     const asOf = page.querySelector('.fg input[type="text"]');
     if (asOf && data.as_of) asOf.value = data.as_of;
-
-    // Restore all table inputs
     page.querySelectorAll('.saln-table-scroll table').forEach((tbl, ti) => {
       const rows = data['table_' + ti] || [];
       tbl.querySelectorAll('tbody tr').forEach((tr, ri) => {

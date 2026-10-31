@@ -16,17 +16,6 @@ if (!in_array($_SESSION['user_role'] ?? '', $allowedRoles)) {
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/csrf.php';
 
-// ── Auto-migrate: add gender/marital restriction columns if missing ──
-try {
-    $cols = $pdo->query("SHOW COLUMNS FROM leave_types")->fetchAll(PDO::FETCH_COLUMN);
-    if (!in_array('applicable_gender', $cols)) {
-        $pdo->exec("ALTER TABLE leave_types ADD COLUMN applicable_gender ENUM('All','Male','Female') NOT NULL DEFAULT 'All' AFTER is_active");
-    }
-    if (!in_array('require_married', $cols)) {
-        $pdo->exec("ALTER TABLE leave_types ADD COLUMN require_married TINYINT(1) NOT NULL DEFAULT 0 AFTER applicable_gender");
-    }
-} catch (Exception $e) { /* ignore if already exists */ }
-
 // ════════════════════════════════════════════════════════════
 //  AJAX HANDLER
 // ════════════════════════════════════════════════════════════
@@ -453,6 +442,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     <a class="nav-item" href="leave_requests.php"><div class="nav-icon">📋</div>Leave Requests<span class="nav-badge" id="sidebarBadge"></span></a>
     <a class="nav-item active" href="leave_types.php"><div class="nav-icon">📁</div>Leave Types</a>
     <a class="nav-item" href="leave_balances.php"><div class="nav-icon">⚖️</div>Leave Balances</a>
+    <a class="nav-item" href="holidays.php"><div class="nav-icon">📅</div>Holidays</a>
     <div class="nav-label">Documents</div>
     <a class="nav-item" href="documents.php"><div class="nav-icon">📄</div>HR Documents</a>
     <a class="nav-item" href="pds_saln.php"><div class="nav-icon">🪪</div>PDS & SALN</a>

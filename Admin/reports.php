@@ -713,6 +713,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
 
       /* ── Print header ── */
       .print-header { display:block !important; text-align:center; margin-bottom:14px; padding-bottom:10px; border-bottom:2px solid #000; }
+      .employee-print-header h2 { display:flex; align-items:center; justify-content:center; gap:8px; }
+      .employee-print-header .report-logo { width:42px; height:42px; object-fit:contain; }
       .print-header h2 { font-size:14pt !important; font-weight:bold; color:#000 !important; margin-bottom:3px; }
       .print-header p  { font-size:9pt !important; color:#333 !important; }
 
@@ -772,6 +774,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
 
     /* Print-only header (screen: hidden) */
     .print-header { display:none; text-align:center; margin-bottom:20px; padding-bottom:12px; border-bottom:2px solid #e2e8f0; }
+    .employee-print-header h2 { display:flex; align-items:center; justify-content:center; gap:8px; }
+    .employee-print-header .report-logo { width:42px; height:42px; object-fit:contain; }
     .print-header h2 { font-family:'Playfair Display',serif; font-size:1.3rem; color:#1e293b; margin-bottom:4px; }
     .print-header p  { font-size:0.80rem; color:#64748b; }
 
@@ -833,6 +837,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     <a class="nav-item" href="leave_requests.php"><div class="nav-icon">📋</div>Leave Requests</a>
     <a class="nav-item" href="leave_types.php"><div class="nav-icon">📁</div>Leave Types</a>
     <a class="nav-item" href="leave_balances.php"><div class="nav-icon">⚖️</div>Leave Balances</a>
+    <a class="nav-item" href="holidays.php"><div class="nav-icon">📅</div>Holidays</a>
     <div class="nav-label">Documents</div>
     <a class="nav-item" href="documents.php"><div class="nav-icon">📄</div>HR Documents</a>
     <a class="nav-item" href="pds_saln.php"><div class="nav-icon">🆔</div>PDS &amp; SALN</a>
@@ -1033,8 +1038,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
          SECTION 2: EMPLOYEE ROSTER
     ══════════════════════════════════════════ -->
     <div class="report-section" id="employeeSection">
-      <div class="print-header">
-        <h2>LGU Enrile — Employee Roster</h2>
+      <div class="print-header employee-print-header">
+        <h2><img src="../images/Enrile.png" alt="LGU Enrile logo" class="report-logo">LGU Enrile — Employee Roster</h2>
         <p id="empPrintMeta">Generated: <?= date('F j, Y g:i A') ?></p>
       </div>
 

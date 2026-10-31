@@ -40,21 +40,10 @@ try {
     $doc = $stmt->fetch(PDO::FETCH_ASSOC);
     if (!$doc) { http_response_code(404); exit('Document not found or access denied'); }
 
-    // Build absolute path — handle multiple stored path formats
-    $storedPath = $doc['file_path'];
-    // Try direct realpath first
-    $absPath = realpath(__DIR__ . '/' . $storedPath);
-    // If that fails, try stripping leading ../ and resolving from project root
-    if (!$absPath || !file_exists($absPath)) {
-        $clean   = ltrim(str_replace(['../', './'], '', $storedPath), '/');
-        $absPath = realpath(__DIR__ . '/../' . $clean);
-    }
-    // Last resort: try from __DIR__ directly
-    if (!$absPath || !file_exists($absPath)) {
-        $absPath = realpath(dirname(__DIR__) . '/' . ltrim($storedPath, '/'));
-    }
-
-    if (!$absPath || !file_exists($absPath)) {
+    $uploadDir = realpath(dirname(__DIR__) . '/uploads/documents');
+    $filename = basename((string)$doc['file_path']);
+    $absPath = $uploadDir ? realpath($uploadDir . DIRECTORY_SEPARATOR . $filename) : false;
+    if (!$uploadDir || !$absPath || !is_file($absPath) || !str_starts_with($absPath, $uploadDir . DIRECTORY_SEPARATOR)) {
         http_response_code(404); exit('File not found on server');
     }
 

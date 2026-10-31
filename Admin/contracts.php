@@ -433,6 +433,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
       <a class="nav-item" href="leave_requests.php"><div class="nav-icon">📋</div>Leave Requests</a>
       <a class="nav-item" href="leave_types.php"><div class="nav-icon">📁</div>Leave Types</a>
       <a class="nav-item" href="leave_balances.php"><div class="nav-icon">⚖️</div>Leave Balances</a>
+      <a class="nav-item" href="holidays.php"><div class="nav-icon">📅</div>Holidays</a>
       <div class="nav-label">Documents</div>
       <a class="nav-item" href="documents.php"><div class="nav-icon">📄</div>HR Documents</a>
       <a class="nav-item" href="pds_saln.php"><div class="nav-icon">🆔</div>PDS &amp; SALN</a>

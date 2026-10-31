@@ -54,16 +54,17 @@ if (isset($pdo)) {
             "SELECT COUNT(*) FROM employees WHERE employment_status='Active'"
         )->fetchColumn();
 
-        // Pending leave requests count
+        // Pending leave requests count (includes requests awaiting HR/Admin action)
         $pendingLeave = (int)$pdo->query(
-            "SELECT COUNT(*) FROM leave_requests WHERE status='Pending'"
+            "SELECT COUNT(*) FROM leave_requests WHERE status IN ('Pending','Pending HR')"
         )->fetchColumn();
 
-        // Approved leaves this month (by date_from)
+        // Approved leaves this month (by when they were approved, not the leave dates)
         $approvedLeave = (int)$pdo->query(
             "SELECT COUNT(*) FROM leave_requests
              WHERE status='Approved'
-               AND MONTH(date_from)=MONTH(NOW()) AND YEAR(date_from)=YEAR(NOW())"
+               AND MONTH(COALESCE(reviewed_at, updated_at))=MONTH(NOW())
+               AND YEAR(COALESCE(reviewed_at, updated_at))=YEAR(NOW())"
         )->fetchColumn();
 
         // Employees currently on leave today
@@ -84,7 +85,7 @@ if (isset($pdo)) {
             JOIN employees   e  ON lr.employee_id   = e.employee_id
             JOIN leave_types lt ON lr.leave_type_id = lt.leave_type_id
             LEFT JOIN departments d ON d.department_id = e.department_id
-            WHERE lr.status = 'Pending'
+            WHERE lr.status IN ('Pending','Pending HR')
             ORDER BY lr.filed_at DESC
             LIMIT 10
         ")->fetchAll(PDO::FETCH_ASSOC);
@@ -858,9 +859,15 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
 
     /* LEAVE TYPE MINI CHART */
     .mini-chart-wrap { padding: 20px 24px; }
+    .leave-type-summary { display: grid; grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1.2fr); align-items: center; gap: 20px; margin-bottom: 20px; }
+    .leave-type-donut { position: relative; height: 280px; }
+    .leave-type-legend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 20px; align-content: center; }
+    .leave-type-legend-item { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--gray-600); font-size: 0.75rem; font-weight: 600; }
+    .leave-type-legend-dot { width: 8px; height: 14px; border-radius: 999px; flex-shrink: 0; }
+    .leave-type-legend-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .leave-type-bars { display: flex; flex-direction: column; gap: 12px; }
     .lbar-row { display: flex; align-items: center; gap: 10px; }
-    .lbar-label { font-size: 0.75rem; font-weight: 700; color: var(--gray-600); width: 80px; flex-shrink: 0; }
+    .lbar-label { font-size: 0.75rem; font-weight: 700; color: var(--gray-600); width: 150px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .lbar-track { flex: 1; height: 8px; background: var(--gray-100); border-radius: 20px; overflow: hidden; }
     .lbar-fill { height: 100%; border-radius: 20px; transition: width 1s ease; }
     .lbar-count { font-size: 0.75rem; font-weight: 800; color: var(--gray-800); width: 24px; text-align: right; flex-shrink: 0; }
@@ -905,6 +912,10 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     }
     @media(max-width: 480px) {
       .cards-grid { grid-template-columns: 1fr; }
+      .leave-type-summary { grid-template-columns: 1fr; }
+      .leave-type-donut { height: 240px; }
+      .leave-type-legend { grid-template-columns: 1fr; }
+      .lbar-label { width: 104px; }
     }
 
     .tb-profile-wrap{position:relative;display:inline-block;}
@@ -946,6 +957,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     <a class="nav-item" href="leave_requests.php"><div class="nav-icon">📋</div>Leave Requests</a>
     <a class="nav-item" href="leave_types.php"><div class="nav-icon">📁</div>Leave Types</a>
     <a class="nav-item" href="leave_balances.php"><div class="nav-icon">⚖️</div>Leave Balances</a>
+    <a class="nav-item" href="holidays.php"><div class="nav-icon">📅</div>Holidays</a>
     <div class="nav-label">Documents</div>
     <a class="nav-item" href="documents.php"><div class="nav-icon">📄</div>HR Documents</a>
       <a class="nav-item" href="pds_saln.php"><div class="nav-icon">🪪</div>PDS & SALN</a>
@@ -1216,8 +1228,9 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
             <a class="panel-action" href="leave_types.php">Manage →</a>
           </div>
           <div class="mini-chart-wrap">
-            <div style="margin-bottom:16px;">
-             <div style="position:relative;height:280px;"><canvas id="donutChart"></canvas></div>
+            <div class="leave-type-summary">
+             <div class="leave-type-donut"><canvas id="donutChart"></canvas></div>
+             <div class="leave-type-legend" id="leaveTypeLegend" aria-label="Leave type legend"></div>
             </div>
 <div class="leave-type-bars">
               <?php
@@ -1238,9 +1251,8 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
                   foreach (array_slice($leaveByType, 0, 6) as $i => $lt) {
                     $pct   = round(($lt['total'] / $maxLeaveCount) * 100);
                     $color = $barColors[$i % count($barColors)];
-                    $short = mb_strlen($lt['name']) > 10 ? mb_substr($lt['name'], 0, 10).'…' : $lt['name'];
                     echo '<div class="lbar-row">'
-                       . '<div class="lbar-label" title="' . htmlspecialchars($lt['name']) . '">' . htmlspecialchars($short) . '</div>'
+                        . '<div class="lbar-label" title="' . htmlspecialchars($lt['name']) . '">' . htmlspecialchars($lt['name']) . '</div>'
                        . '<div class="lbar-track"><div class="lbar-fill" style="width:' . $pct . '%;background:' . $color . ';"></div></div>'
                        . '<div class="lbar-count">' . (int)$lt['total'] . '</div>'
                        . '</div>';
@@ -1511,14 +1523,14 @@ function toggleSidebar() {
 
     // Leave type donut chart
     const ctx2 = document.getElementById('donutChart').getContext('2d');
+    const leaveTypeColors = ['#3b82f6','#f59e0b','#ef4444','#a855f7','#22c55e','#06b6d4','#ec4899','#f97316'];
+    const leaveTypeData = <?= json_encode(array_values($leaveByType)) ?>;
     new Chart(ctx2, {
       type: 'doughnut',
       data: (function() {
-        var ltData = <?= json_encode(array_values($leaveByType)) ?>;
-        var colors = ['#3b82f6','#f59e0b','#ef4444','#a855f7','#22c55e','#06b6d4','#ec4899','#f97316'];
-        var labels = ltData.map(function(r){ return r.name; });
-        var values = ltData.map(function(r){ return parseInt(r.total)||0; });
-        var bgs    = labels.map(function(_,i){ return colors[i % colors.length]; });
+        var labels = leaveTypeData.map(function(r){ return r.name; });
+        var values = leaveTypeData.map(function(r){ return parseInt(r.total)||0; });
+        var bgs    = labels.map(function(_,i){ return leaveTypeColors[i % leaveTypeColors.length]; });
         if (!values.some(function(v){ return v > 0; })) {
           labels = ['No data yet']; values = [1]; bgs = ['#e2e8f0'];
         }
@@ -1528,10 +1540,25 @@ function toggleSidebar() {
         responsive: true, cutout: '68%',
         maintainAspectRatio: false,
         plugins: {
-          legend: { position:'right', labels:{ font:{family:'Nunito',size:11}, usePointStyle:true, pointStyleWidth:8 } },
+          legend: { display: false },
           tooltip: { titleFont:{family:'Nunito'}, bodyFont:{family:'Nunito'} }
         }
       }
+    });
+
+    const leaveTypeLegend = document.getElementById('leaveTypeLegend');
+    leaveTypeData.forEach(function(type, index) {
+      const item = document.createElement('div');
+      item.className = 'leave-type-legend-item';
+      item.title = type.name;
+      const dot = document.createElement('span');
+      dot.className = 'leave-type-legend-dot';
+      dot.style.backgroundColor = leaveTypeColors[index % leaveTypeColors.length];
+      const label = document.createElement('span');
+      label.className = 'leave-type-legend-label';
+      label.textContent = type.name;
+      item.append(dot, label);
+      leaveTypeLegend.appendChild(item);
     });
 
     // Leave approve / deny

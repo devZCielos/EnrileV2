@@ -243,8 +243,12 @@ if ($action) {
                     echo json_encode(['success' => false, 'message' => 'Invalid request.']);
                     break;
                 }
-                $pdo->prepare("UPDATE announcements SET status = ? WHERE announcement_id = ?")
-                    ->execute([$status, $id]);
+                $stmt = $pdo->prepare("UPDATE announcements SET status = ? WHERE announcement_id = ?");
+                $stmt->execute([$status, $id]);
+                if ($stmt->rowCount() === 0) {
+                  echo json_encode(['success' => false, 'message' => 'Announcement not found or status is unchanged.']);
+                  break;
+                }
                 echo json_encode(['success' => true, 'message' => 'Status updated to ' . $status . '.']);
                 break;
 
@@ -256,9 +260,15 @@ if ($action) {
                 }
                 $id = (int)($_POST['id'] ?? 0);
                 if (!$id) { echo json_encode(['success' => false, 'message' => 'Invalid ID.']); break; }
-                $pdo->prepare("UPDATE announcements SET pinned = NOT pinned WHERE announcement_id = ?")
-                    ->execute([$id]);
-                $pinned = (int)$pdo->query("SELECT pinned FROM announcements WHERE announcement_id = $id")->fetchColumn();
+                $update = $pdo->prepare("UPDATE announcements SET pinned = NOT pinned WHERE announcement_id = ?");
+                $update->execute([$id]);
+                if ($update->rowCount() === 0) {
+                  echo json_encode(['success' => false, 'message' => 'Announcement not found.']);
+                  break;
+                }
+                $pinnedStmt = $pdo->prepare("SELECT pinned FROM announcements WHERE announcement_id = ?");
+                $pinnedStmt->execute([$id]);
+                $pinned = (int)$pinnedStmt->fetchColumn();
                 echo json_encode(['success' => true, 'pinned' => $pinned, 'message' => $pinned ? 'Pinned.' : 'Unpinned.']);
                 break;
 
@@ -266,7 +276,12 @@ if ($action) {
             case 'delete':
                 $id = (int)($_POST['id'] ?? 0);
                 if (!$id) { echo json_encode(['success' => false, 'message' => 'Invalid ID.']); break; }
-                $pdo->prepare("DELETE FROM announcements WHERE announcement_id = ?")->execute([$id]);
+                $stmt = $pdo->prepare("DELETE FROM announcements WHERE announcement_id = ?");
+                $stmt->execute([$id]);
+                if ($stmt->rowCount() === 0) {
+                  echo json_encode(['success' => false, 'message' => 'Announcement not found.']);
+                  break;
+                }
                 echo json_encode(['success' => true, 'message' => 'Announcement deleted.']);
                 break;
 
@@ -637,6 +652,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     <a class="nav-item" href="leave_requests.php"><div class="nav-icon">📋</div>Leave Requests</a>
     <a class="nav-item" href="leave_types.php"><div class="nav-icon">📁</div>Leave Types</a>
     <a class="nav-item" href="leave_balances.php"><div class="nav-icon">⚖️</div>Leave Balances</a>
+    <a class="nav-item" href="holidays.php"><div class="nav-icon">📅</div>Holidays</a>
     <div class="nav-label">Documents</div>
     <a class="nav-item" href="documents.php"><div class="nav-icon">📄</div>HR Documents</a>
     <a class="nav-item" href="pds_saln.php"><div class="nav-icon">🆔</div>PDS &amp; SALN</a>

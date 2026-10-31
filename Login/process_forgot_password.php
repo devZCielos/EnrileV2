@@ -46,12 +46,11 @@ try {
     if ($user) {
 
         // M-3 — Rate-limit: one reset request per 5 minutes per account
-        $lastReset = $pdo->prepare('SELECT reset_expires FROM user_accounts WHERE user_id = ?');
+        $lastReset = $pdo->prepare('SELECT reset_requested_at FROM user_accounts WHERE user_id = ?');
         $lastReset->execute([$user['user_id']]);
-        $currentExpiry = $lastReset->fetchColumn();
-        if ($currentExpiry) {
-            $issuedAt = strtotime($currentExpiry) - 3600; // token was set for 1 hour; issued_at = expiry - 3600
-            if ((time() - $issuedAt) < 300) { // less than 5 minutes ago
+        $lastRequestedAt = $lastReset->fetchColumn();
+        if ($lastRequestedAt) {
+            if ((time() - strtotime($lastRequestedAt)) < 300) {
                 // Silently skip — don’t reveal rate-limit to prevent enumeration
                 error_log('[HRMS] Reset rate-limited for user_id=' . $user['user_id']);
                 // Fall through to show same success message
@@ -70,7 +69,8 @@ try {
         $pdo->prepare("
             UPDATE user_accounts
             SET    reset_token   = ?,
-                   reset_expires = ?
+                     reset_expires = ?,
+                     reset_requested_at = NOW()
             WHERE  user_id = ?
         ")->execute([$hashToken, $expiresAt, $user['user_id']]);
 

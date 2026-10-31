@@ -161,6 +161,10 @@ try {
     echo "  ID: $newId\n";
     echo "  Title: $testTitle\n";
     echo "  Body: $testBody\n";
+
+    $cleanup = $pdo->prepare('DELETE FROM announcements WHERE announcement_id = ?');
+    $cleanup->execute([$newId]);
+    echo "  ✓ Test announcement cleaned up\n";
     
 } catch (Exception $e) {
     echo "  ✗ ERROR: " . $e->getMessage() . "\n";

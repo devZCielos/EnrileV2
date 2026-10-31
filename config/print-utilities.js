@@ -65,6 +65,58 @@ function padArray(arr, minLength) {
 }
 
 /**
+ * Removes the paper background from a signature photo so only the ink prints.
+ * Returns a transparent PNG data URL (or the original path on failure).
+ */
+async function scanSignatureForPrint(signaturePath) {
+  const cleanPath = (signaturePath || '').trim();
+  if (!cleanPath) return '';
+  try {
+    return await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          const w = canvas.width = img.naturalWidth || img.width;
+          const h = canvas.height = img.naturalHeight || img.height;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          ctx.drawImage(img, 0, 0);
+          const frame = ctx.getImageData(0, 0, w, h);
+          const px = frame.data;
+          const samples = [[0,0],[w-1,0],[0,h-1],[w-1,h-1],[Math.floor(w/2),0],[Math.floor(w/2),h-1],[0,Math.floor(h/2)],[w-1,Math.floor(h/2)]];
+          let bgR = 0, bgG = 0, bgB = 0;
+          samples.forEach(([sx, sy]) => { const si = (sy * w + sx) * 4; bgR += px[si]; bgG += px[si+1]; bgB += px[si+2]; });
+          bgR = Math.round(bgR / samples.length); bgG = Math.round(bgG / samples.length); bgB = Math.round(bgB / samples.length);
+          for (let i = 0; i < px.length; i += 4) {
+            const r = px[i], g = px[i+1], b = px[i+2], a = px[i+3];
+            if (a === 0) continue;
+            const saturation = Math.max(r, g, b) - Math.min(r, g, b);
+            const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+            const deltaBg = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
+            if (deltaBg < 52 && saturation < 42 && lum > 135) { px[i+3] = 0; continue; }
+            const ink = Math.max(0, Math.min(255, Math.round((232 - lum) * 1.9 + Math.max(0, deltaBg - 14) * 2.8)));
+            if (ink < 20) { px[i+3] = 0; continue; }
+            px[i+3] = Math.max(a, Math.min(255, ink + 18));
+          }
+          ctx.putImageData(frame, 0, 0);
+          resolve(canvas.toDataURL('image/png'));
+        } catch (e) { reject(e); }
+      };
+      img.onerror = () => reject(new Error('Failed to load signature image.'));
+      img.src = new URL(cleanPath, document.baseURI).href;
+    });
+  } catch (e) {
+    return cleanPath;
+  }
+}
+
+/** Returns a copy of empRow whose signature_file_path is the background-removed PNG. */
+async function withScannedSignature(empRow) {
+  if (!empRow || !empRow.signature_file_path) return empRow;
+  return Object.assign({}, empRow, { signature_file_path: await scanSignatureForPrint(empRow.signature_file_path) });
+}
+
+/**
  * Build PDS Print HTML — CS Form 212 (Revised 2025)
  */
 // ============================================================
@@ -129,6 +181,13 @@ function buildPDSPrintHTML(d, empRow, opts) {
   const eduMap = {};
   (Array.isArray(ed) ? ed : []).forEach(e => { if (e.level) eduMap[e.level] = e; });
   const edu = lvl => eduMap[lvl] || {};
+
+  // employee signature + date the PDS was last saved, printed on every page
+  const sigPath = v(empRow && empRow.signature_file_path).trim();
+  let sigSrc = '';
+  if (sigPath) { try { sigSrc = new URL(sigPath, document.baseURI).href; } catch(e) { sigSrc = sigPath; } }
+  const sigImg = (h) => sigSrc ? `<img src="${esc(sigSrc)}" style="height:${h};max-width:none;display:block;margin:-14pt auto;object-fit:contain;position:relative;z-index:2;">` : '&nbsp;';
+  const savedDate = fmtD((d.updated_at || d.created_at || '').toString().replace(' ', 'T'));
 
   // derived address strings
   const resAddr  = [pi.res_housenum,pi.res_street,pi.res_subdivision,pi.res_barangay,pi.res_city,pi.res_province].filter(Boolean).join(', ');
@@ -216,9 +275,11 @@ function buildPDSPrintHTML(d, empRow, opts) {
       : { housenum:pi.perm_housenum, street:pi.perm_street, subdivision:pi.perm_subdivision,
           barangay:pi.perm_barangay, city:pi.perm_city, province:pi.perm_province, zip:pi.perm_zip };
 
-    const EDU_LEVELS = ['Elementary','Secondary','Vocational/Trade Course','College','Graduate Studies','Graduate Studies'];
+    const gradList = (Array.isArray(ed) ? ed : []).filter(x => x.level === 'Graduate Studies');
+    const EDU_LEVELS = ['Elementary','Secondary','Vocational/Trade Course','College'];
+    for (let g = 0; g < Math.max(1, gradList.length); g++) EDU_LEVELS.push('Graduate Studies');
     const eduRows = EDU_LEVELS.map((lvl, idx) => {
-      const e = idx === 5 ? (eduMap['Graduate Studies 2'] || {}) : edu(lvl);
+      const e = lvl === 'Graduate Studies' ? (gradList[idx - 4] || {}) : edu(lvl);
       const displayLvl = lvl === 'Graduate Studies' ? `GRADUATE<br>STUDIES` :
                          lvl === 'Vocational/Trade Course' ? `VOCATIONAL /<br>TRADE COURSE` :
                          lvl.toUpperCase();
@@ -594,9 +655,9 @@ function buildPDSPrintHTML(d, empRow, opts) {
 <table style="margin-top:1pt;">
   <tr>
     <td class="all" style="width:15%;text-align:center;padding:4pt 2pt;font-size:7pt;font-weight:700;">SIGNATURE</td>
-    <td class="all" style="width:35%;">&nbsp;</td>
+    <td class="all" style="width:35%;height:20pt;padding:1pt 2pt;overflow:visible;">${sigImg('44pt')}</td>
     <td class="all" style="width:15%;text-align:center;padding:4pt 2pt;font-size:7pt;font-weight:700;">DATE</td>
-    <td class="all" style="width:35%;">&nbsp;</td>
+    <td class="all" style="width:35%;text-align:center;font-size:7pt;font-weight:700;">${savedDate}&nbsp;</td>
   </tr>
 </table>
 <div class="pg-foot">CS FORM 212 (Revised 2025), Page 1 of 4</div>
@@ -674,9 +735,9 @@ function buildPDSPrintHTML(d, empRow, opts) {
 <table style="margin-top:2pt;">
   <tr>
     <td class="all" style="width:15%;text-align:center;padding:4pt 2pt;font-size:7pt;font-weight:700;">SIGNATURE</td>
-    <td class="all" style="width:35%;">&nbsp;</td>
+    <td class="all" style="width:35%;height:20pt;padding:1pt 2pt;overflow:visible;">${sigImg('44pt')}</td>
     <td class="all" style="width:15%;text-align:center;padding:4pt 2pt;font-size:7pt;font-weight:700;">DATE</td>
-    <td class="all" style="width:35%;">&nbsp;</td>
+    <td class="all" style="width:35%;text-align:center;font-size:7pt;font-weight:700;">${savedDate}&nbsp;</td>
   </tr>
 </table>
 <div class="pg-foot">CS FORM 212 (Revised 2025), Page 2 of 4</div>
@@ -769,9 +830,9 @@ function buildPDSPrintHTML(d, empRow, opts) {
 <table style="margin-top:2pt;">
   <tr>
     <td class="all" style="width:15%;text-align:center;padding:4pt 2pt;font-size:7pt;font-weight:700;">SIGNATURE</td>
-    <td class="all" style="width:35%;">&nbsp;</td>
+    <td class="all" style="width:35%;height:20pt;padding:1pt 2pt;overflow:visible;">${sigImg('44pt')}</td>
     <td class="all" style="width:15%;text-align:center;padding:4pt 2pt;font-size:7pt;font-weight:700;">DATE</td>
-    <td class="all" style="width:35%;">&nbsp;</td>
+    <td class="all" style="width:35%;text-align:center;font-size:7pt;font-weight:700;">${savedDate}&nbsp;</td>
   </tr>
 </table>
 <div class="pg-foot">CS FORM 212 (Revised 2025), Page 3 of 4</div>
@@ -996,8 +1057,8 @@ function buildPDSPrintHTML(d, empRow, opts) {
     <td style="width:30%;vertical-align:top;padding:0 0 0 4pt;">
       <table style="width:100%;border-collapse:collapse;border:1pt solid #000;">
         <tr>
-          <td style="height:60pt;padding:4pt;vertical-align:top;border-bottom:0.5pt solid #000;">
-            &nbsp;
+          <td style="height:60pt;padding:4pt;vertical-align:middle;overflow:visible;border-bottom:0.5pt solid #000;">
+            ${sigImg('80pt')}
           </td>
         </tr>
         <tr>
@@ -1013,7 +1074,7 @@ function buildPDSPrintHTML(d, empRow, opts) {
         <tr>
           <td style="padding:3pt 4pt;text-align:center;background:#f0f0f0;">
             <div style="font-size:6.5pt;">Date Accomplished</div>
-            <div style="font-weight:700;font-size:7pt;margin-top:2pt;">${pi.date_accomplished ? fmtD(pi.date_accomplished) : ''}</div>
+            <div style="font-weight:700;font-size:7pt;margin-top:2pt;">${savedDate || (pi.date_accomplished ? fmtD(pi.date_accomplished) : '')}</div>
           </td>
         </tr>
       </table>

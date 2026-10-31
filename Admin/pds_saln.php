@@ -368,6 +368,7 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
     <a class="nav-item" href="leave_requests.php"><div class="nav-icon">📋</div>Leave Requests</a>
     <a class="nav-item" href="leave_types.php"><div class="nav-icon">📁</div>Leave Types</a>
     <a class="nav-item" href="leave_balances.php"><div class="nav-icon">⚖️</div>Leave Balances</a>
+    <a class="nav-item" href="holidays.php"><div class="nav-icon">📅</div>Holidays</a>
     <div class="nav-label">Documents</div>
     <a class="nav-item" href="documents.php"><div class="nav-icon">📄</div>HR Documents</a>
     <a class="nav-item active" href="pds_saln.php"><div class="nav-icon">🪪</div>PDS & SALN</a>
@@ -490,9 +491,16 @@ if (!function_exists('timeAgo')){function timeAgo($dt){if(!$dt)return '';$d=time
 
           <!-- SALN View -->
           <div id="paneSaln" style="display:none;">
-            <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
-              <span style="font-size:.80rem;font-weight:700;color:var(--gray-600);">Filing Year:</span>
-              <div class="year-tabs" id="salnYearTabs"></div>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;justify-content:space-between;">
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <span style="font-size:.80rem;font-weight:700;color:var(--gray-600);">Filing Year:</span>
+                <div class="year-tabs" id="salnYearTabs"></div>
+              </div>
+              <div class="saln-annex-tabs" id="salnAnnexTabs" style="margin:0;padding:0;position:static;background:transparent;border-bottom:none;">
+                <button class="saln-annex-tab active" data-annex="a" onclick="adminSalnShowAnnex('a')">Annex A</button>
+                <button class="saln-annex-tab" data-annex="as1" onclick="adminSalnShowAnnex('as1')">Annex B</button>
+                <button class="saln-annex-tab" data-annex="as2" onclick="adminSalnShowAnnex('as2')">Annex C</button>
+              </div>
             </div>
             <div id="salnContent"></div>
           </div>
@@ -523,6 +531,7 @@ function roYN(val){ return val==='Yes'||val===true||val===1||val==='1'?'<span cl
 let currentEmpId = null;
 let currentTab   = 'pds';
 let currentSalnYear = null;
+let currentSalnAnnex = 'a';
 let empPage = 1;
 
 // ── Load departments ───────────────────────────────────────
@@ -595,12 +604,13 @@ function switchTab(tab){
 }
 
 function adminSalnShowAnnex(which){
+  currentSalnAnnex = which;
   const paneIds = { a: 'admin_saln_annex_a', as1: 'admin_saln_annex_as1', as2: 'admin_saln_annex_as2' };
   Object.keys(paneIds).forEach((k)=>{
     const pane = document.getElementById(paneIds[k]);
     if (pane) pane.classList.toggle('active', k === which);
   });
-  document.querySelectorAll('#salnContent .saln-annex-tab').forEach((btn)=>{
+  document.querySelectorAll('#salnAnnexTabs .saln-annex-tab').forEach((btn)=>{
     btn.classList.toggle('active', btn.getAttribute('data-annex') === which);
   });
 }
@@ -852,7 +862,11 @@ async function loadSALNView(year){
     <div style="font-size:.82rem;font-weight:700;margin-top:4px;">Filing Year: ${v(d.saln_year)}</div>
   </div>`;
 
-  // Removed SALN annex tab bar for admin side
+  // Annex A/B/C tab bar lives in the Filing Year row (static markup); just reset its state.
+  currentSalnAnnex = 'a';
+  document.querySelectorAll('#salnAnnexTabs .saln-annex-tab').forEach((btn)=>{
+    btn.classList.toggle('active', btn.getAttribute('data-annex') === 'a');
+  });
 
   html += `<div class="saln-annex-pane active" id="admin_saln_annex_a" style="padding:0 12px 10px;">`;
 
@@ -1011,13 +1025,63 @@ function printForm(){
         if(!j.data){ showToast('No PDS data found.','error'); return; }
         printPDS(j.data, j.employee);
       });
+  } else if (currentSalnAnnex === 'as1' || currentSalnAnnex === 'as2') {
+    printSalnAnnexSheet(currentSalnAnnex);
   } else {
     fetch('pds_saln.php?action=get_saln&employee_id='+currentEmpId+'&year='+(currentSalnYear||''))
       .then(r=>r.json()).then(j=>{
         if(!j.success||!j.data){ showToast('No SALN data to print.','error'); return; }
-        buildSALNPrint(j.data, j.employee);
+        buildSALNPrintHTML(j.data, j.employee, true);
       });
   }
+}
+
+// Opens a standalone print window for one AS-1 (Annex B) / AS-2 (Annex C) sheet.
+function printSalnAnnexSheet(prefix){
+  if(!currentEmpId){ showToast('Select an employee first.','error'); return; }
+  fetch('pds_saln.php?action=get_saln&employee_id='+currentEmpId+'&year='+(currentSalnYear||''))
+    .then(r=>r.json()).then(j=>{
+      if(!j.success||!j.data){ showToast('No SALN data to print.','error'); return; }
+      const d   = j.data;
+      const dec = sj(d.declarant_info) || {};
+      const sp  = sj(d.spouse_info)    || {};
+      const real = sj(d[prefix+'_real_properties'])     || [];
+      const pers = sj(d[prefix+'_personal_properties']) || [];
+      const liab = sj(d[prefix+'_liabilities'])          || [];
+      const biz  = sj(d[prefix+'_biz_interests'])        || [];
+
+      const realSubtotal     = (d[prefix+'_real_subtotal'] !== '' && d[prefix+'_real_subtotal'] != null) ? nVal(d[prefix+'_real_subtotal']) : real.reduce((sum,p)=>sum+(nVal(p.market_value)||nVal(p.assessed_value)),0);
+      const personalSubtotal = (d[prefix+'_personal_subtotal'] !== '' && d[prefix+'_personal_subtotal'] != null) ? nVal(d[prefix+'_personal_subtotal']) : pers.reduce((sum,p)=>sum+nVal(p.acq_cost),0);
+      const totalAssets      = (d[prefix+'_total_assets'] !== '' && d[prefix+'_total_assets'] != null) ? nVal(d[prefix+'_total_assets']) : realSubtotal+personalSubtotal;
+      const totalLiabilities = (d[prefix+'_total_liabilities'] !== '' && d[prefix+'_total_liabilities'] != null) ? nVal(d[prefix+'_total_liabilities']) : liab.reduce((sum,l)=>sum+nVal(l.balance),0);
+
+      let title, refText, note, nameHtml, position, agency;
+      if (prefix === 'as1') {
+        title    = 'Sworn Statement of Assets, Liabilities and Net Worth';
+        refText  = 'SALN Form AS-1 (Declarant)<br>Per CSC Resolution No. 2500632<br>Promulgated on 25 June 2025';
+        note     = '(Additional sheet/s for the declarant)';
+        nameHtml = buildNameTable(dec.lastname, dec.firstname, dec.mi);
+        position = dec.position; agency = dec.agency;
+      } else {
+        const as2Nm = sj(d.as2_name_info) || {};
+        const last  = as2Nm.lastname || sp.lastname || (as2Nm.full_name || '');
+        title    = 'Statement of Assets, Liabilities and Net Worth';
+        refText  = '2025 SALN Form AS-2 (Spouse &amp; Children)<br>Per CSC Resolution No. 2500632<br>Promulgated on 25 June 2025';
+        note     = '(Additional sheet/s for the exclusive properties of the declarant\'s spouse and unmarried children<br>below eighteen (18) years of age living in declarant\'s household)';
+        nameHtml = buildNameTable(last, as2Nm.firstname || sp.firstname, as2Nm.mi || sp.mi);
+        position = as2Nm.position || sp.position; agency = as2Nm.agency || sp.agency;
+      }
+
+      const body = buildAnnexSection(title, refText, note, nameHtml, position, agency, real, pers, liab, biz, realSubtotal, personalSubtotal, totalAssets, totalLiabilities, true);
+      const empName = (j.employee && (j.employee.first_name || j.employee.last_name)) ? `${j.employee.first_name||''} ${j.employee.last_name||''}`.trim() : 'Employee';
+      const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>SALN ${prefix==='as1'?'Annex B':'Annex C'} — ${empName}</title><style>${sharedCss}</style></head><body>${body}</body></html>`;
+
+      const w = window.open('','_blank','width=900,height=1100');
+      w.document.write(html);
+      w.document.close();
+      w.focus();
+      setTimeout(()=>w.print(), 600);
+    });
 }
 
 function viewForm(){
@@ -1105,195 +1169,78 @@ function viewForm(){
   w.document.close();
 }
 
-function buildSALNPrint(d, emp){
-  const content = document.getElementById('salnContent') ? document.getElementById('salnContent').innerHTML : '';
-  if(!content){ showToast('No SALN content to print.','error'); return; }
-  const empName = document.getElementById('viewEmpName') ? document.getElementById('viewEmpName').textContent : 'Employee';
-  const title = `SALN ${currentSalnYear||''} - ${empName}`;
-  const w = window.open('','_blank','width=1080,height=860');
-  w.document.write(`<!DOCTYPE html><html><head>
-    <meta charset="UTF-8"/>
-    <title>${title}</title>
-    <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet"/>
-    <style>
-      body{font-family:'Nunito',sans-serif;background:#fff;color:#111;padding:18px;}
-      @page{size:A4 portrait;margin:10mm;}
-      table{border-collapse:collapse;width:100%;}
-      .no-print{position:sticky;top:0;background:#fff;padding-bottom:8px;margin-bottom:8px;}
-      @media print{.no-print{display:none;}.saln-annex-tabs{display:none !important;}}
-    </style>
-  </head><body>
-    <div class="no-print"><button onclick="window.print()" style="padding:8px 14px;border:none;background:#1e40af;color:#fff;border-radius:8px;cursor:pointer;">Print</button> <button onclick="window.close()" style="padding:8px 14px;border:none;background:#e2e8f0;color:#111;border-radius:8px;cursor:pointer;">Close</button></div>
-    ${content}
-  </body></html>`);
-  w.document.close();
-}
+// ── SALN print helpers shared by the combined print and per-annex print ──
+const sj   = s => { try{ return s?JSON.parse(s):null; }catch(e){return null;} };
+const v    = x => (x===null||x===undefined||x===''||x==='null') ? '' : String(x);
+const fmtD = dt => { if(!dt||dt==='0000-00-00') return ''; try{ const x=new Date(dt); return isNaN(x)?dt:(x.getMonth()+1).toString().padStart(2,'0')+'/'+x.getDate().toString().padStart(2,'0')+'/'+x.getFullYear(); }catch(e){return dt||'';} };
+const fmtM = x => { if(x===''||x===null||x===undefined) return ''; const n=parseFloat(x); return isNaN(n)?'':'₱'+n.toLocaleString('en-PH',{minimumFractionDigits:2}); };
+const nVal = x => {
+  const n = parseFloat(String(x === undefined || x === null ? '' : x).replace(/[^0-9.-]/g, ''));
+  return isNaN(n) ? 0 : n;
+};
+const hasRows = rows => Array.isArray(rows) && rows.some(row => Object.values(row || {}).some(value => String(value ?? '').trim() !== ''));
+const hasAnnexData = (rows, extra = []) => hasRows(rows) || extra.some(value => String(value ?? '').trim() !== '');
+// Pads a data array with blank rows so the printed sheet always shows the full official form.
+const padRows = (arr, min) => { const rows = (arr||[]).slice(); while (rows.length < min) rows.push({}); return rows; };
 
-// ── SALN Print ─────────────────────────────────────────
-function printSALN() {
-  buildSALNPrintHTML({
-    filing_type:  saln_g('saln_filing_type'),
-    filing_mode:  salnRadioGet('saln_filing_mode'),
-    saln_year:    salnCurrentYear,
-    as_of_date:   saln_g('saln_as_of'),
-    multi_spouse: saln_g('saln_multi_spouse'),
-    multi_spouse_na: saln_g('saln_multi_na'),
-    declarant_info:      JSON.stringify({
-      lastname:saln_g('saln_dec_lastname'), firstname:saln_g('saln_dec_firstname'), mi:saln_g('saln_dec_mi'),
-      position:saln_g('saln_dec_position'), agency:saln_g('saln_dec_agency'), office_addr:saln_g('saln_dec_office_addr'),
-    }),
-    spouse_info:         JSON.stringify({
-      lastname:saln_g('saln_sp_lastname'), firstname:saln_g('saln_sp_firstname'), mi:saln_g('saln_sp_mi'),
-      position:saln_g('saln_sp_position'), agency:saln_g('saln_sp_agency'), office_addr:saln_g('saln_sp_office_addr'),
-    }),
-    children_info:       JSON.stringify(collectRows('saln_children_list',  ['name','age'])),
-    real_properties:     JSON.stringify(collectRows('saln_real_list',      ['description','kind','location','assessed_value','market_value','acq_year','acq_mode','acq_cost'])),
-    personal_properties: JSON.stringify(collectRows('saln_personal_list',  ['description','acq_year','acq_cost'])),
-    liabilities:         JSON.stringify(collectRows('saln_liab_list',      ['nature','creditor','balance'])),
-    no_biz:   saln_g('saln_no_biz'),
-    biz_interests:       JSON.stringify(collectRows('saln_biz_list',       ['entity_name','biz_address','nature','date_acquired'])),
-    no_rel:   saln_g('saln_no_rel'),
-    relatives_govt:      JSON.stringify(collectRows('saln_rel_list',       ['name','relationship','position','agency_address'])),
-    real_subtotal:    saln_g('saln_real_subtotal'),
-    personal_subtotal:saln_g('saln_personal_subtotal'),
-    total_assets:     saln_g('saln_total_assets'),
-    total_liabilities:saln_g('saln_total_liab'),
-    net_worth:        saln_g('saln_net_worth'),
-    gov_id:           saln_g('saln_gov_id'),
-    gov_id_no:        saln_g('saln_gov_id_no'),
-    gov_id_issued:    saln_g('saln_gov_id_issued'),
-  }, null, true);
-}
+const sharedCss = `
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:'Arial Narrow',Arial,sans-serif;font-size:7pt;color:#000;background:#fff;}
+  @page{size:8.5in 13in;margin:12mm 14mm 10mm 14mm;}
+  @media print{body{margin:0;} .no-print{display:none;}}
+  table{border-collapse:collapse;width:100%;}
+  .section-title{font-size:8pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;letter-spacing:.03em;}
+  .page-footer{text-align:center;font-size:7.5pt;font-style:italic;margin-top:6pt;}
+  .ref{text-align:right;font-size:6pt;margin-bottom:4pt;line-height:1.6;}
+  .main-title{text-align:center;font-size:10pt;font-weight:700;text-transform:uppercase;letter-spacing:.04em;}
+  .as-of-line{text-align:center;font-size:7pt;margin-top:2pt;}
+  .italic-note{text-align:center;font-size:6pt;font-style:italic;margin:3pt 0 6pt;line-height:1.5;}
+  .double-rule{border-top:2pt double #000;border-bottom:0.5pt solid #000;height:3pt;margin-bottom:6pt;}
+  .assets-title{font-size:8pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;margin-bottom:2pt;}
+  .section-num{font-size:7pt;font-weight:700;margin-bottom:2pt;}
+  .section-sub{font-size:7pt;font-weight:700;margin:4pt 0 2pt;}
+  .col-hd{border:0.5pt solid #000;padding:2pt 3pt;font-size:6pt;font-weight:700;text-align:center;vertical-align:middle;background:#c8c8c8;}
+  .data-row td{border:0.5pt solid #000;padding:1.5pt 3pt;font-size:6.5pt;vertical-align:middle;}
+  .subtotal-row td,.total-row td{border:none;padding:2pt 0;font-size:7pt;font-weight:700;text-align:right;}
+  .footer-area{display:flex;justify-content:space-between;align-items:flex-end;margin-top:12pt;}
+  .page-num{font-size:7.5pt;font-style:italic;}
+  .sig-line{font-size:7pt;font-style:italic;border-top:0.5pt solid #000;padding-top:2pt;min-width:140pt;text-align:center;}
+  .name-row td{border-bottom:0.5pt solid #000;padding:1.5pt 2pt;height:14pt;font-size:7pt;}
+  .name-lbl{font-size:5.5pt;padding-top:1pt;text-align:center;}
+`;
 
-function buildSALNPrintHTML(d, emp, openPrint) {
-  const sj   = s => { try{ return s?JSON.parse(s):null; }catch(e){return null;} };
-  const v    = x => (x===null||x===undefined||x===''||x==='null') ? '' : String(x);
-  const fmtD = dt => { if(!dt||dt==='0000-00-00') return ''; try{ const x=new Date(dt); return isNaN(x)?dt:(x.getMonth()+1).toString().padStart(2,'0')+'/'+x.getDate().toString().padStart(2,'0')+'/'+x.getFullYear(); }catch(e){return dt||'';} };
-  const fmtM = x => { if(x===''||x===null||x===undefined) return ''; const n=parseFloat(x); return isNaN(n)?'':'₱'+n.toLocaleString('en-PH',{minimumFractionDigits:2}); };
-  const padR = (arr,min,fn) => { const n=Math.max(min,(arr||[]).length); let h=''; for(let i=0;i<n;i++) h+=fn((arr||[])[i]||{}); return h; };
-  const cb   = checked => (checked===true||checked==='1'||checked===1||checked==='Yes') ? '☑' : '☐';
+// Renders one AS-1/AS-2 additional sheet; standalone=true omits the leading page-break for single-annex printing.
+const buildAnnexSection = (title, refText, noteHtml, nameHtml, position, agency, real, pers, liab, bizItems, realSubtotalValue, personalSubtotalValue, totalAssetsValue, totalLiabilitiesValue, standalone) => {
+  // Row minimums (4/5/5/3) match the Employee side's official AS-1/AS-2 print layout.
+  const annexRealRows = padRows(real, 4).map(r => `<tr class="data-row">
+    <td style="width:15%;">${v(r.description)}&nbsp;</td>
+    <td style="width:12%;">${v(r.kind)}&nbsp;</td>
+    <td style="width:14%;">${v(r.location)}&nbsp;</td>
+    <td style="width:9%;text-align:right;">${fmtM(r.assessed_value)}&nbsp;</td>
+    <td style="width:10%;text-align:right;">${fmtM(r.market_value)}&nbsp;</td>
+    <td style="width:8%;text-align:center;">${v(r.acq_year)}&nbsp;</td>
+    <td style="width:9%;">${v(r.acq_mode)}&nbsp;</td>
+    <td style="width:9%;text-align:right;">${fmtM(r.acq_cost)}&nbsp;</td>
+  </tr>`).join('');
+  const annexPersRows = padRows(pers, 5).map(r => `<tr class="data-row">
+    <td style="width:62%;">${v(r.description)}&nbsp;</td>
+    <td style="width:18%;text-align:center;">${v(r.acq_year)}&nbsp;</td>
+    <td style="width:20%;text-align:right;">${fmtM(r.acq_cost)}&nbsp;</td>
+  </tr>`).join('');
+  const annexLiabRows = padRows(liab, 5).map(r => `<tr class="data-row">
+    <td style="width:30%;">${v(r.nature)}&nbsp;</td>
+    <td style="width:43%;">${v(r.creditor)}&nbsp;</td>
+    <td style="width:27%;text-align:right;">${fmtM(r.balance)}&nbsp;</td>
+  </tr>`).join('');
+  const annexBizRows = padRows(bizItems, 3).map(r => `<tr class="data-row">
+    <td style="width:27%;">${v(r.entity_name)}&nbsp;</td>
+    <td style="width:23%;">${v(r.biz_address)}&nbsp;</td>
+    <td style="width:29%;">${v(r.nature)}&nbsp;</td>
+    <td style="width:21%;text-align:center;">${fmtD(r.date_acquired)}&nbsp;</td>
+  </tr>`).join('');
 
-  const nVal = x => {
-    const n = parseFloat(String(x === undefined || x === null ? '' : x).replace(/[^0-9.-]/g, ''));
-    return isNaN(n) ? 0 : n;
-  };
-  const hasRows = rows => Array.isArray(rows) && rows.some(row => Object.values(row || {}).some(value => String(value ?? '').trim() !== ''));
-  const hasAnnexData = (rows, extra = []) => hasRows(rows) || extra.some(value => String(value ?? '').trim() !== '');
-  const dec = sj(d.declarant_info)      || {};
-  const sp  = sj(d.spouse_info)         || {};
-  const ch  = sj(d.children_info)       || [];
-  const rp  = sj(d.real_properties)     || [];
-  const pp  = sj(d.personal_properties) || [];
-  const lb  = sj(d.liabilities)         || [];
-  const biz = sj(d.biz_interests)       || [];
-  const rel = sj(d.relatives_govt)      || [];
-  const as1Rp = sj(d.as1_real_properties)     || [];
-  const as1Pp = sj(d.as1_personal_properties) || [];
-  const as1Lb = sj(d.as1_liabilities)         || [];
-  const as1Biz= sj(d.as1_biz_interests)       || [];
-  const as2Nm = sj(d.as2_name_info)           || {};
-  const as2Rp = sj(d.as2_real_properties)     || [];
-  const as2Pp = sj(d.as2_personal_properties) || [];
-  const as2Lb = sj(d.as2_liabilities)         || [];
-  const as2Biz= sj(d.as2_biz_interests)       || [];
-
-  const derivedRealSubtotal = rp.reduce((sum, p) => sum + (nVal(p.market_value) || nVal(p.assessed_value)), 0);
-  const derivedPersonalSubtotal = pp.reduce((sum, p) => sum + nVal(p.acq_cost), 0);
-  const derivedTotalLiabilities = lb.reduce((sum, l) => sum + nVal(l.balance), 0);
-  const realSubtotal = (d.real_subtotal !== '' && d.real_subtotal !== null && d.real_subtotal !== undefined) ? nVal(d.real_subtotal) : derivedRealSubtotal;
-  const personalSubtotal = (d.personal_subtotal !== '' && d.personal_subtotal !== null && d.personal_subtotal !== undefined) ? nVal(d.personal_subtotal) : derivedPersonalSubtotal;
-  const totalAssets = (d.total_assets !== '' && d.total_assets !== null && d.total_assets !== undefined) ? nVal(d.total_assets) : (realSubtotal + personalSubtotal);
-  const totalLiabilities = (d.total_liabilities !== '' && d.total_liabilities !== null && d.total_liabilities !== undefined) ? nVal(d.total_liabilities) : derivedTotalLiabilities;
-  const netWorth = (d.net_worth !== '' && d.net_worth !== null && d.net_worth !== undefined) ? nVal(d.net_worth) : (totalAssets - totalLiabilities);
-
-  const isAssumption = d.filing_type==='Assumption';
-  const isAnnual     = d.filing_type==='Annual';
-  const isExit       = d.filing_type==='Exit';
-  const isJoint      = d.filing_mode==='Joint';
-  const isSeparate   = d.filing_mode==='Separate';
-  const isNA         = !isJoint && !isSeparate;
-
-  const C  = (txt,s) => `<td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:6.5pt;vertical-align:middle;${s||''}">${v(txt)}&nbsp;</td>`;
-  const H  = (txt,s) => `<td style="border:0.5pt solid #000;padding:2pt 3pt;font-size:6pt;font-weight:700;text-align:center;vertical-align:middle;${s||''}">${txt}</td>`;
-
-  const realRows = padR(rp, 4, p => `<tr style="height:18pt;">
-    ${C(p.description,'width:18%;font-size:6.5pt;')}${C(p.kind,'width:12%;')}${C(p.location,'width:16%;')}
-    ${C(fmtM(p.assessed_value),'width:10%;text-align:right;')}${C(fmtM(p.market_value),'width:10%;text-align:right;')}
-    ${C(p.acq_year,'width:8%;text-align:center;')}${C(p.acq_mode,'width:10%;')}${C(fmtM(p.acq_cost),'width:10%;text-align:right;')}
-  </tr>`);
-  const persRows = padR(pp, 6, p => `<tr style="height:16pt;">
-    ${C(p.description,'width:65%;')}${C(p.acq_year,'width:17%;text-align:center;')}${C(fmtM(p.acq_cost),'width:18%;text-align:right;')}
-  </tr>`);
-  const liabRows = padR(lb, 5, l => `<tr style="height:14pt;">
-    ${C(l.nature,'width:34%;')}${C(l.creditor,'width:41%;')}${C(fmtM(l.balance),'width:25%;text-align:right;')}
-  </tr>`);
-  const bizRows = padR(d.no_biz?[]:biz, 3, b => `<tr style="height:14pt;">
-    ${C(b.entity_name,'width:27%;')}${C(b.biz_address,'width:26%;')}${C(b.nature,'width:28%;')}${C(fmtD(b.date_acquired),'width:19%;text-align:center;')}
-  </tr>`);
-  const relRows = padR(d.no_rel?[]:rel, 5, r => `<tr style="height:14pt;">
-    ${C(r.name,'width:24%;')}${C(r.relationship,'width:16%;')}${C(r.position,'width:24%;')}${C(r.agency_address,'width:36%;')}
-  </tr>`);
-  const childRows = padR(ch, 3, c => `<tr style="height:16pt;">
-    <td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:7pt;width:76%;">${v(c.name)}&nbsp;</td>
-    <td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:7pt;text-align:center;width:24%;">${v(c.age)}&nbsp;</td>
-  </tr>`);
-
-  const sharedCss = `
-    *{box-sizing:border-box;margin:0;padding:0;}
-    body{font-family:'Arial Narrow',Arial,sans-serif;font-size:7pt;color:#000;background:#fff;}
-    @page{size:8.5in 13in;margin:12mm 14mm 10mm 14mm;}
-    @media print{body{margin:0;} .no-print{display:none;}}
-    table{border-collapse:collapse;width:100%;}
-    .section-title{font-size:8pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;letter-spacing:.03em;}
-    .page-footer{text-align:center;font-size:7.5pt;font-style:italic;margin-top:6pt;}
-    .ref{text-align:right;font-size:6pt;margin-bottom:4pt;line-height:1.6;}
-    .main-title{text-align:center;font-size:10pt;font-weight:700;text-transform:uppercase;letter-spacing:.04em;}
-    .as-of-line{text-align:center;font-size:7pt;margin-top:2pt;}
-    .italic-note{text-align:center;font-size:6pt;font-style:italic;margin:3pt 0 6pt;line-height:1.5;}
-    .double-rule{border-top:2pt double #000;border-bottom:0.5pt solid #000;height:3pt;margin-bottom:6pt;}
-    .assets-title{font-size:8pt;font-weight:700;text-align:center;text-decoration:underline;text-transform:uppercase;margin-bottom:2pt;}
-    .section-num{font-size:7pt;font-weight:700;margin-bottom:2pt;}
-    .section-sub{font-size:7pt;font-weight:700;margin:4pt 0 2pt;}
-    .col-hd{border:0.5pt solid #000;padding:2pt 3pt;font-size:6pt;font-weight:700;text-align:center;vertical-align:middle;background:#c8c8c8;}
-    .data-row td{border:0.5pt solid #000;padding:1.5pt 3pt;font-size:6.5pt;vertical-align:middle;}
-    .subtotal-row td,.total-row td{border:none;padding:2pt 0;font-size:7pt;font-weight:700;text-align:right;}
-    .footer-area{display:flex;justify-content:space-between;align-items:flex-end;margin-top:12pt;}
-    .page-num{font-size:7.5pt;font-style:italic;}
-    .sig-line{font-size:7pt;font-style:italic;border-top:0.5pt solid #000;padding-top:2pt;min-width:140pt;text-align:center;}
-    .name-row td{border-bottom:0.5pt solid #000;padding:1.5pt 2pt;height:14pt;font-size:7pt;}
-    .name-lbl{font-size:5.5pt;padding-top:1pt;text-align:center;}
-  `;
-
-  const buildAnnexSection = (title, refText, noteHtml, nameHtml, position, agency, real, pers, liab, bizItems, realSubtotalValue, personalSubtotalValue, totalAssetsValue, totalLiabilitiesValue) => {
-    const annexRealRows = real.map(r => `<tr class="data-row">
-      <td style="width:15%;">${v(r.description)}&nbsp;</td>
-      <td style="width:12%;">${v(r.kind)}&nbsp;</td>
-      <td style="width:14%;">${v(r.location)}&nbsp;</td>
-      <td style="width:9%;text-align:right;">${fmtM(r.assessed_value)}&nbsp;</td>
-      <td style="width:10%;text-align:right;">${fmtM(r.market_value)}&nbsp;</td>
-      <td style="width:8%;text-align:center;">${v(r.acq_year)}&nbsp;</td>
-      <td style="width:9%;">${v(r.acq_mode)}&nbsp;</td>
-      <td style="width:9%;text-align:right;">${fmtM(r.acq_cost)}&nbsp;</td>
-    </tr>`).join('');
-    const annexPersRows = pers.map(r => `<tr class="data-row">
-      <td style="width:62%;">${v(r.description)}&nbsp;</td>
-      <td style="width:18%;text-align:center;">${v(r.acq_year)}&nbsp;</td>
-      <td style="width:20%;text-align:right;">${fmtM(r.acq_cost)}&nbsp;</td>
-    </tr>`).join('');
-    const annexLiabRows = liab.map(r => `<tr class="data-row">
-      <td style="width:30%;">${v(r.nature)}&nbsp;</td>
-      <td style="width:43%;">${v(r.creditor)}&nbsp;</td>
-      <td style="width:27%;text-align:right;">${fmtM(r.balance)}&nbsp;</td>
-    </tr>`).join('');
-    const annexBizRows = bizItems.map(r => `<tr class="data-row">
-      <td style="width:27%;">${v(r.entity_name)}&nbsp;</td>
-      <td style="width:23%;">${v(r.biz_address)}&nbsp;</td>
-      <td style="width:29%;">${v(r.nature)}&nbsp;</td>
-      <td style="width:21%;text-align:center;">${fmtD(r.date_acquired)}&nbsp;</td>
-    </tr>`).join('');
-
-    return `
-<div style="page-break-before:always;"></div>
+  return `
+${standalone ? '' : '<div style="page-break-before:always;"></div>'}
 <div class="ref">${refText}</div>
 <div class="main-title">${title}</div>
 <div class="as-of-line">As of <span style="display:inline-block;border-bottom:0.5pt solid #000;min-width:160pt;">&nbsp;</span></div>
@@ -1380,21 +1327,84 @@ function buildSALNPrintHTML(d, emp, openPrint) {
   <div class="page-num"><em>Page ___ of ___</em></div>
   <div class="sig-line">Signature/Initial of Declarant</div>
 </div>`;
-  };
+};
 
-  const buildNameTable = (lastName, firstName, middleInitial) => `
-    <table style="width:100%;border-collapse:collapse;">
-      <tr class="name-row">
-        <td style="width:40%;">${v(lastName)}&nbsp;</td>
-        <td style="border-left:none;width:40%;">${v(firstName)}&nbsp;</td>
-        <td style="border-left:none;width:20%;">${v(middleInitial)}&nbsp;</td>
-      </tr>
-      <tr>
-        <td class="name-lbl" style="border:none;">(Family Name)</td>
-        <td class="name-lbl" style="border:none;">(First Name)</td>
-        <td class="name-lbl" style="border:none;">(M.I.)</td>
-      </tr>
-    </table>`;
+const buildNameTable = (lastName, firstName, middleInitial) => `
+  <table style="width:100%;border-collapse:collapse;">
+    <tr class="name-row">
+      <td style="width:40%;">${v(lastName)}&nbsp;</td>
+      <td style="border-left:none;width:40%;">${v(firstName)}&nbsp;</td>
+      <td style="border-left:none;width:20%;">${v(middleInitial)}&nbsp;</td>
+    </tr>
+    <tr>
+      <td class="name-lbl" style="border:none;">(Family Name)</td>
+      <td class="name-lbl" style="border:none;">(First Name)</td>
+      <td class="name-lbl" style="border:none;">(M.I.)</td>
+    </tr>
+  </table>`;
+
+function buildSALNPrintHTML(d, emp, openPrint) {
+  const padR = (arr,min,fn) => { const n=Math.max(min,(arr||[]).length); let h=''; for(let i=0;i<n;i++) h+=fn((arr||[])[i]||{}); return h; };
+  const cb   = checked => (checked===true||checked==='1'||checked===1||checked==='Yes') ? '☑' : '☐';
+
+  const dec = sj(d.declarant_info)      || {};
+  const sp  = sj(d.spouse_info)         || {};
+  const ch  = sj(d.children_info)       || [];
+  const rp  = sj(d.real_properties)     || [];
+  const pp  = sj(d.personal_properties) || [];
+  const lb  = sj(d.liabilities)         || [];
+  const biz = sj(d.biz_interests)       || [];
+  const rel = sj(d.relatives_govt)      || [];
+  const as1Rp = sj(d.as1_real_properties)     || [];
+  const as1Pp = sj(d.as1_personal_properties) || [];
+  const as1Lb = sj(d.as1_liabilities)         || [];
+  const as1Biz= sj(d.as1_biz_interests)       || [];
+  const as2Nm = sj(d.as2_name_info)           || {};
+  const as2Rp = sj(d.as2_real_properties)     || [];
+  const as2Pp = sj(d.as2_personal_properties) || [];
+  const as2Lb = sj(d.as2_liabilities)         || [];
+  const as2Biz= sj(d.as2_biz_interests)       || [];
+
+  const derivedRealSubtotal = rp.reduce((sum, p) => sum + (nVal(p.market_value) || nVal(p.assessed_value)), 0);
+  const derivedPersonalSubtotal = pp.reduce((sum, p) => sum + nVal(p.acq_cost), 0);
+  const derivedTotalLiabilities = lb.reduce((sum, l) => sum + nVal(l.balance), 0);
+  const realSubtotal = (d.real_subtotal !== '' && d.real_subtotal !== null && d.real_subtotal !== undefined) ? nVal(d.real_subtotal) : derivedRealSubtotal;
+  const personalSubtotal = (d.personal_subtotal !== '' && d.personal_subtotal !== null && d.personal_subtotal !== undefined) ? nVal(d.personal_subtotal) : derivedPersonalSubtotal;
+  const totalAssets = (d.total_assets !== '' && d.total_assets !== null && d.total_assets !== undefined) ? nVal(d.total_assets) : (realSubtotal + personalSubtotal);
+  const totalLiabilities = (d.total_liabilities !== '' && d.total_liabilities !== null && d.total_liabilities !== undefined) ? nVal(d.total_liabilities) : derivedTotalLiabilities;
+  const netWorth = (d.net_worth !== '' && d.net_worth !== null && d.net_worth !== undefined) ? nVal(d.net_worth) : (totalAssets - totalLiabilities);
+
+  const isAssumption = d.filing_type==='Assumption';
+  const isAnnual     = d.filing_type==='Annual';
+  const isExit       = d.filing_type==='Exit';
+  const isJoint      = d.filing_mode==='Joint';
+  const isSeparate   = d.filing_mode==='Separate';
+  const isNA         = !isJoint && !isSeparate;
+
+  const C  = (txt,s) => `<td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:6.5pt;vertical-align:middle;${s||''}">${v(txt)}&nbsp;</td>`;
+  const H  = (txt,s) => `<td style="border:0.5pt solid #000;padding:2pt 3pt;font-size:6pt;font-weight:700;text-align:center;vertical-align:middle;${s||''}">${txt}</td>`;
+
+  const realRows = padR(rp, 4, p => `<tr style="height:18pt;">
+    ${C(p.description,'width:18%;font-size:6.5pt;')}${C(p.kind,'width:12%;')}${C(p.location,'width:16%;')}
+    ${C(fmtM(p.assessed_value),'width:10%;text-align:right;')}${C(fmtM(p.market_value),'width:10%;text-align:right;')}
+    ${C(p.acq_year,'width:8%;text-align:center;')}${C(p.acq_mode,'width:10%;')}${C(fmtM(p.acq_cost),'width:10%;text-align:right;')}
+  </tr>`);
+  const persRows = padR(pp, 6, p => `<tr style="height:16pt;">
+    ${C(p.description,'width:65%;')}${C(p.acq_year,'width:17%;text-align:center;')}${C(fmtM(p.acq_cost),'width:18%;text-align:right;')}
+  </tr>`);
+  const liabRows = padR(lb, 5, l => `<tr style="height:14pt;">
+    ${C(l.nature,'width:34%;')}${C(l.creditor,'width:41%;')}${C(fmtM(l.balance),'width:25%;text-align:right;')}
+  </tr>`);
+  const bizRows = padR(d.no_biz?[]:biz, 3, b => `<tr style="height:14pt;">
+    ${C(b.entity_name,'width:27%;')}${C(b.biz_address,'width:26%;')}${C(b.nature,'width:28%;')}${C(fmtD(b.date_acquired),'width:19%;text-align:center;')}
+  </tr>`);
+  const relRows = padR(d.no_rel?[]:rel, 5, r => `<tr style="height:14pt;">
+    ${C(r.name,'width:24%;')}${C(r.relationship,'width:16%;')}${C(r.position,'width:24%;')}${C(r.agency_address,'width:36%;')}
+  </tr>`);
+  const childRows = padR(ch, 3, c => `<tr style="height:16pt;">
+    <td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:7pt;width:76%;">${v(c.name)}&nbsp;</td>
+    <td style="border:0.5pt solid #000;padding:1.5pt 3pt;font-size:7pt;text-align:center;width:24%;">${v(c.age)}&nbsp;</td>
+  </tr>`);
 
   const annexBRealSubtotal = (d.as1_real_subtotal !== '' && d.as1_real_subtotal !== null && d.as1_real_subtotal !== undefined)
     ? nVal(d.as1_real_subtotal)
@@ -1781,12 +1791,14 @@ loadEmployees(1);
 // ════════════════════════════════════════════════════════
 
 function printPDS(d, empRow) {
-  const html = buildPDSPrintHTML(d, empRow);
-  const w = window.open('', '_blank', 'width=960,height=1100');
-  w.document.write(html);
-  w.document.close();
-  w.focus();
-  setTimeout(() => w.print(), 600);
+  withScannedSignature(empRow).then(function(emp) {
+    const html = buildPDSPrintHTML(d, emp);
+    const w = window.open('', '_blank', 'width=960,height=1100');
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 600);
+  });
 }
 
 </script>
